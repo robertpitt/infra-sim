@@ -3,6 +3,7 @@ import { memo } from "react"
 import { fmtPct, fmtRate, clamp } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
 import { run } from "../state/run.ts"
+import { openSettings } from "../state/ui.ts"
 import { Icon } from "../ui/Icon.tsx"
 import type { FlowEdge } from "./flow.ts"
 import { edgePath, midpoint } from "./geometry.ts"
@@ -54,8 +55,24 @@ export const EdgeView = memo(function EdgeView({ id, sourceX, sourceY, targetX, 
           </g>
         </g>
       )}
+      {selected && (
+        <g
+          transform={`translate(${mid.x}, ${mid.y + (connector === undefined ? 14 : 28)})`}
+          className="edge-gear"
+          onClick={(e) => {
+            e.stopPropagation()
+            openSettings()
+          }}
+        >
+          <title>Settings (or double-click the connection)</title>
+          <circle r="11" />
+          <g transform="translate(-7, -7)">
+            <Icon name="gear" size={14} />
+          </g>
+        </g>
+      )}
       {faults > 0 && (
-        <g transform={`translate(${mid.x}, ${mid.y + (connector === undefined ? 8 : 22)})`} className="edge-fault">
+        <g transform={`translate(${mid.x}, ${mid.y + (connector === undefined ? 8 : 22) + (selected ? 26 : 0)})`} className="edge-fault">
           <circle r="9" />
           <path d="M1.5 -6 L-4 1 H0 L-1.5 6 L4 -1 H0 Z" />
         </g>

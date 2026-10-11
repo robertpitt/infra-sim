@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schema/design.schema.json
 version: 1
 name: Retry storm
 description: Every layer retries, and the payment provider pushes back. Watch gateway timeouts, orphaned Lambda work and retries multiply the load.

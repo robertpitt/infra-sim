@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schema/design.schema.json
 version: 1
 name: Multi-region
 description: Users in the US and Europe each hit a regional stack, and both write to a ledger in us-east-1. Inject a regional outage on us-east-1, and see what cross-region calls cost.

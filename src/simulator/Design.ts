@@ -69,6 +69,8 @@ export const ControllerDoc = Schema.Struct({
 })
 
 export const Doc = Schema.Struct({
+  /** The JSON Schema the file follows (`DesignSchema.ts`), for editors. Ignored by everything else. */
+  $schema: Schema.optionalKey(Schema.String),
   version: Schema.Literal(1),
   name: Schema.optionalKey(Schema.String),
   /** What the design is for. The first paragraph is its short blurb; the rest is detail (assumptions, what is left out). */

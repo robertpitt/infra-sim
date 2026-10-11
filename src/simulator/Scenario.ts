@@ -43,6 +43,8 @@ export { type Aggregate, ASSERTION_SYNTAX, type Assertion, parseAssertion, parse
  * format version and the design it is for.
  */
 export const Scenario = Schema.Struct({
+  /** The JSON Schema the file follows, for editors. */
+  $schema: Schema.optionalKey(Schema.String),
   version: Schema.Literal(1),
   /** A path to a design file (resolved by whoever loads the scenario), or the design itself. */
   design: Schema.optionalKey(Schema.Union([Schema.String, Design.Doc])),

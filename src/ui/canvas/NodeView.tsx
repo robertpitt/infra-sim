@@ -5,6 +5,7 @@ import { fmtCount, fmtMs, fmtPct, fmtRate } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
 import { doc } from "../state/document.ts"
 import { run, smoothed } from "../state/run.ts"
+import { openSettings } from "../state/ui.ts"
 import { Icon } from "../ui/Icon.tsx"
 import type { ComponentNode } from "./flow.ts"
 import { HEAD_H, NODE_W, PORT_H, STATS_H, nodeHeight } from "./geometry.ts"
@@ -87,6 +88,7 @@ export const NodeView = memo(function NodeView({ id, data, selected }: NodeProps
             <Icon name="warn" size={12} />
           </span>
         )}
+        {selected && <Gear />}
       </div>
 
       <Figures id={id} manifest={manifest} />
@@ -119,6 +121,20 @@ export const NodeView = memo(function NodeView({ id, data, selected }: NodeProps
     </div>
   )
 })
+
+/** The way into a selected thing's settings (a double-click works too). Not a drag handle. */
+export const Gear = () => (
+  <button
+    className="node-gear nodrag nopan"
+    title="Settings (or double-click)"
+    onClick={(e) => {
+      e.stopPropagation()
+      openSettings()
+    }}
+  >
+    <Icon name="gear" size={14} />
+  </button>
+)
 
 /** The live numbers on a card: rate, errors, p95, and up to three of the component's own highlights. */
 function Figures({ id, manifest }: { id: string; manifest: ComponentManifest | undefined }) {

@@ -33,6 +33,7 @@ Every push to `main` runs the typecheck and tests, builds the app, and publishes
 YAML is the primary format; JSON works everywhere YAML does. **File ▸ Open** (⌘O) reads either, **File ▸ Save** (⌘S) writes YAML, and **Save as JSON** is there for tools that want it. The [`examples/`](examples) folder holds the designs that ship with the app, in the same format.
 
 ```yaml
+# yaml-language-server: $schema=https://robertpitt.github.io/infra-sim/schema/design.schema.json
 version: 1
 name: Order pipeline
 description: Clients call an API that runs a function.   # the first paragraph is the blurb
@@ -63,6 +64,10 @@ edges:
 ```
 
 Add a file to `examples/` (a numeric prefix sets the order) and it appears in the app. Settings are validated against each component's schema, with every problem reported by its location, e.g. `nodes.api.settings.apiType`.
+
+**Editor support.** Designs have a JSON Schema, generated from the components ([`schema/design.schema.json`](schema/design.schema.json), published at the URL in the first line above; scenario files have [`scenario.schema.json`](schema/scenario.schema.json)). That first line points the YAML language server at it, so VS Code (with the Red Hat YAML extension) completes component types and each component's own settings, shows their ranges, defaults and meaning on hover, and marks typos and out-of-range values as you type. Files the app and the CLI write carry the line; `$schema` does the same in JSON. `npm run schema` regenerates the files after a component changes (a test fails until you do), and `infra-sim schema` prints them.
+
+In the app, the canvas has two tabs at its top left: **Visual**, the diagram, and **Editor**, the design as YAML in an editor driven by the same schema (plus the simulator's own checks, such as an edge to a node that doesn't exist). Edits are a draft until ⌘S or going back to Visual applies them, as one undoable change. Select a node or connection and a gear appears on it: it (or a double-click) opens its settings in a dialog over the canvas, so the sidebar stays the component picker.
 
 ## Importing existing infrastructure
 

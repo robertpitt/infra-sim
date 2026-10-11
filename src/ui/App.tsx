@@ -1,17 +1,22 @@
-import { useEffect, useSyncExternalStore } from "react"
+import { lazy, Suspense, useEffect, useSyncExternalStore } from "react"
 import { Canvas } from "./canvas/Canvas.tsx"
 import { useStore } from "./lib/store.ts"
 import { doc, redo, removeSelection, select, undo } from "./state/document.ts"
 import { client } from "./state/engine.ts"
 import { fitView, openFileDialog, saveDesign } from "./state/files.ts"
 import { run } from "./state/run.ts"
-import { setPanel, ui } from "./state/ui.ts"
+import { closeSettings, setPanel, ui } from "./state/ui.ts"
 import { startSync } from "./state/sync.ts"
 import { Dock } from "./ui/Dock.tsx"
 import { ImportReportDialog } from "./ui/ImportReportDialog.tsx"
 import { Icon } from "./ui/Icon.tsx"
 import { Sidebar } from "./ui/Sidebar.tsx"
 import { Toolbar } from "./ui/Toolbar.tsx"
+import { SettingsDialog } from "./ui/SettingsDialog.tsx"
+import { ViewTabs } from "./ui/ViewTabs.tsx"
+
+// The YAML editor (Monaco and its language server) loads the first time its tab is opened.
+const YamlEditor = lazy(() => import("./editor/YamlEditor.tsx"))
 import * as viewport from "./canvas/viewport.ts"
 
 const typing = (target: EventTarget | null): boolean => {
@@ -70,11 +75,6 @@ const useNarrow = (): boolean =>
 export function App() {
   const narrow = useNarrow()
   const sidebar = useStore(ui, (s) => s.sidebar)
-  const selected = useStore(doc, (s) => (s.selection === undefined ? "" : `${s.selection.kind}:${s.selection.id}`))
-  // On narrow windows the sidebar is a drawer: selecting something brings up its settings.
-  useEffect(() => {
-    if (narrow && selected !== "") setPanel("sidebar", true)
-  }, [narrow, selected])
 
   useEffect(() => {
     const stop = startSync()
@@ -124,7 +124,8 @@ export function App() {
           }
           return
         case "Escape":
-          return select(undefined)
+          // First the settings dialog, then the selection.
+          return ui.get().settings ? closeSettings() : select(undefined)
         case "f":
         case "F":
           return fitView()
@@ -140,6 +141,7 @@ export function App() {
   }, [])
 
   const phase = useStore(run, (s) => s.status?.phase)
+  const view = useStore(ui, (s) => s.view)
   const drawerOpen = narrow && sidebar
 
   return (
@@ -152,8 +154,16 @@ export function App() {
       <Toolbar />
       {drawerOpen && <div className="scrim" onClick={() => setPanel("sidebar", false)} />}
       <main className="stage">
-        <div className="stage-canvas">
-          <Canvas />
+        <div className="stage-canvas" data-view={view}>
+          {view === "visual" ? (
+            <Canvas />
+          ) : (
+            <Suspense fallback={<div className="editor-loading">Loading the editor…</div>}>
+              <YamlEditor />
+            </Suspense>
+          )}
+          <ViewTabs />
+          {view === "visual" && <SettingsDialog />}
           <Banner />
         </div>
         <Dock />

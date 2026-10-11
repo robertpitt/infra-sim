@@ -33,7 +33,8 @@ infra-sim --completions zsh         # a shell completion script: bash, zsh, fish
 | `convert <file>` | Design YAML ⇄ JSON. |
 | `components` | List the components a design can use. |
 | `describe <type>` | One component's settings (default, range, hard limit or adjustable quota), ports, service limits; or one connector's. |
-| `examples` | The bundled example designs. `examples show <id>` prints one; `examples path <id>` says where it lives. |
+| `examples` | The bundled example designs and their scenarios. `examples show <id>` prints one; `examples path <id>` says where it lives. |
+| `schema [design\|scenario]` | The JSON Schema of a design file (or a scenario file), for editors and agents. |
 | `docs [topic]` | This guide (`cli`), the assertion syntax (`assertions`), the faults (`faults`). |
 
 `<file>` is a path, or `@<id>` for a bundled example (`infra-sim run @poshub`). It may be a **design**, a **scenario**, or a
@@ -65,6 +66,17 @@ infra-sim describe aws.lambda                # every setting: default, range, ha
 infra-sim describe aws.sqs --json            # the same as data
 infra-sim describe aws.sqs.event-source-mapping   # a connector: what sits on an edge, and its settings
 ```
+
+Or let your editor tell you as you type: a design's first line points the YAML language server at the design's JSON Schema,
+
+```yaml
+# yaml-language-server: $schema=https://robertpitt.github.io/infra-sim/schema/design.schema.json
+```
+
+and VS Code (Red Hat YAML extension) then completes each component's settings and checks their ranges. `infra-sim schema`
+prints the schema (`infra-sim schema scenario` for scenario files); `import` and `convert` write the line for you (in JSON,
+`$schema`). The schema is generated from the components, so it never disagrees with `describe` or `check`; `check` still
+catches what a schema can't, such as an edge to a node that doesn't exist.
 
 `describe` shows which limits are **hard** (AWS enforces them: the range is the limit) and which are adjustable **quotas**
 (the default is AWS's number; yours may differ). Durations are written as `"30 seconds"` or a number of milliseconds.

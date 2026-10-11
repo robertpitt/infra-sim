@@ -17,6 +17,7 @@ import { useStore } from "../lib/store.ts"
 import { addNode, beginMove, connect, doc, select, settleNode } from "../state/document.ts"
 import { catalog, connectorOf } from "../state/engine.ts"
 import { run } from "../state/run.ts"
+import { openSettings } from "../state/ui.ts"
 import { BoxGrips } from "./BoxGrips.tsx"
 import { Arrowheads, EdgeView } from "./EdgeLayer.tsx"
 import { edgesOf, type FlowEdge, type FlowNode, type Level, type Measured, memo, nodesOf } from "./flow.ts"
@@ -215,6 +216,15 @@ export function Canvas() {
         onNodeDragStop={onNodeDragStop}
         onNodeClick={(_, node) => select({ kind: "node", id: node.id })}
         onEdgeClick={(_, edge) => select({ kind: "edge", id: edge.id })}
+        // A double-click opens the settings, as the gear on a selected node or connection does.
+        onNodeDoubleClick={(_, node) => {
+          select({ kind: "node", id: node.id })
+          openSettings()
+        }}
+        onEdgeDoubleClick={(_, edge) => {
+          select({ kind: "edge", id: edge.id })
+          openSettings()
+        }}
         onPaneClick={() => select(undefined)}
         onConnectStart={onConnectStart}
         onConnectEnd={onConnectEnd}

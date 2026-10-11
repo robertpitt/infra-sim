@@ -9,6 +9,10 @@ export interface UiState {
   readonly dockCollapsed: boolean
   /** What the dock under the canvas shows. */
   readonly dockTab: DockTab
+  /** The design as a canvas, or as YAML in an editor. */
+  readonly view: "visual" | "editor"
+  /** The settings dialog of what is selected. */
+  readonly settings: boolean
 }
 
 // The dock starts folded away so the canvas gets the room; once someone opens or closes it, or picks a tab, that sticks.
@@ -26,7 +30,9 @@ const savedTab = read(TAB_KEY)
 export const ui = createStore<UiState>({
   sidebar: window.innerWidth >= 1000,
   dockCollapsed: read(DOCK_KEY) !== "open",
-  dockTab: savedTab === "alerts" || savedTab === "scenario" ? savedTab : "charts"
+  dockTab: savedTab === "alerts" || savedTab === "scenario" ? savedTab : "charts",
+  view: "visual",
+  settings: false
 })
 
 ui.subscribe(() => {
@@ -38,9 +44,12 @@ ui.subscribe(() => {
   }
 })
 
-type Panel = "sidebar" | "dockCollapsed"
+type Panel = "sidebar" | "dockCollapsed" | "settings"
 export const togglePanel = (key: Panel): void => ui.set((s) => ({ ...s, [key]: !s[key] }))
 export const setPanel = (key: Panel, value: boolean): void => ui.set((s) => (s[key] === value ? s : { ...s, [key]: value }))
+
+export const openSettings = (): void => setPanel("settings", true)
+export const closeSettings = (): void => setPanel("settings", false)
 
 /** Show a tab of the dock, opening the dock if it is folded away. */
 export const setDockTab = (tab: DockTab): void =>

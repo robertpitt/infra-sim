@@ -1,0 +1,324 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://robertpitt.github.io/infra-sim/schema/scenario.schema.json",
+  "title": "infra-sim scenario",
+  "description": "A scenario file: what happens to a design, and what must hold. (A design can also carry scenarios under scenarios.)",
+  "type": "object",
+  "required": [
+    "version"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "The schema this file follows."
+    },
+    "version": {
+      "const": 1,
+      "description": "The format version."
+    },
+    "design": {
+      "description": "The design it is for: a path relative to this file (a design, or a template an importer reads), or the design itself.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "design.schema.json"
+        }
+      ]
+    },
+    "name": {
+      "type": "string",
+      "description": "What the scenario is called."
+    },
+    "description": {
+      "type": "string",
+      "description": "What it shows. The first paragraph is its short blurb."
+    },
+    "seed": {
+      "type": "integer",
+      "description": "Random seed for the run: the same design, scenario and seed always play out the same."
+    },
+    "duration": {
+      "description": "How long to run. Required to run it.",
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|millis|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\\s*)+$|^\\d+(\\.\\d+)?$"
+        }
+      ]
+    },
+    "warmup": {
+      "description": "Time to let the system settle before measuring: checks and summaries start after it.",
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|millis|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\\s*)+$|^\\d+(\\.\\d+)?$"
+        }
+      ]
+    },
+    "traffic": {
+      "type": "object",
+      "description": "Change every client's traffic.",
+      "properties": {
+        "scale": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Multiply every client's request rate: 3 is three times the traffic."
+        }
+      },
+      "required": [
+        "scale"
+      ],
+      "additionalProperties": false
+    },
+    "overrides": {
+      "type": "object",
+      "description": "Settings applied at the start, merged over the design's own.",
+      "properties": {
+        "nodes": {
+          "type": "object",
+          "description": "By node id.",
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "edges": {
+          "type": "object",
+          "description": "By edge id.",
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "accounts": {
+          "type": "object",
+          "description": "By placement, such as aws:us-east-1.",
+          "additionalProperties": {
+            "type": "object"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "timeline": {
+      "type": "array",
+      "description": "What happens, and when. Each event does one thing; an event with only a note annotates the timeline.",
+      "items": {
+        "type": "object",
+        "required": [
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "description": "When it happens, from the start of the run.",
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "string",
+                "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|millis|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\\s*)+$|^\\d+(\\.\\d+)?$"
+              }
+            ]
+          },
+          "note": {
+            "type": "string",
+            "description": "Says what this event is, in the timeline."
+          },
+          "inject": {
+            "type": "object",
+            "description": "Break something.",
+            "required": [
+              "target",
+              "fault"
+            ],
+            "properties": {
+              "target": {
+                "type": "string",
+                "description": "What breaks: node:<id>, edge:<id> or region:<placement> (region:aws:us-east-1)."
+              },
+              "fault": {
+                "description": "The fault: Outage (Rejects every call at once, like a connection refused or a stopped service. On a region, the whole region is down.) Errors (A fraction of calls fail with a server error after being processed.) Slow (Adds fixed latency to every call.) Blackhole (Calls vanish without a reply; callers wait out their full timeout.) Loss (A fraction of calls vanish without a reply.) Write it as Outage, Slow(250ms), Errors(20%), Loss(10%), or as an object { type: Slow, extra: 250ms }.",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^\\s*(Outage|Errors|Slow|Blackhole|Loss)\\s*(\\(.*\\))?\\s*$"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "type"
+                    ],
+                    "properties": {
+                      "type": {
+                        "enum": [
+                          "Outage",
+                          "Errors",
+                          "Slow",
+                          "Blackhole",
+                          "Loss"
+                        ]
+                      },
+                      "extra": {
+                        "description": "A time: a number of seconds, or text such as 90s, 2m, 1h30m, 250ms or \"2 minutes\".",
+                        "anyOf": [
+                          {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "string",
+                            "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|millis|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\\s*)+$|^\\d+(\\.\\d+)?$"
+                          }
+                        ]
+                      },
+                      "rate": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "string"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              },
+              "for": {
+                "description": "How long it lasts. Without it, the fault lasts until cleared.",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|millis|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\\s*)+$|^\\d+(\\.\\d+)?$"
+                  }
+                ]
+              },
+              "id": {
+                "type": "string",
+                "description": "A name to clear it by later."
+              }
+            },
+            "additionalProperties": false
+          },
+          "clear": {
+            "type": "string",
+            "description": "Lift a fault by the id it was injected with, or all of them (all)."
+          },
+          "set": {
+            "type": "object",
+            "description": "Change a node's or an edge's settings while it runs.",
+            "required": [
+              "settings"
+            ],
+            "properties": {
+              "node": {
+                "type": "string",
+                "description": "A node id."
+              },
+              "edge": {
+                "type": "string",
+                "description": "An edge id."
+              },
+              "settings": {
+                "type": "object",
+                "description": "Settings, merged over what it already has."
+              }
+            },
+            "additionalProperties": false
+          },
+          "account": {
+            "type": "object",
+            "description": "Change the account quotas of a placement while it runs.",
+            "required": [
+              "placement",
+              "settings"
+            ],
+            "properties": {
+              "placement": {
+                "type": "string",
+                "description": "Such as aws:us-east-1."
+              },
+              "settings": {
+                "type": "object",
+                "description": "Settings, merged over what it already has."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "assert": {
+      "type": "array",
+      "description": "What must hold. A run passes when every check does.",
+      "items": {
+        "anyOf": [
+          {
+            "type": "string",
+            "description": "A check that must hold over the run (after the warm-up unless a window is given), in the check language:\n\n<subject>.<metric>[:<aggregate>] <op> <value> [@ <from>..<to>]\n\nsubject   a node id; edge:<edge id>; or system (every client together)\nmetric    errorRatio | successRatio | throughput\n          rate.<counter>          per-second rate of a counter: rate.ok, rate.fail, rate.fail.Throttled, rate.in, rate.sent\n          total.<counter>         how many events in the window\n          gauge.<name>            a gauge: gauge.depth, gauge.concurrent, gauge.inflight, gauge.cacheHitRate\n          latency.<stat>          p50 | p95 | p99 | mean | max, of the 'latency' distribution (other distributions: dist.<name>.<stat>)\naggregate how to combine the window's frames: mean (default) | max | min | last | sum\nop        < <= > >= == !=\nvalue     a number, with optional unit: 500ms, 2s, 1.5%, 10/s\nwindow    @ 2m..3m measures only that stretch (default: after the warm-up, to the end of the run)\n\nexamples  api.errorRatio < 1%\n          system.latency.p99 < 800ms\n          orders-queue.gauge.depth:max < 5000\n          fn.rate.fail.Throttled == 0\n          edge:web.out->api.rate.fail < 5/s @ 4m..6m"
+          },
+          {
+            "type": "object",
+            "required": [
+              "check"
+            ],
+            "properties": {
+              "check": {
+                "type": "string",
+                "description": "A check that must hold over the run (after the warm-up unless a window is given), in the check language:\n\n<subject>.<metric>[:<aggregate>] <op> <value> [@ <from>..<to>]\n\nsubject   a node id; edge:<edge id>; or system (every client together)\nmetric    errorRatio | successRatio | throughput\n          rate.<counter>          per-second rate of a counter: rate.ok, rate.fail, rate.fail.Throttled, rate.in, rate.sent\n          total.<counter>         how many events in the window\n          gauge.<name>            a gauge: gauge.depth, gauge.concurrent, gauge.inflight, gauge.cacheHitRate\n          latency.<stat>          p50 | p95 | p99 | mean | max, of the 'latency' distribution (other distributions: dist.<name>.<stat>)\naggregate how to combine the window's frames: mean (default) | max | min | last | sum\nop        < <= > >= == !=\nvalue     a number, with optional unit: 500ms, 2s, 1.5%, 10/s\nwindow    @ 2m..3m measures only that stretch (default: after the warm-up, to the end of the run)\n\nexamples  api.errorRatio < 1%\n          system.latency.p99 < 800ms\n          orders-queue.gauge.depth:max < 5000\n          fn.rate.fail.Throttled == 0\n          edge:web.out->api.rate.fail < 5/s @ 4m..6m"
+              },
+              "name": {
+                "type": "string",
+                "description": "Says what the check means."
+              },
+              "from": {
+                "description": "Measure only from here (default: the end of the warm-up).",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|millis|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\\s*)+$|^\\d+(\\.\\d+)?$"
+                  }
+                ]
+              },
+              "to": {
+                "description": "... to here (default: the end of the run).",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|millis|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)\\s*)+$|^\\d+(\\.\\d+)?$"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,5 +1,5 @@
 import { parseDesign } from "#examples"
-import { Design, detectImporter, type Importer, type ImportReport, Layout, Topology } from "#simulator"
+import { Design, DesignSchema, detectImporter, type Importer, type ImportReport, Layout, Topology } from "#simulator"
 import YAML from "yaml"
 import type { Doc } from "./types.ts"
 import type { Example } from "#examples"
@@ -48,7 +48,8 @@ export type Format = "yaml" | "json"
  */
 export const saveDesign = (format: Format = "yaml"): void => {
   const design = doc.get().design
-  const text = format === "yaml" ? YAML.stringify(design, { lineWidth: 0 }) : JSON.stringify(design, null, 2)
+  // Saved files point editors at the design schema: completion and checks in VS Code, as in the app's editor.
+  const text = DesignSchema.fileText(design, format, (value) => YAML.stringify(value, { lineWidth: 0 }))
   const blob = new Blob([text], { type: format === "yaml" ? "application/yaml" : "application/json" })
   const url = URL.createObjectURL(blob)
   const a = document.createElement("a")

@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schema/design.schema.json
 version: 1
 name: Fan-out
 description: An async Lambda publishes to an SNS topic that fans out to a queue-backed emailer (calling an external provider), an audit table and analytics.

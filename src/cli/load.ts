@@ -1,6 +1,6 @@
 import path from "node:path"
 import { Data, Schema } from "effect"
-import { Design, detectImporter, ImportError, type Importer, type ImportReport, Scenario } from "#simulator"
+import { Design, DesignSchema, detectImporter, ImportError, type Importer, type ImportReport, Scenario } from "#simulator"
 import { registry } from "#simulator/components"
 import { parseTemplate } from "../simulator/importers/Intrinsics.ts"
 import YAML from "yaml"
@@ -119,4 +119,4 @@ const decodeSync = (value: unknown): Scenario.Scenario | string => {
 
 /** A design as text, in the format the file name (or `format`) asks for. YAML unless it says JSON. */
 export const encodeDesign = (doc: Design.Doc, format: "yaml" | "json"): string =>
-  format === "json" ? `${JSON.stringify(doc, null, 2)}\n` : YAML.stringify(doc, { lineWidth: 0 })
+  DesignSchema.fileText(doc, format, (value) => YAML.stringify(value, { lineWidth: 0 }))

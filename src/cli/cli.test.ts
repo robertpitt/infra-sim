@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import YAML from "yaml"
 import { describe, expect, it } from "vitest"
+import { Scenario } from "#simulator"
 import { EXIT, main } from "./cli.ts"
 import { type IO, nodeIO } from "./io.ts"
 
@@ -96,7 +97,7 @@ describe("discovering what exists", () => {
   it("lists the examples, and prints one", async () => {
     const listed = json<Array<{ id: string }>>((await cli(["examples", "--json"])).out)
     expect(listed.map((e) => e.id)).toEqual(["orders", "retry-storm", "multi-region", "fan-out", "poshub", "cluster", "blank"])
-    expect((await cli(["examples", "show", "orders"])).out).toMatch(/^version: 1/)
+    expect((await cli(["examples", "show", "orders"])).out).toMatch(/^# yaml-language-server: \$schema=\.\.\/schema\/design\.schema\.json\nversion: 1/)
     expect((await cli(["examples", "path", "orders"])).out).toMatch(/01-orders\.yaml/)
   })
 
@@ -305,18 +306,35 @@ describe("import and convert", () => {
     const dir = scratch({ "d.yaml": DESIGN })
     expect((await cli(["convert", "d.yaml", "-o", "d.json"], dir)).code).toBe(EXIT.ok)
     const asJson = json(fs.readFileSync(path.join(dir, "d.json"), "utf8"))
-    expect(asJson).toEqual(YAML.parse(DESIGN))
-    expect((await cli(["convert", "d.json", "--format", "yaml"], dir)).out).toMatch(/^version: 1/)
+    // Files written point editors at the schema: JSON in `$schema`, YAML in its first line.
+    expect(asJson).toEqual({ $schema: "https://robertpitt.github.io/infra-sim/schema/design.schema.json", ...YAML.parse(DESIGN) })
+    expect((await cli(["convert", "d.json", "--format", "yaml"], dir)).out).toMatch(/^# yaml-language-server: \$schema=https:\S+design\.schema\.json\nversion: 1/)
     expect((await cli(["run", "d.json", "-d", "10s", "--json"], dir)).code).toBe(EXIT.ok)
   })
 })
 
+describe("schema", () => {
+  it("prints the JSON Schema of a design file, and of a scenario file", async () => {
+    const design = json((await cli(["schema"])).out)
+    expect(design).toMatchObject({ $id: expect.stringContaining("design.schema.json"), required: ["version", "nodes", "edges"] })
+    expect(design.definitions["aws.lambda.settings"].properties.memory).toMatchObject({ type: "integer", maximum: 10240 })
+    expect(json((await cli(["schema", "scenario"])).out).$id).toContain("scenario.schema.json")
+  })
+})
+
 describe("the examples' scenarios", () => {
-  // Every scenario an example design carries, as "example scenario".
+  // Every scenario an example carries that checks something and runs in test time, as "example scenario". Longer ones (a
+  // day of traffic) and ones that only watch are for exploring, not for the suite.
+  const LONGEST = 15 * 60_000
   const cases = fs
     .readdirSync("examples")
     .filter((f) => f.endsWith(".yaml"))
-    .flatMap((f) => Object.keys((YAML.parse(fs.readFileSync(`examples/${f}`, "utf8")) as { scenarios?: object }).scenarios ?? {}).map((id) => [f.replace(/^\d+-/, "").replace(/\.yaml$/, ""), id] as const))
+    .flatMap((f) => {
+      const scenarios = (YAML.parse(fs.readFileSync(`examples/${f}`, "utf8")) as { scenarios?: Record<string, Scenario.Spec> }).scenarios ?? {}
+      return Object.entries(scenarios)
+        .filter(([, s]) => (s.assert?.length ?? 0) > 0 && (Scenario.parseDuration(s.duration) ?? Infinity) <= LONGEST)
+        .map(([id]) => [f.replace(/^\d+-/, "").replace(/\.yaml$/, ""), id] as const)
+    })
 
   it("ships some", () => expect(cases.length).toBeGreaterThanOrEqual(2))
 

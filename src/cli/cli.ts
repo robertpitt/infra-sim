@@ -3,7 +3,7 @@ import { Cause, Console, Data, Effect, Option } from "effect"
 import { Argument, CliConfig, CliError, CliOutput, Command, Flag, GlobalFlag } from "effect/cli"
 import * as NodeServices from "@effect/platform-node/NodeServices"
 import YAML from "yaml"
-import { builtinLayer, Connector, Design, Diagnostics, Fault, importers, type Importer, Scenario } from "#simulator"
+import { builtinLayer, Connector, Design, DesignSchema, Diagnostics, Fault, importers, type Importer, Scenario } from "#simulator"
 import { registry } from "#simulator/components"
 import { exampleFiles, encodeDesign, load, type Loaded, resolveReference, stem, UsageError } from "./load.ts"
 import { makeStyle, renderComponent, renderConnector, renderController, renderDiagnostics, renderFrames, renderImportReport, renderResult, table } from "./format.ts"
@@ -533,6 +533,32 @@ const examples = Command.make(
   Command.withSubcommands([examplesShow, examplesPath])
 )
 
+// ---------------------------------------------------------------------------------------------------------
+// schema
+// ---------------------------------------------------------------------------------------------------------
+
+const schema = Command.make(
+  "schema",
+  {
+    which: Argument.Literals("which", ["design", "scenario"] as const).pipe(Argument.withDescription("design (default) or scenario: which file's schema"), Argument.optional)
+  },
+  Effect.fn("schema")(function*(o) {
+    const io = yield* Io
+    const which = Option.getOrElse(o.which, () => "design" as const)
+    io.stdout(`${JSON.stringify(which === "scenario" ? DesignSchema.scenarioSchema() : DesignSchema.designSchema(registry), null, 2)}\n`)
+  })
+).pipe(
+  Command.withShortDescription("Print the JSON Schema of a design (or scenario) file, for editors and agents"),
+  Command.withDescription(block(
+    "Print the JSON Schema of a design file (or a scenario file): every component's settings with their ranges, defaults",
+    `and meaning. Editors read it from a design's first line (${DesignSchema.yamlModeline()}).`
+  )),
+  Command.withExamples([
+    { command: "infra-sim schema > design.schema.json", description: "Save the design schema" },
+    { command: "infra-sim schema scenario", description: "The schema of a scenario file" }
+  ])
+)
+
 const TOPICS = ["cli", "assertions", "faults"] as const
 
 const docs = Command.make(
@@ -584,7 +610,7 @@ export const root = Command.make("infra-sim").pipe(
     { command: "infra-sim import template.yaml --region eu-west-1 -o design.yaml", description: "Turn a CloudFormation template into a design" },
     { command: "infra-sim run scenario.yaml --json", description: "Run a scenario, the result as data" }
   ]),
-  Command.withSubcommands([run, check, importCommand, convert, components, describe, examples, docs])
+  Command.withSubcommands([run, check, importCommand, convert, components, describe, examples, schema, docs])
 )
 
 // ---------------------------------------------------------------------------------------------------------

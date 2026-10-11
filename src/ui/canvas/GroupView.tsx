@@ -4,6 +4,7 @@ import { useStore } from "../lib/store.ts"
 import { run } from "../state/run.ts"
 import { Icon } from "../ui/Icon.tsx"
 import type { ContainerNode } from "./flow.ts"
+import { Gear } from "./NodeView.tsx"
 import { GROUP_HEAD_H } from "./groups.ts"
 
 /**
@@ -38,10 +39,11 @@ export const GroupView = memo(function GroupView({ id, data, selected }: NodePro
           </span>
         )}
         {level !== undefined && level !== "info" && (
-          <span className={`node-badge ${level}`} title="This region's quotas are exceeded: select it to see how">
+          <span className={`node-badge ${level}`} title="This region's quotas are exceeded: open its settings to see how">
             <Icon name="warn" size={12} />
           </span>
         )}
+        {selected && <Gear />}
       </div>
     </div>
   )

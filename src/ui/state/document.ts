@@ -257,6 +257,9 @@ export const setSeed = (seed: number): void => commit((d) => ({ ...d, seed }), "
 
 export const applyLayout = (layout: (design: Doc) => Doc): void => commit(layout)
 
+/** Replace the design's content with an edited version of it (the YAML editor), as one undoable edit. */
+export const applyDesign = (next: Doc): void => commit(() => next)
+
 // ---------------------------------------------------------------------------------------------------------
 // Scenarios travel with the design (its `scenarios` section): adding or removing one is an edit like any other.
 // ---------------------------------------------------------------------------------------------------------
