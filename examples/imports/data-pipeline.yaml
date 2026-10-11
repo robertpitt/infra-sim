@@ -1,0 +1,261 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  A serverless data pipeline. Readings arrive on a FIFO queue, are written to a DynamoDB table with indexes and a
+  stream, and the stream fans out to a projector function, an audit function and a notification topic.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+
+Resources:
+  # -- Ingest ----------------------------------------------------------------------------------------------
+  ReadingsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      FifoThroughputLimit: perMessageGroupId
+      DeduplicationScope: messageGroup
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReadingsDeadLetters.Arn
+        maxReceiveCount: 4
+
+  ReadingsDeadLetters:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: ingest.handler
+      Runtime: java21
+      MemorySize: 1024
+      Timeout: 20
+      SnapStart:
+        ApplyOn: PublishedVersions
+      Environment:
+        Variables:
+          TABLE: !Ref ReadingsTable
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref ReadingsTable
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        DestinationConfig:
+          OnSuccess:
+            Type: SQS
+            Destination: !GetAtt IngestAudit.Arn
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt IngestFailures.Arn
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ReadingsQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            ProvisionedPollerConfig:
+              MinimumPollers: 4
+              MaximumPollers: 20
+
+  IngestAudit:
+    Type: AWS::SQS::Queue
+
+  IngestFailures:
+    Type: AWS::SQS::Queue
+
+  # -- The table ---------------------------------------------------------------------------------------------
+  ReadingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      OnDemandThroughput:
+        MaxReadRequestUnits: 4000
+        MaxWriteRequestUnits: -1
+      WarmThroughput:
+        ReadUnitsPerSecond: 12000
+        WriteUnitsPerSecond: 8000
+      AttributeDefinitions:
+        - {AttributeName: sensor, AttributeType: S}
+        - {AttributeName: at, AttributeType: N}
+        - {AttributeName: site, AttributeType: S}
+      KeySchema:
+        - {AttributeName: sensor, KeyType: HASH}
+        - {AttributeName: at, KeyType: RANGE}
+      GlobalSecondaryIndexes:
+        - IndexName: by-site
+          KeySchema: [{AttributeName: site, KeyType: HASH}, {AttributeName: at, KeyType: RANGE}]
+          Projection: {ProjectionType: ALL}
+        - IndexName: by-time
+          KeySchema: [{AttributeName: at, KeyType: HASH}]
+          Projection: {ProjectionType: ALL}
+      LocalSecondaryIndexes:
+        - IndexName: by-site-local
+          KeySchema: [{AttributeName: sensor, KeyType: HASH}, {AttributeName: site, KeyType: RANGE}]
+          Projection: {ProjectionType: KEYS_ONLY}
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+      TableClass: STANDARD_INFREQUENT_ACCESS
+
+  # A second table in provisioned mode with keys-only indexes of different sizes.
+  RollupsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PROVISIONED
+      ProvisionedThroughput: {ReadCapacityUnits: 50, WriteCapacityUnits: 80}
+      AttributeDefinitions:
+        - {AttributeName: bucket, AttributeType: S}
+        - {AttributeName: kind, AttributeType: S}
+      KeySchema: [{AttributeName: bucket, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: by-kind
+          KeySchema: [{AttributeName: kind, KeyType: HASH}]
+          Projection: {ProjectionType: KEYS_ONLY}
+          ProvisionedThroughput: {ReadCapacityUnits: 20, WriteCapacityUnits: 30}
+        - IndexName: by-kind-wide
+          KeySchema: [{AttributeName: kind, KeyType: HASH}]
+          Projection: {ProjectionType: KEYS_ONLY}
+          ProvisionedThroughput: {ReadCapacityUnits: 40, WriteCapacityUnits: 60}
+
+  # -- Reading the stream --------------------------------------------------------------------------------------
+  ProjectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: projector.handler
+      Role: !GetAtt ProjectorRole.Arn
+      MemorySize: 512
+      Timeout: 30
+      Code: {ZipFile: "def handler(e, c): pass"}
+      Environment:
+        Variables:
+          ROLLUPS: !Ref RollupsTable
+
+  ProjectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}
+      Policies:
+        - PolicyName: rollups
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:UpdateItem]
+                Resource: !GetAtt RollupsTable.Arn
+
+  ProjectorMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ReadingsTable.StreamArn
+      FunctionName: !Ref ProjectorFunction
+      StartingPosition: TRIM_HORIZON
+      BatchSize: 200
+      MaximumBatchingWindowInSeconds: 5
+      ParallelizationFactor: 4
+      MaximumRecordAgeInSeconds: 3600
+      MaximumRetryAttempts: 5
+      BisectBatchOnFunctionError: true
+      FilterCriteria:
+        Filters: [{Pattern: '{"eventName": ["INSERT"]}'}]
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt ProjectionFailures.Arn
+
+  ProjectionFailures:
+    Type: AWS::SQS::Queue
+    Properties: {MessageRetentionPeriod: 604800}
+
+  AuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: audit.handler
+      Runtime: nodejs20.x
+      Timeout: 10
+      Environment:
+        Variables: {PARTNER_TOPIC: !Ref PartnerTopic}
+      Events:
+        Changes:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt ReadingsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 50
+            MaximumRetryAttempts: 2
+
+  # -- Notifying -----------------------------------------------------------------------------------------------
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      FifoTopic: true
+      FifoThroughputScope: MessageGroup
+      ContentBasedDeduplication: true
+      MaximumMessageSize: 524288
+
+  AlertsDeadLetters:
+    Type: AWS::SQS::Queue
+    Properties: {FifoQueue: true}
+
+  AlertsQueue:
+    Type: AWS::SQS::Queue
+    Properties: {FifoQueue: true}
+
+  AlertsToQueue:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AlertsQueue.Arn
+      RawMessageDelivery: true
+      FilterPolicy: {severity: [high]}
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AlertsDeadLetters.Arn
+
+  NotifyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: notify.handler
+      Role: !GetAtt NotifyRole.Arn
+      Code: {ZipFile: "exports.handler = async () => {}"}
+      Environment:
+        Variables: {TOPIC_ARN: !Ref AlertsTopic}
+
+  NotifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}
+
+  NotifyMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ReadingsTable.StreamArn
+      FunctionName: !Ref NotifyFunction
+      StartingPosition: LATEST
+
+  PartnerTopic:
+    Type: AWS::SNS::Topic
+
+  AlertsToPartner:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref PartnerTopic
+      Protocol: https
+      Endpoint: https://alerts.partner.example.com/hook
+      DeliveryPolicy:
+        healthyRetryPolicy:
+          numRetries: 9
+          minDelayTarget: 2
+          maxDelayTarget: 60
+          backoffFunction: exponential
+        throttlePolicy:
+          maxReceivesPerSecond: 5

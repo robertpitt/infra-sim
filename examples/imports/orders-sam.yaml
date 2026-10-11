@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Orders API. Accepts orders over HTTP, stores them, and processes them from a queue.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+  WorkerMemory:
+    Type: Number
+    Default: 1024
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+
+Resources:
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 200
+        WriteCapacityUnits: !If [IsProd, 400, 50]
+      AttributeDefinitions: [{AttributeName: id, AttributeType: S}]
+      KeySchema: [{AttributeName: id, KeyType: HASH}]
+
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDeadLetters.Arn
+        maxReceiveCount: 3
+
+  OrdersDeadLetters:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  PlaceOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: place.handler
+      Runtime: nodejs20.x
+      MemorySize: 512
+      Timeout: 10
+      Environment:
+        Variables:
+          TABLE: !Ref OrdersTable
+          QUEUE_URL: !Ref OrdersQueue
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OrdersQueue.QueueName
+      Events:
+        Create:
+          Type: Api
+          Properties: {Path: /orders, Method: post}
+
+  ProcessOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: process.handler
+      Runtime: nodejs20.x
+      MemorySize: !Ref WorkerMemory
+      Timeout: 60
+      ReservedConcurrentExecutions: 50
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref OrdersTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrdersQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            ScalingConfig: {MaximumConcurrency: 20}
+
+  NightlyReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: report.handler
+      Runtime: nodejs20.x
+      Timeout: 300
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref OrdersTable
+      Events:
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+
+  ProcessOrderLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: {RetentionInDays: 14}

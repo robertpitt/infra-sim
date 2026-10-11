@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  A private network. Functions run in private subnets, reach the internet through a NAT gateway and S3 through a gateway
+  endpoint, and a second small VPC holds a legacy function.
+
+Resources:
+  Network:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+
+  PublicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Network
+      CidrBlock: 10.20.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  PublicB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Network
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  PrivateA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Network
+      CidrBlock: 10.20.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  PrivateB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Network
+      CidrBlock: 10.20.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+
+  Attachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: {VpcId: !Ref Network, InternetGatewayId: !Ref Gateway}
+
+  Routes:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref Network}
+
+  NatAddress:
+    Type: AWS::EC2::EIP
+    Properties: {Domain: vpc}
+
+  NatAddress2:
+    Type: AWS::EC2::EIP
+    Properties: {Domain: vpc}
+
+  Nat:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicB
+      AllocationId: !GetAtt NatAddress.AllocationId
+      SecondaryAllocationIds: [!GetAtt NatAddress2.AllocationId]
+
+  PrivateNat:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PrivateA
+      ConnectivityType: private
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Network
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref Routes]
+
+  QueueEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Network
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sqs"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateA, !Ref PrivateB]
+
+  LoadBalancerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Network
+      ServiceName: com.amazonaws.vpce.eu-west-1.vpce-svc-0123456789abcdef0
+      VpcEndpointType: GatewayLoadBalancer
+      SubnetIds: [!Ref PrivateA]
+
+  FunctionSecurity:
+    Type: AWS::EC2::SecurityGroup
+    Properties: {GroupDescription: functions, VpcId: !Ref Network}
+
+  # -- What runs inside --------------------------------------------------------------------------------------
+  Worker:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: worker.handler
+      Role: !GetAtt WorkerRole.Arn
+      Timeout: 30
+      Code: {ZipFile: "exports.handler = async () => {}"}
+      VpcConfig:
+        SubnetIds: [!Ref PrivateA, !Ref PrivateB]
+        SecurityGroupIds: [!Ref FunctionSecurity]
+      Environment:
+        Variables: {BUCKET: !Ref Reports, QUEUE: !Ref Jobs}
+
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}
+
+  Jobs:
+    Type: AWS::SQS::Queue
+
+  JobsMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt Jobs.Arn
+      FunctionName: !Ref Worker
+      BatchSize: 5
+
+  Reports:
+    Type: AWS::S3::Bucket
+
+  Webhook:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: hook.handler
+      Role: !GetAtt WorkerRole.Arn
+      Code: {ZipFile: "exports.handler = async () => {}"}
+      Environment:
+        Variables: {QUEUE: !Ref Jobs}
+
+  HookSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 minute)
+      Targets: [{Arn: !GetAtt Webhook.Arn, Id: hook}]
+
+  # -- A second, smaller network ----------------------------------------------------------------------------------
+  Legacy:
+    Type: AWS::EC2::VPC
+    Properties: {CidrBlock: 172.16.0.0/20}
+
+  LegacySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Legacy
+      CidrBlock: 172.16.0.0/26
+      AvailabilityZone: eu-west-1a
+
+  LegacyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: legacy.handler
+      Role: !GetAtt WorkerRole.Arn
+      Code: {ZipFile: "def handler(e, c): pass"}
+      VpcConfig: {SubnetIds: [!Ref LegacySubnet], SecurityGroupIds: []}
+
+  LegacySchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(5 minutes)
+      Targets: [{Arn: !GetAtt LegacyFunction.Arn, Id: legacy}]
+
+  # -- Something that names a VPC this template doesn't have ------------------------------------------------------
+  Outsider:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: out.handler
+      Role: !GetAtt WorkerRole.Arn
+      Code: {ZipFile: "exports.handler = async () => {}"}
+      VpcConfig: {SubnetIds: [!ImportValue shared-subnet], SecurityGroupIds: []}
+  OutsiderSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 hour)
+      Targets: [{Arn: !GetAtt Outsider.Arn, Id: out}]
+
+  ElsewhereSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: vpc-0123456789abcdef0
+      CidrBlock: 10.99.0.0/24

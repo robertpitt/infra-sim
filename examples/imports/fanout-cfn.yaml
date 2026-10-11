@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Uploads and order events fan out to queues, functions and a partner.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: staging
+  PartnerUrl:
+    Type: String
+    Default: https://hooks.partner.example.com/events
+
+Mappings:
+  Sizes:
+    staging: {Memory: 256}
+    prod: {Memory: 1024}
+
+Resources:
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: ThumbnailPermission
+    Properties:
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ThumbnailFunction.Arn
+
+  ThumbnailPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ThumbnailFunction
+      Principal: s3.amazonaws.com
+
+  ThumbnailFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: thumb.handler
+      Role: !GetAtt ThumbnailRole.Arn
+      MemorySize: !FindInMap [Sizes, !Ref Environment, Memory]
+      Timeout: 120
+      Code: {ZipFile: "def handler(e, c): pass"}
+
+  ThumbnailRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}
+      Policies:
+        - PolicyName: images
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject]
+                Resource: !Sub "${UploadsBucket.Arn}/*"
+
+  OrderEvents:
+    Type: AWS::SNS::Topic
+
+  AuditQueue:
+    Type: AWS::SQS::Queue
+    Properties: {VisibilityTimeout: 60}
+
+  AuditSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEvents
+      Protocol: sqs
+      Endpoint: !GetAtt AuditQueue.Arn
+
+  PartnerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEvents
+      Protocol: https
+      Endpoint: !Ref PartnerUrl
+
+  AuditFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: audit.handler
+      Role: !GetAtt ThumbnailRole.Arn
+      MemorySize: 128
+      Timeout: 30
+      Code: {ZipFile: "exports.handler = async () => {}"}
+
+  AuditMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt AuditQueue.Arn
+      FunctionName: !Ref AuditFunction
+      BatchSize: 25
+      MaximumBatchingWindowInSeconds: 10
+
+  AuditAsync:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref AuditFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 1
+      MaximumEventAgeInSeconds: 3600
+
+  PublicApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties: {Name: public, ProtocolType: HTTP}
+
+  PublishFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: publish.handler
+      Role: !GetAtt ThumbnailRole.Arn
+      MemorySize: 512
+      Timeout: 15
+      Environment:
+        Variables: {TOPIC_ARN: !Ref OrderEvents}
+      Code: {ZipFile: "exports.handler = async () => {}"}
+
+  PublishIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref PublicApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt PublishFunction.Arn
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 10000
+
+  PublicStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref PublicApi
+      StageName: $default
+      DefaultRouteSettings: {ThrottlingRateLimit: 500, ThrottlingBurstLimit: 1000}
+
+  HourlyRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 hour)
+      Targets:
+        - Arn: !GetAtt PublishFunction.Arn
+          Id: hourly
+
+  SearchDomain:
+    Type: AWS::OpenSearchService::Domain
+    Properties: {DomainName: search}
+
+  ProdOnlyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProdOnly
+    Properties: {ComparisonOperator: GreaterThanThreshold, EvaluationPeriods: 1, MetricName: Errors, Namespace: AWS/Lambda, Period: 60, Threshold: 1}
+
+Conditions:
+  IsProdOnly: !Equals [!Ref Environment, prod]

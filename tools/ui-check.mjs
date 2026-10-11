@@ -38,7 +38,8 @@ await page.screenshot({ path: `${shots}/1-picker.png` })
 
 // search
 await page.locator(".search input").fill("dynamo")
-check("search filters tiles", (await count(".tile")) === 1)
+const matching = await count(".tile")
+check("search filters tiles", matching >= 1 && matching <= 2, `${matching} tiles (DynamoDB, and the VPC endpoint that names it)`)
 await page.locator(".search input").fill("")
 
 // 2. Selecting a node turns it into settings.

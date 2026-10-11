@@ -5,7 +5,8 @@ import { fmtClock, fmtRate } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
 import { applyLayout, doc, redo, undo } from "../state/document.ts"
 import { catalog, client, registry } from "../state/engine.ts"
-import { copyMermaid, exportDesign, fitView, importDesign, openDesign } from "../state/files.ts"
+import { importers } from "#simulator"
+import { copyMermaid, fitView, importFileDialog, openDesign, openFileDialog, saveDesign, say, toast } from "../state/files.ts"
 import { run } from "../state/run.ts"
 import { fitGroups } from "../canvas/groups.ts"
 import * as viewport from "../canvas/viewport.ts"
@@ -41,8 +42,7 @@ export function Toolbar() {
   const name = useStore(doc, (s) => s.design.name)
   const sidebar = useStore(ui, (s) => s.sidebar)
   const dock = useStore(ui, (s) => !s.dockCollapsed)
-  const fileRef = useRef<HTMLInputElement>(null)
-  const [message, setMessage] = useState<string | undefined>()
+  const message = useStore(toast, (t) => t)
 
   const phase = status?.phase ?? "empty"
   const running = phase === "running"
@@ -129,22 +129,29 @@ export function Toolbar() {
         <Menu label="File" icon="menu">
           {(close) => (
             <>
-              <button className="menu-item" onClick={() => { close(); exportDesign("yaml") }}>
-                <Icon name="download" size={14} /> Export design (YAML)
+              <button className="menu-item" onClick={() => { close(); void openFileDialog() }}>
+                <Icon name="upload" size={14} /> Open…<kbd className="menu-key">⌘O</kbd>
               </button>
-              <button className="menu-item" onClick={() => { close(); exportDesign("json") }}>
-                <Icon name="download" size={14} /> Export design (JSON)
+              <button className="menu-item" onClick={() => { close(); saveDesign("yaml") }}>
+                <Icon name="download" size={14} /> Save (YAML)<kbd className="menu-key">⌘S</kbd>
               </button>
-              <button className="menu-item" onClick={() => { close(); fileRef.current?.click() }}>
-                <Icon name="upload" size={14} /> Import design (YAML or JSON)
+              <button className="menu-item" onClick={() => { close(); saveDesign("json") }}>
+                <Icon name="download" size={14} /> Save as JSON
               </button>
+              <div className="menu-sep" />
+              <div className="menu-label">Import</div>
+              {importers.map((importer) => (
+                <button key={importer.id} className="menu-item" onClick={() => { close(); void importFileDialog(importer) }}>
+                  <Icon name="upload" size={14} /> {importer.title}…
+                </button>
+              ))}
+              <div className="menu-sep" />
               <button
                 className="menu-item"
                 onClick={async () => {
                   close()
                   await copyMermaid()
-                  setMessage("Mermaid diagram copied")
-                  setTimeout(() => setMessage(undefined), 2000)
+                  say("Mermaid diagram copied", 2000)
                 }}
               >
                 <Icon name="copy" size={14} /> Copy as Mermaid
@@ -161,19 +168,6 @@ export function Toolbar() {
             </>
           )}
         </Menu>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".yaml,.yml,.json,application/json,application/yaml"
-          hidden
-          onChange={async (e) => {
-            const file = e.target.files?.[0]
-            e.target.value = ""
-            if (file === undefined) return
-            const problem = await importDesign(file)
-            if (problem !== undefined) setMessage(`Import failed: ${problem}`)
-          }}
-        />
         <button className="btn icon" data-on={sidebar || undefined} title="Sidebar" onClick={() => togglePanel("sidebar")}>
           <Icon name="panelRight" size={15} />
         </button>

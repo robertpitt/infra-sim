@@ -43,6 +43,22 @@ const paths: Record<string, ReactNode> = {
       <path d="M4 7.5l8 4.5 8-4.5M12 12v9" />
     </>
   ),
+  cdn: (
+    <>
+      <circle cx="12" cy="12" r="3" />
+      <circle cx="5" cy="6" r="1.8" />
+      <circle cx="19" cy="6" r="1.8" />
+      <circle cx="5" cy="18" r="1.8" />
+      <circle cx="19" cy="18" r="1.8" />
+      <path d="M6.4 7.2l3.2 3M17.6 7.2l-3.2 3M6.4 16.8l3.2-3M17.6 16.8l-3.2-3" />
+    </>
+  ),
+  mail: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3.5 7l8.5 6 8.5-6" />
+    </>
+  ),
   bucket: (
     <>
       <path d="M4 7c0 1.4 3.6 2.5 8 2.5S20 8.4 20 7s-3.6-2.5-8-2.5S4 5.6 4 7z" />

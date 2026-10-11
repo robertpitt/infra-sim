@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Transactional email. An API accepts requests, a function sends them through SES, and SES reports what happened
+  to an SNS topic that a queue and a webhook listen to.
+
+Resources:
+  SendApi:
+    Type: AWS::Serverless::HttpApi
+
+  SendFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: send.handler
+      Runtime: nodejs20.x
+      Timeout: 15
+      Environment:
+        Variables:
+          CONFIGURATION_SET: !Ref TransactionalSet
+      Policies:
+        - SESCrudPolicy:
+            IdentityName: example.com
+      Events:
+        Send:
+          Type: HttpApi
+          Properties: {Path: /send, Method: post, ApiId: !Ref SendApi}
+
+  NewsletterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: news.handler
+      Role: !GetAtt NewsletterRole.Arn
+      Timeout: 60
+      Code: {ZipFile: "def handler(e, c): pass"}
+
+  NewsletterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}
+      Policies:
+        - PolicyName: mail
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ses:SendEmail, ses:SendRawEmail]
+                Resource: "*"
+
+  NewsletterSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 hour)
+      Targets: [{Arn: !GetAtt NewsletterFunction.Arn, Id: news}]
+
+  TransactionalSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: transactional
+      SuppressionOptions:
+        SuppressedReasons: [BOUNCE]
+      DeliveryOptions:
+        MaxDeliverySeconds: 600
+        TlsPolicy: REQUIRE
+      ReputationOptions: {ReputationMetricsEnabled: true}
+
+  EventsToSns:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Properties:
+      ConfigurationSetName: !Ref TransactionalSet
+      EventDestination:
+        Name: to-sns
+        Enabled: true
+        MatchingEventTypes: [BOUNCE, COMPLAINT, REJECT, DELIVERY_DELAY, OPEN, CLICK, RENDERING_FAILURE, SUBSCRIPTION]
+        SnsDestination: {TopicARN: !Ref MailEventsTopic}
+
+  EventsToFirehose:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Properties:
+      ConfigurationSetName: !Ref TransactionalSet
+      EventDestination:
+        Name: to-firehose
+        Enabled: true
+        MatchingEventTypes: [SEND, DELIVERY]
+        KinesisFirehoseDestination:
+          IAMRoleARN: arn:aws:iam::123456789012:role/mail
+          DeliveryStreamARN: arn:aws:firehose:eu-west-1:123456789012:deliverystream/mail
+
+  EventsDisabled:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Properties:
+      ConfigurationSetName: !Ref TransactionalSet
+      EventDestination:
+        Name: off
+        Enabled: false
+        MatchingEventTypes: [SEND]
+        SnsDestination: {TopicARN: !Ref MailEventsTopic}
+
+  MailEventsTopic:
+    Type: AWS::SNS::Topic
+
+  BounceQueue:
+    Type: AWS::SQS::Queue
+    Properties: {VisibilityTimeout: 30}
+
+  BounceSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref MailEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt BounceQueue.Arn
+      RawMessageDelivery: true
+
+  Sender:
+    Type: AWS::SES::EmailIdentity
+    Properties: {EmailIdentity: example.com}
+
+  WelcomeTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template: {TemplateName: welcome, SubjectPart: Hi, TextPart: Hello}
+
+  Subscribers:
+    Type: AWS::SES::ContactList
+    Properties: {ContactListName: subscribers}
+
+  DedicatedPool:
+    Type: AWS::SES::DedicatedIpPool
+    Properties: {PoolName: dedicated, ScalingMode: STANDARD}
+
+  InboundRules:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties: {RuleSetName: inbound}
+
+  InboundRule:
+    Type: AWS::SES::ReceiptRule
+    Properties:
+      RuleSetName: !Ref InboundRules
+      Rule: {Name: store, Enabled: true, Actions: []}
+
+  InboundFilter:
+    Type: AWS::SES::ReceiptFilter
+    Properties:
+      Filter: {Name: block, IpFilter: {Cidr: 10.0.0.0/8, Policy: Block}}

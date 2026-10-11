@@ -1,0 +1,324 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  A web front end. CloudFront serves static assets from S3 (failing over to an archive bucket) and an API from API
+  Gateway, which authorizes with a Lambda function, caches responses and meters clients with a usage plan.
+
+Resources:
+  # -- Storage ---------------------------------------------------------------------------------------------
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration: {Status: Enabled}
+      LifecycleConfiguration:
+        Rules: [{Id: expire, Status: Enabled, ExpirationInDays: 90}]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}}]
+      ReplicationConfiguration:
+        Role: !GetAtt ReplicationRole.Arn
+        Rules:
+          - Id: to-archive
+            Status: Enabled
+            Destination:
+              Bucket: !GetAtt ArchiveBucket.Arn
+              ReplicationTime: {Status: Enabled, Time: {Minutes: 15}}
+              Metrics: {Status: Enabled, EventThreshold: {Minutes: 15}}
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ThumbnailFunction.Arn
+            Filter:
+              S3Key:
+                Rules: [{Name: prefix, Value: images/}, {Name: suffix, Value: .png}]
+        TopicConfigurations:
+          - Event: s3:ObjectRemoved:*
+            Topic: !Ref RemovalsTopic
+          - Event: s3:ObjectRestore:Completed
+            Topic: !Ref RemovalsTopic
+
+  ArchiveBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration: {Status: Enabled}
+
+  HotBucket:
+    Type: AWS::S3Express::DirectoryBucket
+    Properties:
+      DataRedundancy: SingleAvailabilityZone
+      LocationName: euw1-az1
+
+  ReplicationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}
+
+  RemovalsTopic:
+    Type: AWS::SNS::Topic
+
+  ThumbnailFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: thumb.handler
+      Role: !GetAtt FunctionRole.Arn
+      MemorySize: 512
+      Timeout: 30
+      Code: {ZipFile: "def handler(e, c): pass"}
+      Environment:
+        Variables: {HOT: !Ref HotBucket}
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}
+
+  # -- The API ---------------------------------------------------------------------------------------------
+  ItemsApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: items
+      EndpointConfiguration: {Types: [REGIONAL]}
+
+  ItemsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties: {RestApiId: !Ref ItemsApi, ParentId: !GetAtt ItemsApi.RootResourceId, PathPart: items}
+
+  GetItems:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ItemsApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ItemsFunction.Arn}/invocations"
+        TimeoutInMillis: 10000
+
+  PostItems:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ItemsApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ItemsFunction.Arn}/invocations"
+
+  ItemsPreflight:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ItemsApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration: {Type: MOCK}
+
+  TokenAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      RestApiId: !Ref ItemsApi
+      Name: token
+      Type: TOKEN
+      IdentitySource: method.request.header.Authorization
+      AuthorizerResultTtlInSeconds: 120
+      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerFunction.Arn}/invocations"
+
+  ItemsStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref ItemsApi
+      DeploymentId: !Ref ItemsDeployment
+      StageName: prod
+      CacheClusterEnabled: true
+      CacheClusterSize: "1.6"
+      MethodSettings:
+        - HttpMethod: "*"
+          ResourcePath: "/*"
+          CachingEnabled: true
+          CacheTtlInSeconds: 60
+          ThrottlingRateLimit: 200
+          ThrottlingBurstLimit: 400
+
+  ItemsDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [GetItems, PostItems]
+    Properties: {RestApiId: !Ref ItemsApi}
+
+  ItemsPlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: partners
+      ApiStages: [{ApiId: !Ref ItemsApi, Stage: !Ref ItemsStage}]
+      Throttle: {RateLimit: 50, BurstLimit: 100}
+      Quota: {Limit: 100000, Period: WEEK}
+
+  PartnerKeyA:
+    Type: AWS::ApiGateway::ApiKey
+    Properties: {Enabled: true}
+
+  PartnerKeyB:
+    Type: AWS::ApiGateway::ApiKey
+    Properties: {Enabled: true}
+
+  PlanKeyA:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties: {KeyId: !Ref PartnerKeyA, KeyType: API_KEY, UsagePlanId: !Ref ItemsPlan}
+
+  PlanKeyB:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties: {KeyId: !Ref PartnerKeyB, KeyType: API_KEY, UsagePlanId: !Ref ItemsPlan}
+
+  ItemsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: items.handler
+      Role: !GetAtt FunctionRole.Arn
+      MemorySize: 256
+      Timeout: 10
+      Code: {ZipFile: "exports.handler = async () => {}"}
+
+  AuthorizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: auth.handler
+      Role: !GetAtt FunctionRole.Arn
+      Timeout: 5
+      Code: {ZipFile: "exports.handler = async () => {}"}
+
+  # A status page that answers at the gateway with a canned response.
+  StatusApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: status
+      EndpointConfiguration: {Types: [EDGE]}
+
+  StatusMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref StatusApi
+      ResourceId: !GetAtt StatusApi.RootResourceId
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: MOCK
+        RequestTemplates: {application/json: '{"statusCode": 200}'}
+
+  # -- The edge --------------------------------------------------------------------------------------------
+  EdgeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: edge.handler
+      Role: !GetAtt FunctionRole.Arn
+      Code: {ZipFile: "exports.handler = async () => {}"}
+
+  EdgeFunctionVersion:
+    Type: AWS::Lambda::Version
+    Properties: {FunctionName: !Ref EdgeFunction}
+
+  Site:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: assets
+            DomainName: !GetAtt AssetsBucket.RegionalDomainName
+            S3OriginConfig: {OriginAccessIdentity: ""}
+            ResponseCompletionTimeout: 90
+          - Id: archive
+            DomainName: !GetAtt ArchiveBucket.RegionalDomainName
+            S3OriginConfig: {OriginAccessIdentity: ""}
+          - Id: api
+            DomainName: !Sub "${ItemsApi}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: /prod
+            ConnectionAttempts: 2
+            OriginShield: {Enabled: true, OriginShieldRegion: eu-west-1}
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginReadTimeout: 40
+          - Id: blog
+            DomainName: blog.example.com
+            CustomOriginConfig: {OriginProtocolPolicy: https-only}
+        OriginGroups:
+          Quantity: 1
+          Items:
+            - Id: assets-with-archive
+              FailoverCriteria: {StatusCodes: {Quantity: 3, Items: [500, 503, 404]}}
+              Members: {Quantity: 2, Items: [{OriginId: assets}, {OriginId: archive}]}
+        DefaultCacheBehavior:
+          TargetOriginId: assets-with-archive
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          Compress: true
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          LambdaFunctionAssociations:
+            - {EventType: viewer-request, LambdaFunctionARN: !Ref EdgeFunctionVersion}
+          FunctionAssociations:
+            - {EventType: viewer-response, FunctionARN: !GetAtt RewriteFunction.FunctionARN}
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: api
+            ViewerProtocolPolicy: https-only
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          - PathPattern: /blog/*
+            TargetOriginId: blog
+            ViewerProtocolPolicy: https-only
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - {ErrorCode: 404, ErrorCachingMinTTL: 30}
+          - {ErrorCode: 500, ErrorCachingMinTTL: 5}
+
+  RewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: rewrite
+      AutoPublish: true
+      FunctionConfig: {Comment: rewrite, Runtime: cloudfront-js-2.0}
+      FunctionCode: "function handler(event) { return event.request }"
+
+  # A downloads distribution with the older TTL settings and a policy of the template's own.
+  DownloadsCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: downloads
+        DefaultTTL: 3600
+        MinTTL: 60
+        MaxTTL: 86400
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          CookiesConfig: {CookieBehavior: none}
+          HeadersConfig: {HeaderBehavior: none}
+          QueryStringsConfig: {QueryStringBehavior: none}
+
+  Downloads:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Origins:
+          - Id: store
+            DomainName: downloads-example-bucket.s3.eu-west-1.amazonaws.com
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: store
+          ViewerProtocolPolicy: allow-all
+          CachePolicyId: !Ref DownloadsCachePolicy
+          AllowedMethods: [GET, HEAD, PUT, POST, PATCH, DELETE, OPTIONS]
+
+  DisabledSite:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: false
+        Origins: [{Id: x, DomainName: nothing.example.com, CustomOriginConfig: {}}]
+        DefaultCacheBehavior: {TargetOriginId: x, ViewerProtocolPolicy: allow-all, MinTTL: 0, DefaultTTL: 60, MaxTTL: 120}

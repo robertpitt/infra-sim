@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: A session store replicated over three regions, with a function that reads its stream.
+
+Resources:
+  SessionsTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Properties:
+      BillingMode: PROVISIONED
+      AttributeDefinitions: [{AttributeName: id, AttributeType: S}]
+      KeySchema: [{AttributeName: id, KeyType: HASH}]
+      StreamSpecification: {StreamViewType: NEW_AND_OLD_IMAGES}
+      WriteProvisionedThroughputSettings:
+        WriteCapacityAutoScalingSettings:
+          MinCapacity: 100
+          MaxCapacity: 400
+          TargetTrackingScalingPolicyConfiguration: {TargetValue: 70}
+      Replicas:
+        - Region: eu-west-1
+          ReadProvisionedThroughputSettings:
+            ReadCapacityAutoScalingSettings:
+              MinCapacity: 100
+              MaxCapacity: 600
+              TargetTrackingScalingPolicyConfiguration: {TargetValue: 70}
+        - Region: us-east-1
+          ReadProvisionedThroughputSettings:
+            ReadCapacityUnits: 300
+        - Region: ap-southeast-2
+          ReadProvisionedThroughputSettings:
+            ReadCapacityUnits: 150
+        - Region: mars-1
+
+  SessionReaper:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: reaper.handler
+      Role: !GetAtt ReaperRole.Arn
+      Code: {ZipFile: "exports.handler = async () => {}"}
+      Environment:
+        Variables: {TABLE: !Ref SessionsTable}
+
+  ReaperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}
+
+  ReaperMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt SessionsTable.StreamArn
+      FunctionName: !Ref SessionReaper
+      StartingPosition: LATEST
+      BatchSize: 25

@@ -3,11 +3,12 @@ import { Canvas } from "./canvas/Canvas.tsx"
 import { useStore } from "./lib/store.ts"
 import { doc, redo, removeSelection, select, undo } from "./state/document.ts"
 import { client } from "./state/engine.ts"
-import { fitView } from "./state/files.ts"
+import { fitView, openFileDialog, saveDesign } from "./state/files.ts"
 import { run } from "./state/run.ts"
 import { setPanel, ui } from "./state/ui.ts"
 import { startSync } from "./state/sync.ts"
 import { Dock } from "./ui/Dock.tsx"
+import { ImportReportDialog } from "./ui/ImportReportDialog.tsx"
 import { Icon } from "./ui/Icon.tsx"
 import { Sidebar } from "./ui/Sidebar.tsx"
 import { Toolbar } from "./ui/Toolbar.tsx"
@@ -94,6 +95,14 @@ export function App() {
         e.preventDefault()
         return e.shiftKey ? redo() : undo()
       }
+      if (mod && e.key.toLowerCase() === "s") {
+        e.preventDefault()
+        return saveDesign(e.shiftKey ? "json" : "yaml")
+      }
+      if (mod && e.key.toLowerCase() === "o") {
+        e.preventDefault()
+        return void openFileDialog()
+      }
       if (mod && e.key.toLowerCase() === "y") {
         e.preventDefault()
         return redo()
@@ -150,6 +159,7 @@ export function App() {
         <Dock />
       </main>
       <Sidebar />
+      <ImportReportDialog />
     </div>
   )
 }
