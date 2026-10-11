@@ -1,6 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { Context } from "effect"
 
 /**
  * Everything the CLI needs from the outside world, so the commands can be run in-process by tests (and by anything
@@ -21,6 +22,9 @@ export interface IO {
   /** Where bundled files (examples, docs) live. */
   readonly assets: (name: string) => string
 }
+
+/** The `IO` a run was given, as a service, so the command handlers (Effects) can reach the outside world. */
+export class Io extends Context.Service<Io, IO>()("infra-sim/cli/Io") {}
 
 /** Files shipped with the tool: `examples/` and `docs/`. Found beside the bundle when built, in the repository otherwise. */
 const assetRoot = (): string => {

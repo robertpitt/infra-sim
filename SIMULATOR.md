@@ -188,10 +188,10 @@ faults that happened, and each assertion with its measured value. Assertions are
 (`<subject>.<metric>[:<aggregate>] <op> <value> [@ from..to]`; `Scenario.ASSERTION_SYNTAX` documents them). Percentiles over a
 window are a sample-weighted estimate from per-frame summaries; maxima are exact.
 
-`src/cli` is a thin Node layer over it (argument parsing, file loading, rendering): `run`, `check`, `import`, `convert`,
+`src/cli` is a thin Node layer over it (an `effect/cli` command tree, file loading, rendering): `run`, `check`, `import`, `convert`,
 `components`, `describe`, `examples`, `docs`. It loads designs, scenarios (resolving the design they name, which may itself
 be a template an importer reads) and templates, and exits 0/1/2/3 (held / assertion failed or component crashed / bad input /
-internal). `main(argv, io)` takes an `IO` object, so the commands are tested in-process. The guide is `docs/CLI.md`.
+internal). `main(argv, io)` takes an `IO` object (framework output included), so the commands are tested in-process. The guide is `docs/CLI.md`.
 
 ## Edges: the policy layer
 

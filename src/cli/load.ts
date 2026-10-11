@@ -1,16 +1,18 @@
 import path from "node:path"
-import { Schema } from "effect"
+import { Data, Schema } from "effect"
 import { Design, detectImporter, ImportError, type Importer, type ImportReport, Scenario } from "#simulator"
 import { registry } from "#simulator/components"
 import { parseTemplate } from "../simulator/importers/Intrinsics.ts"
 import YAML from "yaml"
 import type { IO } from "./io.ts"
 
-/** A problem with the input the user gave: the exit code for these is 2, and the message says what to fix. */
-export class UsageError extends Error {
-  override readonly name = "UsageError"
-  constructor(message: string, readonly issues: ReadonlyArray<string> = []) {
-    super(message)
+/**
+ * A problem with the input the user gave: the exit code for these is 2, and the message says what to fix. A tagged error, so it
+ * travels in an Effect's error channel; the synchronous loaders below throw it and the commands turn that into a failure.
+ */
+export class UsageError extends Data.TaggedError("UsageError")<{ readonly message: string; readonly issues: ReadonlyArray<string> }> {
+  constructor(message: string, issues: ReadonlyArray<string> = []) {
+    super({ message, issues })
   }
 }
 

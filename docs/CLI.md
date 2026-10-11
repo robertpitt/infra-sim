@@ -10,6 +10,19 @@ npm run build:cli && node dist-cli/infra-sim.mjs <command> ...   # one bundled f
 
 Everything below shows `infra-sim <command>`.
 
+The command line is built with [`effect/cli`](https://effect.website) (Effect's CLI framework), so help, `--version`, shell
+completions and the reporting of malformed flags come from the framework, and every flag below is described in
+`infra-sim <command> --help`:
+
+```sh
+infra-sim --help                    # the commands, the file/@id convention, a quick start, exit codes
+infra-sim run --help                # one command's arguments, flags and examples (works for every command)
+infra-sim --version                 # also -v
+infra-sim --completions zsh         # a shell completion script: bash, zsh, fish, powershell (also sh, pwsh)
+```
+
+`-h`, `--help`, `-v`, `--version` and `--completions <shell>` are global flags the framework adds to every command.
+
 ## Commands
 
 | Command | Does |
@@ -20,7 +33,7 @@ Everything below shows `infra-sim <command>`.
 | `convert <file>` | Design YAML ⇄ JSON. |
 | `components` | List the components a design can use. |
 | `describe <type>` | One component's settings (default, range, hard limit or adjustable quota), ports, service limits. |
-| `examples` | The bundled example designs. `examples show <id>` prints one. |
+| `examples` | The bundled example designs. `examples show <id>` prints one; `examples path <id>` says where it lives. |
 | `docs [topic]` | This guide (`cli`), the assertion syntax (`assertions`), the faults (`faults`). |
 
 `<file>` is a path, or `@<id>` for a bundled example (`infra-sim run @poshub`). It may be a **design**, a **scenario**, or a
@@ -32,10 +45,11 @@ Everything below shows `infra-sim <command>`.
 | --- | --- |
 | `0` | Success: the run finished and every assertion held. |
 | `1` | An assertion failed, or a component crashed during the run. (`check --strict`: warnings.) |
-| `2` | The input was wrong: unreadable file, invalid design or scenario, unknown id, unknown flag. The message says what to fix. |
+| `2` | The input was wrong: unreadable file, invalid design or scenario, unknown id, unknown flag, a missing argument or a value that isn't one (`--seed lots`). The message says what to fix. |
 | `3` | Internal error (a bug). |
 
-Messages go to stderr; the result goes to stdout (or `--out`). Text is the default; `--json` (same as `--format json`) or
+Messages go to stderr; the result goes to stdout (or `--out`). A malformed command line prints the reason and a pointer to
+`infra-sim <command> --help` on stderr, never help text on stdout. `--help` and `--version` print on stdout and exit 0. Text is the default; `--json` (same as `--format json`) or
 `--format yaml` prints the full result as data.
 
 ## Designs

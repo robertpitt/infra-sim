@@ -39,24 +39,56 @@ edges:
 `
 
 describe("help and usage", () => {
-  it("lists the commands, and each command has its own help", async () => {
+  it("lists the commands, and each command has its own help from the framework", async () => {
     const top = await cli(["--help"])
     expect(top.code).toBe(EXIT.ok)
+    expect(top.err).toBe("")
     for (const c of ["run", "check", "import", "convert", "components", "describe", "examples", "docs"]) expect(top.out).toContain(c)
-    expect((await cli(["run", "--help"])).out).toContain("--assert")
-    expect((await cli([])).out).toContain("Usage")
+    expect(top.out).toContain("USAGE")
+    expect(top.out).toContain("--completions")
+    expect(top.out).toMatch(/Exit codes: 0 ok/)
+    expect(top.out).toContain("@<example-id>")
+    expect((await cli(["-h"])).out).toBe(top.out)
+    expect((await cli([])).out).toBe(top.out)
   })
 
-  it("exits 2 with the reason for unknown commands, unknown flags and missing arguments", async () => {
-    expect(await cli(["frobnicate"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("unknown command") })
-    expect(await cli(["run", "@orders", "--bogus"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("Unknown option") })
-    expect(await cli(["run"])).toMatchObject({ code: EXIT.usage })
-    expect(await cli(["run", "no-such-file.yaml"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("no such file") })
-    expect(await cli(["run", "@no-such-example"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("no example") })
+  it("prints a subcommand's flags, arguments and examples on --help", async () => {
+    const run = await cli(["run", "--help"])
+    expect(run).toMatchObject({ code: EXIT.ok, err: "" })
+    for (const flag of ["--duration, -d", "--warmup", "--seed", "--scale", "--set", "--fault", "--assert, -a", "--format, -f", "--json", "--out, -o", "--frames", "--region", "--rps", "--importer", "--nodes", "--quiet, -q", "--no-color"]) expect(run.out).toContain(flag)
+    expect(run.out).toContain("EXAMPLES")
+    expect(run.out).toContain("infra-sim run @orders")
+    expect((await cli(["check", "--help"])).out).toContain("--strict")
+    expect((await cli(["components", "-h"])).out).toMatch(/--provider, -p[\s\S]*--category, -c[\s\S]*--search, -s/)
+    expect((await cli(["import", "--help"])).out).toContain("--no-report")
+    expect((await cli(["examples", "--help"])).out).toMatch(/SUBCOMMANDS[\s\S]*show[\s\S]*path/)
+    expect((await cli(["examples", "show", "--help"])).out).toContain("id")
+    expect((await cli(["docs", "--help"])).out).toContain("assertions")
   })
 
   it("prints its version", async () => {
-    expect((await cli(["--version"])).out).toMatch(/^\d+\.\d+\.\d+/)
+    const r = await cli(["--version"])
+    expect(r).toMatchObject({ code: EXIT.ok, err: "" })
+    expect(r.out).toMatch(/infra-sim v\d+\.\d+\.\d+/)
+    expect((await cli(["-v"])).out).toBe(r.out)
+  })
+
+  it("exits 2 with the reason on stderr for a bad flag, and keeps stdout clean", async () => {
+    const r = await cli(["run", "@orders", "--bogus"])
+    expect(r.code).toBe(EXIT.usage)
+    expect(r.out).toBe("")
+    expect(r.err).toContain("infra-sim: Unrecognized flag: --bogus")
+    expect(r.err).toContain('Run "infra-sim run --help" for usage.')
+  })
+
+  it("exits 2 with the reason for unknown commands, missing arguments and bad values", async () => {
+    expect(await cli(["frobnicate"])).toMatchObject({ code: EXIT.usage, out: "", err: expect.stringContaining('Unknown subcommand "frobnicate"') })
+    expect(await cli(["run"])).toMatchObject({ code: EXIT.usage, out: "", err: expect.stringContaining("Missing required argument: file") })
+    expect(await cli(["run", "@orders", "--seed", "lots"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("--seed") })
+    expect(await cli(["run", "@orders", "--format", "xml"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("--format") })
+    expect(await cli(["docs", "nonsense"])).toMatchObject({ code: EXIT.usage })
+    expect(await cli(["run", "no-such-file.yaml"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("no such file") })
+    expect(await cli(["run", "@no-such-example"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("no example") })
   })
 })
 
@@ -92,7 +124,6 @@ describe("discovering what exists", () => {
     expect((await cli(["docs"])).out).toContain("infra-sim command line")
     expect((await cli(["docs", "assertions"])).out).toContain("errorRatio")
     expect((await cli(["docs", "faults"])).out).toContain("Outage")
-    expect((await cli(["docs", "nonsense"])).code).toBe(EXIT.usage)
   })
 })
 
@@ -201,6 +232,7 @@ assert:
 
   it("rejects bad flag values with the flag named", async () => {
     expect((await cli(["run", "@orders", "--seed", "lots"])).err).toContain("--seed")
+    expect((await cli(["run", "@orders", "--scale", "big"])).err).toContain("--scale")
     expect((await cli(["run", "@orders", "--set", "oops"])).err).toContain("--set")
     expect((await cli(["run", "@orders", "--fault", "node:fn Outage"])).err).toContain("at=")
     expect((await cli(["run", "@orders", "--format", "xml"])).err).toContain("--format")

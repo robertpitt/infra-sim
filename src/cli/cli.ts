@@ -1,57 +1,52 @@
-import { parseArgs } from "node:util"
 import path from "node:path"
-import { Effect } from "effect"
+import { Cause, Console, Data, Effect, Option } from "effect"
+import { Argument, CliConfig, CliError, CliOutput, Command, Flag, GlobalFlag } from "effect/cli"
+import * as NodeServices from "@effect/platform-node/NodeServices"
 import YAML from "yaml"
 import { builtinLayer, Design, Diagnostics, Fault, importers, type Importer, Scenario } from "#simulator"
 import { registry } from "#simulator/components"
 import { exampleFiles, encodeDesign, load, type Loaded, resolveReference, stem, UsageError } from "./load.ts"
-import { fmtDuration, makeStyle, renderComponent, renderDiagnostics, renderFrames, renderImportReport, renderResult, table } from "./format.ts"
-import type { IO } from "./io.ts"
-import { HELP, helpFor } from "./help.ts"
+import { makeStyle, renderComponent, renderDiagnostics, renderFrames, renderImportReport, renderResult, table } from "./format.ts"
+import { type IO, Io } from "./io.ts"
 
 /**
  * infra-sim: run designs and scenarios from a terminal, a script or an agent.
+ *
+ * Built on `effect/cli`: the command tree below carries every description, flag and example, and the framework parses the
+ * arguments, prints `--help` and `--version`, and reports malformed flags.
  *
  * Exit codes: 0 success (every assertion held), 1 an assertion failed or a component crashed, 2 the input was wrong
  * (a file that isn't valid, a scenario that names things that don't exist, a bad flag), 3 an internal error.
  */
 export const EXIT = { ok: 0, failed: 1, usage: 2, internal: 3 } as const
 
-/** The flags a command was given, by name. Read them with `str`, `strs`, `num` or a boolean test. */
-type Options = Record<string, unknown>
+/** A command that ran to the end but whose outcome isn't success: the exit code it asks for (1 for a failed assertion). */
+export class Exited extends Data.TaggedError("Exited")<{ readonly code: number }> {}
 
-type Spec = Record<string, { readonly type: "string" | "boolean"; readonly short?: string; readonly multiple?: boolean }>
+// ---------------------------------------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------------------------------------
 
-/** Parse a command's flags. A bad flag is a usage error with the reason, not a stack trace. */
-const parse = (argv: ReadonlyArray<string>, options: Spec, positionals = true): { values: Options; positionals: ReadonlyArray<string> } => {
-  try {
-    const parsed = parseArgs({ args: [...argv], options: { help: { type: "boolean", short: "h" }, ...options }, allowPositionals: positionals, strict: true })
-    return { values: parsed.values as Options, positionals: parsed.positionals }
-  } catch (error) {
-    throw new UsageError(error instanceof Error ? error.message.replace(/^.*?:\s*/, "") : String(error))
-  }
-}
+/** Run synchronous code that throws `UsageError` for bad input; the error moves to the Effect's error channel. Anything else is a bug (a defect). */
+const usage = <A>(thunk: () => A): Effect.Effect<A, UsageError> =>
+  Effect.suspend(() => {
+    try {
+      return Effect.succeed(thunk())
+    } catch (error) {
+      return error instanceof UsageError ? Effect.fail(error) : Effect.die(error)
+    }
+  })
 
 /** Write a file, relative paths resolved from the directory the CLI was run in. */
 const write = (io: IO, file: string, text: string): void => io.writeFile(path.resolve(io.cwd(), file), text)
 
-const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined)
-const strs = (v: unknown): ReadonlyArray<string> => (Array.isArray(v) ? v.map(String) : typeof v === "string" ? [v] : [])
-const num = (v: unknown, flag: string): number | undefined => {
-  if (v === undefined) return undefined
-  const n = Number(v)
-  if (!Number.isFinite(n)) throw new UsageError(`${flag}: "${String(v)}" is not a number`)
-  return n
-}
+const undef = Option.getOrUndefined
+
+/** Colour only on a terminal, unless `--no-color` or NO_COLOR says otherwise (and never for machine-readable output). */
+const styleOf = (io: IO, noColor: boolean, text = true) => makeStyle(text && io.isTTY && !noColor && io.env.NO_COLOR === undefined)
 
 type Format = "text" | "json" | "yaml"
-const formatOf = (values: Options, fallback: Format = "text"): Format => {
-  if (values.json === true) return "json"
-  const f = str(values.format)
-  if (f === undefined) return fallback
-  if (f !== "text" && f !== "json" && f !== "yaml") throw new UsageError(`--format: "${f}" is not text, json or yaml`)
-  return f
-}
+const formatOf = (json: boolean, format: Option.Option<Format>, fallback: Format = "text"): Format => (json ? "json" : (undef(format) ?? fallback))
 
 const dump = (value: unknown, format: Format): string => (format === "yaml" ? YAML.stringify(value, { lineWidth: 0 }) : `${JSON.stringify(value, null, 2)}\n`)
 
@@ -61,6 +56,29 @@ const importerOf = (id: string | undefined): Importer | undefined => {
   if (found === undefined) throw new UsageError(`--importer: no importer called "${id}"`, [`available: ${importers.map((i) => i.id).join(", ")}`])
   return found
 }
+
+const templateOptions = (region: Option.Option<string>, rps: Option.Option<number>): { region?: string; rps?: number } => ({
+  ...(Option.isSome(region) ? { region: region.value } : {}),
+  ...(Option.isSome(rps) ? { rps: rps.value } : {})
+})
+
+/** Help text is written for the terminal: continuation lines are indented to sit under the first (the framework indents only that one). */
+const block = (...lines: ReadonlyArray<string>): string => lines.map((l, i) => (i === 0 || l === "" ? l : `  ${l}`)).join("\n")
+
+// ---------------------------------------------------------------------------------------------------------
+// Flags shared by several commands
+// ---------------------------------------------------------------------------------------------------------
+
+/** A switch: false unless given. */
+const boolFlag = (name: string) => Flag.Boolean(name).pipe(Flag.withDefault(false))
+
+const jsonFlag = boolFlag("json").pipe(Flag.withDescription("Print the result as JSON (same as --format json)"))
+const noColorFlag = boolFlag("no-color").pipe(Flag.withDescription("Never use colour (also honoured: NO_COLOR, and output that isn't a terminal)"))
+const regionFlag = Flag.String("region").pipe(Flag.withMetavar("region"), Flag.withDescription("For templates: the AWS region to place everything in (default us-east-1)"), Flag.optional)
+const importerFlag = Flag.String("importer").pipe(Flag.withMetavar("id"), Flag.withDescription("Force an importer instead of detecting one (cloudformation)"), Flag.optional)
+const outFlag = (what: string) => Flag.String("out").pipe(Flag.withAlias("o"), Flag.withMetavar("file"), Flag.withDescription(what), Flag.optional)
+const formatFlag = Flag.Literals("format", ["text", "json", "yaml"]).pipe(Flag.withAlias("f"), Flag.withDescription("Output format (default text)"), Flag.optional)
+const fileFormatFlag = Flag.Literals("format", ["yaml", "json"]).pipe(Flag.withAlias("f"), Flag.withDescription("Output format (default yaml; a --out ending in .json picks json)"), Flag.optional)
 
 // ---------------------------------------------------------------------------------------------------------
 // run
@@ -106,291 +124,516 @@ const parseFaultFlag = (text: string): Scenario.TimelineEvent => {
   return { at: kv.at, inject: { target, fault, ...(kv.for === undefined ? {} : { for: kv.for }), ...(kv.id === undefined ? {} : { id: kv.id }) } }
 }
 
-const runCommand = async (argv: ReadonlyArray<string>, io: IO): Promise<number> => {
-  const { values, positionals } = parse(argv, {
-    duration: { type: "string", short: "d" },
-    warmup: { type: "string" },
-    seed: { type: "string" },
-    scale: { type: "string" },
-    set: { type: "string", multiple: true },
-    fault: { type: "string", multiple: true },
-    assert: { type: "string", short: "a", multiple: true },
-    format: { type: "string", short: "f" },
-    json: { type: "boolean" },
-    out: { type: "string", short: "o" },
-    frames: { type: "string" },
-    region: { type: "string" },
-    rps: { type: "string" },
-    importer: { type: "string" },
-    nodes: { type: "string" },
-    quiet: { type: "boolean", short: "q" },
-    "no-color": { type: "boolean" }
-  })
-  if (values.help) return help(io, "run")
-  const [file] = positionals
-  if (file === undefined || positionals.length > 1) throw new UsageError("run: give one design, scenario or template file (or @example-id)")
-
-  const loaded = load(io, file, { ...(str(values.region) === undefined ? {} : { region: str(values.region)! }), ...(num(values.rps, "--rps") === undefined ? {} : { rps: num(values.rps, "--rps")! }) }, importerOf(str(values.importer)))
-  const { design, scenario: fromFile } = designAndScenario(loaded, file)
-
-  // Flags win over the file.
-  const overrides = { nodes: { ...(fromFile.overrides?.nodes ?? {}) } as Record<string, Record<string, unknown>>, edges: { ...(fromFile.overrides?.edges ?? {}) } as Record<string, Record<string, unknown>>, accounts: { ...(fromFile.overrides?.accounts ?? {}) } as Record<string, Record<string, unknown>> }
-  for (const text of strs(values.set)) {
-    const s = parseSet(text)
-    const bag = (overrides[s.kind][s.id] ??= {})
-    setPath(bag, s.path, s.value)
-  }
-  const scale = num(values.scale, "--scale")
-  const seed = num(values.seed, "--seed")
-  const scenario: Scenario.Scenario = {
-    ...fromFile,
-    duration: str(values.duration) ?? fromFile.duration ?? "60s",
-    ...(str(values.warmup) === undefined ? {} : { warmup: str(values.warmup)! }),
-    ...(seed === undefined ? {} : { seed }),
-    ...(scale === undefined ? {} : { traffic: { scale } }),
-    overrides,
-    timeline: [...(fromFile.timeline ?? []), ...strs(values.fault).map(parseFaultFlag)],
-    assert: [...(fromFile.assert ?? []), ...strs(values.assert)]
-  }
-
-  const style = makeStyle(io.isTTY && values["no-color"] !== true && io.env.NO_COLOR === undefined && formatOf(values) === "text")
-  if (values.quiet !== true && loaded.imported !== undefined) io.stderr(renderImportReport(loaded.imported.report, style))
-  const result = await Effect.runPromise(
-    Scenario.run(design, scenario, { keepFrames: values.frames !== undefined }).pipe(
-      Effect.provide(builtinLayer),
-      Effect.mapError((e) => new UsageError(`${file}: the scenario can't run`, e.issues))
-    )
-  )
-  const diagnostics = Diagnostics.diagnose(design, registry).filter((d) => d.level !== "info")
-  const full = { ...result, diagnostics, input: { file: loaded.file, kind: loaded.kind, ...(loaded.kind === "scenario" && loaded.designFile !== undefined ? { design: loaded.designFile } : {}), ...(loaded.imported === undefined ? {} : { imported: loaded.imported.report }) } }
-
-  if (str(values.frames) !== undefined) write(io, str(values.frames)!, renderFrames(result.frames ?? []))
-  const { frames: _frames, ...publish } = full
-  const format = formatOf(values)
-  const text = format === "text" ? renderResult(result, style, { nodes: num(values.nodes, "--nodes") ?? 20 }) + (diagnostics.length > 0 ? `\nDesign warnings\n${renderDiagnostics(diagnostics, style)}\n` : "") : dump(publish, format)
-  if (str(values.out) !== undefined) write(io, str(values.out)!, text)
-  else io.stdout(text)
-  return result.passed ? EXIT.ok : EXIT.failed
-}
-
 const designAndScenario = (loaded: Loaded, file: string): { design: Design.Doc; scenario: Scenario.Scenario } => {
   if (loaded.kind === "design") return { design: loaded.doc, scenario: { version: 1 } }
   if (loaded.design === undefined) throw new UsageError(`${file}: the scenario has no design (add \`design: path/to/design.yaml\`)`)
   return { design: loaded.design, scenario: loaded.scenario }
 }
 
+const fileArgument = (what: string) => Argument.String("file").pipe(Argument.withDescription(what))
+
+const run = Command.make(
+  "run",
+  {
+    file: fileArgument("A design, a scenario, or a template an importer reads; or @<example-id> (for example @orders)"),
+    duration: Flag.String("duration").pipe(Flag.withAlias("d"), Flag.withMetavar("time"), Flag.withDescription("How long to simulate: 90s, 5m, 1h30m (default 60s, or the scenario's)"), Flag.optional),
+    warmup: Flag.String("warmup").pipe(Flag.withMetavar("time"), Flag.withDescription("Let the system settle first; summaries and assertions start after it"), Flag.optional),
+    seed: Flag.Finite("seed").pipe(Flag.withDescription("Random seed. The same design and seed always give the same result"), Flag.optional),
+    scale: Flag.Finite("scale").pipe(Flag.withDescription("Multiply every client's request rate (3 = three times the traffic)"), Flag.optional),
+    set: Flag.String("set").pipe(
+      Flag.withMetavar("id:path=value"),
+      Flag.withDescription("Override a setting, repeatable: api:stageThrottle.rate=500. Edges: edge:<edge-id>:<path>=<v>. Account quotas: account:aws:us-east-1:lambdaConcurrency=500"),
+      Flag.atLeast(0)
+    ),
+    fault: Flag.String("fault").pipe(
+      Flag.withMetavar("target fault at=time"),
+      Flag.withDescription(`Inject a fault, repeatable: "node:fn Outage at=10s for=20s", "region:aws:us-east-1 Outage at=2m", "edge:web.out->api Slow(250ms) at=1m for=30s". See: infra-sim docs faults`),
+      Flag.atLeast(0)
+    ),
+    assert: Flag.String("assert").pipe(
+      Flag.withAlias("a"),
+      Flag.withMetavar("expr"),
+      Flag.withDescription(`Add an assertion, repeatable: "api.errorRatio < 1%". See: infra-sim docs assertions`),
+      Flag.atLeast(0)
+    ),
+    format: formatFlag,
+    json: jsonFlag,
+    out: outFlag("Write the result to a file instead of stdout"),
+    frames: Flag.String("frames").pipe(Flag.withMetavar("file.csv"), Flag.withDescription("Also write every metrics frame as CSV (t_ms,scope,id,metric,value)"), Flag.optional),
+    region: regionFlag,
+    rps: Flag.Finite("rps").pipe(Flag.withDescription("For templates: requests per second for traffic sources the template doesn't have"), Flag.optional),
+    importer: importerFlag,
+    nodes: Flag.Int("nodes").pipe(Flag.withDescription("Rows in the node table (default 20)"), Flag.optional),
+    quiet: boolFlag("quiet").pipe(Flag.withAlias("q"), Flag.withDescription("Don't print the import report")),
+    noColor: noColorFlag
+  },
+  Effect.fn("run")(function*(o) {
+    const io = yield* Io
+    const format = formatOf(o.json, o.format)
+    const prepared = yield* usage(() => {
+      const loaded = load(io, o.file, templateOptions(o.region, o.rps), importerOf(undef(o.importer)))
+      const { design, scenario: fromFile } = designAndScenario(loaded, o.file)
+
+      // Flags win over the file.
+      const overrides = { nodes: { ...(fromFile.overrides?.nodes ?? {}) } as Record<string, Record<string, unknown>>, edges: { ...(fromFile.overrides?.edges ?? {}) } as Record<string, Record<string, unknown>>, accounts: { ...(fromFile.overrides?.accounts ?? {}) } as Record<string, Record<string, unknown>> }
+      for (const text of o.set) {
+        const s = parseSet(text)
+        const bag = (overrides[s.kind][s.id] ??= {})
+        setPath(bag, s.path, s.value)
+      }
+      const scenario: Scenario.Scenario = {
+        ...fromFile,
+        duration: undef(o.duration) ?? fromFile.duration ?? "60s",
+        ...(Option.isSome(o.warmup) ? { warmup: o.warmup.value } : {}),
+        ...(Option.isSome(o.seed) ? { seed: o.seed.value } : {}),
+        ...(Option.isSome(o.scale) ? { traffic: { scale: o.scale.value } } : {}),
+        overrides,
+        timeline: [...(fromFile.timeline ?? []), ...o.fault.map(parseFaultFlag)],
+        assert: [...(fromFile.assert ?? []), ...o.assert]
+      }
+      return { loaded, design, scenario }
+    })
+    const { loaded, design, scenario } = prepared
+
+    const style = styleOf(io, o.noColor, format === "text")
+    if (!o.quiet && loaded.imported !== undefined) io.stderr(renderImportReport(loaded.imported.report, style))
+    const result = yield* Scenario.run(design, scenario, { keepFrames: Option.isSome(o.frames) }).pipe(
+      Effect.provide(builtinLayer),
+      Effect.mapError((e) => new UsageError(`${o.file}: the scenario can't run`, e.issues))
+    )
+    const diagnostics = Diagnostics.diagnose(design, registry).filter((d) => d.level !== "info")
+    const full = { ...result, diagnostics, input: { file: loaded.file, kind: loaded.kind, ...(loaded.kind === "scenario" && loaded.designFile !== undefined ? { design: loaded.designFile } : {}), ...(loaded.imported === undefined ? {} : { imported: loaded.imported.report }) } }
+
+    if (Option.isSome(o.frames)) write(io, o.frames.value, renderFrames(result.frames ?? []))
+    const { frames: _frames, ...publish } = full
+    const text = format === "text" ? renderResult(result, style, { nodes: undef(o.nodes) ?? 20 }) + (diagnostics.length > 0 ? `\nDesign warnings\n${renderDiagnostics(diagnostics, style)}\n` : "") : dump(publish, format)
+    if (Option.isSome(o.out)) write(io, o.out.value, text)
+    else io.stdout(text)
+    if (!result.passed) return yield* new Exited({ code: EXIT.failed })
+  })
+).pipe(
+  Command.withShortDescription("Run a design or scenario and report what happened (exit 1 if an assertion fails)"),
+  Command.withDescription(block(
+    "Run a design or scenario on virtual time and report. A design runs as it is; a scenario adds a timeline of faults,",
+    "setting changes and assertions. Flags override what the file says. Exit 0 if every assertion held, 1 if one failed or a",
+    "component crashed, 2 if the input was wrong."
+  )),
+  Command.withExamples([
+    { command: "infra-sim run @orders --duration 2m", description: "Run a bundled example for two simulated minutes" },
+    { command: `infra-sim run @orders -d 5m --scale 3 --fault "node:ingest Outage at=2m for=1m" --assert "system.errorRatio < 5%"`, description: "Triple the traffic, lose a node for a minute, assert on the outcome" },
+    { command: "infra-sim run scenario.yaml --json", description: "Run a scenario and print the whole result as data" },
+    { command: "infra-sim run @poshub -d 10m --frames frames.csv --json -o result.json", description: "Write the result and every metrics frame to files" }
+  ])
+)
+
 // ---------------------------------------------------------------------------------------------------------
 // check
 // ---------------------------------------------------------------------------------------------------------
 
-const checkCommand = (argv: ReadonlyArray<string>, io: IO): number => {
-  const { values, positionals } = parse(argv, { format: { type: "string", short: "f" }, json: { type: "boolean" }, strict: { type: "boolean" }, region: { type: "string" }, importer: { type: "string" }, "no-color": { type: "boolean" } })
-  if (values.help) return help(io, "check")
-  const [file] = positionals
-  if (file === undefined || positionals.length > 1) throw new UsageError("check: give one design, scenario or template file")
-  const loaded = load(io, file, str(values.region) === undefined ? {} : { region: str(values.region)! }, importerOf(str(values.importer)))
-  const { design, scenario } = designAndScenario(loaded.kind === "scenario" && loaded.design === undefined ? { ...loaded, design: Design.empty() } : loaded, file)
-  const diagnostics = Diagnostics.diagnose(design, registry)
-  const issues = loaded.kind === "scenario" ? Scenario.check(design, scenario) : []
-  const errors = diagnostics.filter((d) => d.level === "error")
-  const warnings = diagnostics.filter((d) => d.level === "warning")
-  const ok = errors.length === 0 && issues.length === 0 && (values.strict !== true || warnings.length === 0)
-  const format = formatOf(values)
-  if (format !== "text") io.stdout(dump({ ok, kind: loaded.kind, nodes: Object.keys(design.nodes).length, edges: Object.keys(design.edges).length, diagnostics, scenarioIssues: issues }, format))
-  else {
-    const style = makeStyle(io.isTTY && values["no-color"] !== true && io.env.NO_COLOR === undefined)
-    io.stdout(`${style.bold(file)}: ${loaded.kind}, ${Object.keys(design.nodes).length} nodes, ${Object.keys(design.edges).length} edges\n`)
-    if (diagnostics.length > 0) io.stdout(`${renderDiagnostics(diagnostics, style)}\n`)
-    for (const issue of issues) io.stdout(`${style.red("scenario")} ${issue}\n`)
-    io.stdout(ok ? `${style.green("ok")}\n` : `${style.red("not ok")}\n`)
-  }
-  return ok ? EXIT.ok : errors.length > 0 || issues.length > 0 ? EXIT.usage : EXIT.failed
-}
+const check = Command.make(
+  "check",
+  {
+    file: fileArgument("A design, a scenario, or a template an importer reads; or @<example-id>"),
+    format: formatFlag,
+    json: jsonFlag,
+    strict: boolFlag("strict").pipe(Flag.withDescription("Exit 1 on warnings too")),
+    region: regionFlag,
+    importer: importerFlag,
+    noColor: noColorFlag
+  },
+  Effect.fn("check")(function*(o) {
+    const io = yield* Io
+    const prepared = yield* usage(() => {
+      const loaded = load(io, o.file, templateOptions(o.region, Option.none()), importerOf(undef(o.importer)))
+      const { design, scenario } = designAndScenario(loaded.kind === "scenario" && loaded.design === undefined ? { ...loaded, design: Design.empty() } : loaded, o.file)
+      return { loaded, design, scenario }
+    })
+    const { loaded, design, scenario } = prepared
+    const diagnostics = Diagnostics.diagnose(design, registry)
+    const issues = loaded.kind === "scenario" ? Scenario.check(design, scenario) : []
+    const errors = diagnostics.filter((d) => d.level === "error")
+    const warnings = diagnostics.filter((d) => d.level === "warning")
+    const ok = errors.length === 0 && issues.length === 0 && (!o.strict || warnings.length === 0)
+    const format = formatOf(o.json, o.format)
+    if (format !== "text") io.stdout(dump({ ok, kind: loaded.kind, nodes: Object.keys(design.nodes).length, edges: Object.keys(design.edges).length, diagnostics, scenarioIssues: issues }, format))
+    else {
+      const style = styleOf(io, o.noColor)
+      io.stdout(`${style.bold(o.file)}: ${loaded.kind}, ${Object.keys(design.nodes).length} nodes, ${Object.keys(design.edges).length} edges\n`)
+      if (diagnostics.length > 0) io.stdout(`${renderDiagnostics(diagnostics, style)}\n`)
+      for (const issue of issues) io.stdout(`${style.red("scenario")} ${issue}\n`)
+      io.stdout(ok ? `${style.green("ok")}\n` : `${style.red("not ok")}\n`)
+    }
+    if (!ok) return yield* new Exited({ code: errors.length > 0 || issues.length > 0 ? EXIT.usage : EXIT.failed })
+  })
+).pipe(
+  Command.withShortDescription("Validate a design or scenario without running it"),
+  Command.withDescription(block(
+    "Validate a design or scenario without running it. Lists every problem at once, by id.",
+    "Exit 0 ok, 2 errors (invalid settings, unknown ids, a scenario that can't run), 1 only warnings with --strict."
+  )),
+  Command.withExamples([
+    { command: "infra-sim check design.yaml", description: "Validate a design" },
+    { command: "infra-sim check scenario.yaml --json", description: "Validate a scenario, problems as data" },
+    { command: "infra-sim check @poshub --strict", description: "Treat warnings as failures too" }
+  ])
+)
 
 // ---------------------------------------------------------------------------------------------------------
 // import, convert
 // ---------------------------------------------------------------------------------------------------------
 
-const importCommand = (argv: ReadonlyArray<string>, io: IO): number => {
-  const { values, positionals } = parse(argv, {
-    out: { type: "string", short: "o" },
-    format: { type: "string", short: "f" },
-    json: { type: "boolean" },
-    region: { type: "string" },
-    rps: { type: "string" },
-    importer: { type: "string" },
-    "no-report": { type: "boolean" },
-    "no-color": { type: "boolean" }
-  })
-  if (values.help) return help(io, "import")
-  const [file] = positionals
-  if (file === undefined || positionals.length > 1) throw new UsageError("import: give one template file")
-  const loaded = load(io, file, { ...(str(values.region) === undefined ? {} : { region: str(values.region)! }), ...(num(values.rps, "--rps") === undefined ? {} : { rps: num(values.rps, "--rps")! }) }, importerOf(str(values.importer)) ?? importers[0])
-  if (loaded.kind !== "design" || loaded.imported === undefined) throw new UsageError(`${file}: not something an importer reads (it is already a ${loaded.kind}; use \`convert\` to change its format)`)
-  const asJson = values.json === true
-  const style = makeStyle(io.isTTY && values["no-color"] !== true && io.env.NO_COLOR === undefined)
-  if (asJson) {
-    const text = dump({ design: loaded.doc, report: loaded.imported.report }, "json")
-    if (str(values.out) !== undefined) write(io, str(values.out)!, text)
+const importCommand = Command.make(
+  "import",
+  {
+    file: Argument.String("template").pipe(Argument.withDescription("A CloudFormation, SAM or `cdk synth` template (YAML or JSON)")),
+    out: outFlag("Write the design here (.json writes JSON, anything else YAML)"),
+    format: fileFormatFlag,
+    json: boolFlag("json").pipe(Flag.withDescription("Print { design, report } as JSON on stdout")),
+    region: Flag.String("region").pipe(Flag.withMetavar("region"), Flag.withDescription("The AWS region to place everything in (default us-east-1)"), Flag.optional),
+    rps: Flag.Finite("rps").pipe(Flag.withDescription("Requests per second for traffic sources the template doesn't have (default 20)"), Flag.optional),
+    importer: importerFlag,
+    noReport: boolFlag("no-report").pipe(Flag.withDescription("Don't print the report of what was converted, inferred, adjusted and left out")),
+    noColor: noColorFlag
+  },
+  Effect.fn("import")(function*(o) {
+    const io = yield* Io
+    const { loaded, imported } = yield* usage(() => {
+      const loaded = load(io, o.file, templateOptions(o.region, o.rps), importerOf(undef(o.importer)) ?? importers[0])
+      if (loaded.kind !== "design" || loaded.imported === undefined) throw new UsageError(`${o.file}: not something an importer reads (it is already a ${loaded.kind}; use \`convert\` to change its format)`)
+      return { loaded, imported: loaded.imported }
+    })
+    const style = styleOf(io, o.noColor)
+    if (o.json) {
+      const text = dump({ design: loaded.doc, report: imported.report }, "json")
+      if (Option.isSome(o.out)) write(io, o.out.value, text)
+      else io.stdout(text)
+      return
+    }
+    const out = undef(o.out)
+    const format: "yaml" | "json" = undef(o.format) === "json" || (out !== undefined && out.endsWith(".json")) ? "json" : "yaml"
+    const text = encodeDesign(loaded.doc, format)
+    if (out !== undefined) write(io, out, text)
     else io.stdout(text)
-    return EXIT.ok
-  }
-  const out = str(values.out)
-  const format: "yaml" | "json" = str(values.format) === "json" || (out !== undefined && out.endsWith(".json")) ? "json" : "yaml"
-  const text = encodeDesign(loaded.doc, format)
-  if (out !== undefined) write(io, out, text)
-  else io.stdout(text)
-  if (values["no-report"] !== true) io.stderr(renderImportReport(loaded.imported.report, style))
-  return EXIT.ok
-}
+    if (!o.noReport) io.stderr(renderImportReport(imported.report, style))
+  })
+).pipe(
+  Command.withShortDescription("Turn a CloudFormation/SAM/CDK template into a design (YAML)"),
+  Command.withDescription(block(
+    "Turn a CloudFormation, SAM or `cdk synth` template (YAML or JSON) into a design. The design goes to stdout (or --out);",
+    "the report of what was converted, inferred, adjusted and left out goes to stderr."
+  )),
+  Command.withExamples([
+    { command: "infra-sim import template.yaml --region eu-west-1 -o design.yaml", description: "Write the design to a file, the report to stderr" },
+    { command: "infra-sim import template.yaml --json", description: "Print { design, report } as data" }
+  ])
+)
 
-const convertCommand = (argv: ReadonlyArray<string>, io: IO): number => {
-  const { values, positionals } = parse(argv, { out: { type: "string", short: "o" }, format: { type: "string", short: "f" } })
-  if (values.help) return help(io, "convert")
-  const [file] = positionals
-  if (file === undefined || positionals.length > 1) throw new UsageError("convert: give one design file")
-  const loaded = load(io, file)
-  if (loaded.kind !== "design") throw new UsageError(`${file}: a scenario can't be converted here; convert its design`)
-  const out = str(values.out)
-  const requested = str(values.format)
-  if (requested !== undefined && requested !== "yaml" && requested !== "json") throw new UsageError(`--format: "${requested}" is not yaml or json`)
-  const format: "yaml" | "json" = requested === "json" || (requested === undefined && out?.endsWith(".json") === true) ? "json" : "yaml"
-  const text = encodeDesign(loaded.doc, format)
-  if (out === undefined) io.stdout(text)
-  else write(io, out, text)
-  return EXIT.ok
-}
+const convert = Command.make(
+  "convert",
+  {
+    file: Argument.String("design").pipe(Argument.withDescription("A design file (YAML or JSON)")),
+    out: outFlag("Write here instead of stdout (.json writes JSON, anything else YAML)"),
+    format: fileFormatFlag
+  },
+  Effect.fn("convert")(function*(o) {
+    const io = yield* Io
+    const loaded = yield* usage(() => load(io, o.file))
+    if (loaded.kind !== "design") return yield* new UsageError(`${o.file}: a scenario can't be converted here; convert its design`)
+    const out = undef(o.out)
+    const requested = undef(o.format)
+    const format: "yaml" | "json" = requested === "json" || (requested === undefined && out?.endsWith(".json") === true) ? "json" : "yaml"
+    const text = encodeDesign(loaded.doc, format)
+    if (out === undefined) io.stdout(text)
+    else write(io, out, text)
+  })
+).pipe(
+  Command.withShortDescription("Convert a design between YAML and JSON"),
+  Command.withDescription("Convert a design file between YAML and JSON, to stdout or --out (the extension picks the format)."),
+  Command.withExamples([
+    { command: "infra-sim convert design.yaml -o design.json", description: "YAML to JSON" },
+    { command: "infra-sim convert design.json --format yaml", description: "JSON to YAML on stdout" }
+  ])
+)
 
 // ---------------------------------------------------------------------------------------------------------
 // components, describe, examples, docs
 // ---------------------------------------------------------------------------------------------------------
 
-const componentsCommand = (argv: ReadonlyArray<string>, io: IO): number => {
-  const { values } = parse(argv, { provider: { type: "string", short: "p" }, category: { type: "string", short: "c" }, search: { type: "string", short: "s" }, format: { type: "string", short: "f" }, json: { type: "boolean" } }, false)
-  if (values.help) return help(io, "components")
-  const search = str(values.search)?.toLowerCase()
-  const list = registry.manifests.filter(
-    (m) =>
-      (str(values.provider) === undefined || m.provider === values.provider) &&
-      (str(values.category) === undefined || m.category === values.category) &&
-      (search === undefined || [m.type, m.title, m.service, m.description].some((t) => t.toLowerCase().includes(search)))
-  )
-  const format = formatOf(values)
-  if (format !== "text") {
-    io.stdout(dump(list.map((m) => ({ type: m.type, provider: m.provider, service: m.service, title: m.title, category: m.category, description: m.description, ports: m.outputs.map((o) => o.port), container: m.container !== undefined })), format))
-    return EXIT.ok
-  }
-  io.stdout(`${table([["type", "provider", "category", "description"], ...list.map((m) => [m.type, m.provider, m.category, m.description.length > 80 ? `${m.description.slice(0, 77)}...` : m.description])])}\n`)
-  return EXIT.ok
+const components = Command.make(
+  "components",
+  {
+    provider: Flag.String("provider").pipe(Flag.withAlias("p"), Flag.withDescription("Only this provider: aws | internet"), Flag.optional),
+    category: Flag.String("category").pipe(Flag.withAlias("c"), Flag.withDescription("Only this category: compute | messaging | storage | network | traffic | external"), Flag.optional),
+    search: Flag.String("search").pipe(Flag.withAlias("s"), Flag.withMetavar("text"), Flag.withDescription("Only components whose type, title, service or description mention this"), Flag.optional),
+    format: formatFlag,
+    json: jsonFlag
+  },
+  Effect.fn("components")(function*(o) {
+    const io = yield* Io
+    const search = undef(o.search)?.toLowerCase()
+    const provider = undef(o.provider)
+    const category = undef(o.category)
+    const list = registry.manifests.filter(
+      (m) =>
+        (provider === undefined || m.provider === provider) &&
+        (category === undefined || m.category === category) &&
+        (search === undefined || [m.type, m.title, m.service, m.description].some((t) => t.toLowerCase().includes(search)))
+    )
+    const format = formatOf(o.json, o.format)
+    if (format !== "text") {
+      io.stdout(dump(list.map((m) => ({ type: m.type, provider: m.provider, service: m.service, title: m.title, category: m.category, description: m.description, ports: m.outputs.map((port) => port.port), container: m.container !== undefined })), format))
+      return
+    }
+    io.stdout(`${table([["type", "provider", "category", "description"], ...list.map((m) => [m.type, m.provider, m.category, m.description.length > 80 ? `${m.description.slice(0, 77)}...` : m.description])])}\n`)
+  })
+).pipe(
+  Command.withShortDescription("List the components a design can use"),
+  Command.withDescription("List the components a design can use."),
+  Command.withExamples([
+    { command: "infra-sim components --provider aws --category messaging", description: "Only AWS messaging services" },
+    { command: "infra-sim components --search queue --json", description: "Search, as data" }
+  ])
+)
+
+const describe = Command.make(
+  "describe",
+  {
+    type: Argument.String("type").pipe(Argument.withDescription("A component type, for example aws.lambda (see `infra-sim components`); the provider prefix may be left off")),
+    format: formatFlag,
+    json: boolFlag("json").pipe(Flag.withDescription("Print the full machine-readable manifest (same as --format json)")),
+    noColor: noColorFlag
+  },
+  Effect.fn("describe")(function*(o) {
+    const io = yield* Io
+    const type = o.type
+    const manifest = registry.manifests.find((m) => m.type === type) ?? registry.manifests.find((m) => m.type === `aws.${type}` || m.type === `common.${type}`)
+    if (manifest === undefined) {
+      const near = registry.manifests.filter((m) => m.type.includes(type.toLowerCase())).map((m) => m.type)
+      return yield* new UsageError(`no component called "${type}"`, [near.length > 0 ? `did you mean: ${near.join(", ")}` : `components: ${registry.manifests.map((m) => m.type).join(", ")}`])
+    }
+    const format = formatOf(o.json, o.format)
+    if (format !== "text") io.stdout(dump(manifest, format))
+    else io.stdout(renderComponent(manifest, styleOf(io, o.noColor)))
+  })
+).pipe(
+  Command.withShortDescription("Show one component\'s settings, ranges, limits and ports (describe aws.lambda)"),
+  Command.withDescription(block(
+    "Everything needed to configure a component: every setting with its default and range, whether a limit is hard or an",
+    "adjustable quota, the ports edges leave from, and the service's published limits. Use it before writing a design."
+  )),
+  Command.withExamples([
+    { command: "infra-sim describe aws.lambda", description: "Settings, ranges, limits and ports of a Lambda function" },
+    { command: "infra-sim describe sqs --json", description: "The same for SQS, as the full manifest" }
+  ])
+)
+
+interface ExampleEntry {
+  readonly id: string
+  readonly title: string
+  readonly blurb: string
+  readonly file: string
 }
 
-const describeCommand = (argv: ReadonlyArray<string>, io: IO): number => {
-  const { values, positionals } = parse(argv, { format: { type: "string", short: "f" }, json: { type: "boolean" }, "no-color": { type: "boolean" } })
-  if (values.help) return help(io, "describe")
-  const [type] = positionals
-  if (type === undefined || positionals.length > 1) throw new UsageError("describe: give a component type, for example aws.lambda (see `infra-sim components`)")
-  const manifest = registry.manifests.find((m) => m.type === type) ?? registry.manifests.find((m) => m.type === `aws.${type}` || m.type === `common.${type}`)
-  if (manifest === undefined) {
-    const near = registry.manifests.filter((m) => m.type.includes(type.toLowerCase())).map((m) => m.type)
-    throw new UsageError(`no component called "${type}"`, [near.length > 0 ? `did you mean: ${near.join(", ")}` : `components: ${registry.manifests.map((m) => m.type).join(", ")}`])
-  }
-  const format = formatOf(values)
-  if (format !== "text") io.stdout(dump(manifest, format))
-  else io.stdout(renderComponent(manifest, makeStyle(io.isTTY && values["no-color"] !== true && io.env.NO_COLOR === undefined)))
-  return EXIT.ok
-}
-
-const examplesCommand = (argv: ReadonlyArray<string>, io: IO): number => {
-  const { values, positionals } = parse(argv, { format: { type: "string", short: "f" }, json: { type: "boolean" } })
-  if (values.help) return help(io, "examples")
-  const files = exampleFiles(io)
-  const entry = (f: string) => {
+const exampleEntries = (io: IO): ReadonlyArray<ExampleEntry> =>
+  exampleFiles(io).map((f) => {
     const file = path.join(io.assets("examples"), f)
     const doc = (YAML.parse(io.readFile(file)) ?? {}) as { name?: string; description?: string }
     return { id: stem(f), title: doc.name ?? stem(f), blurb: (doc.description ?? "").split(/\n\s*\n/)[0]?.replace(/\s+/g, " ").trim() ?? "", file }
-  }
-  const [sub, id] = positionals
-  if (sub === "show" || sub === "path") {
-    if (id === undefined) throw new UsageError(`examples ${sub}: give an example id`)
-    const file = resolveReference(io, `@${id}`)
-    io.stdout(sub === "path" ? `${file}\n` : io.readFile(file))
-    return EXIT.ok
-  }
-  if (sub !== undefined) throw new UsageError(`examples: unknown subcommand "${sub}" (show <id>, path <id>)`)
-  const format = formatOf(values)
-  const entries = files.map(entry)
-  if (format !== "text") io.stdout(dump(entries, format))
-  else io.stdout(`${table([["id", "title", "what it is"], ...entries.map((e) => [e.id, e.title, e.blurb.length > 90 ? `${e.blurb.slice(0, 87)}...` : e.blurb])])}\n\nRun one with: infra-sim run @<id> --duration 2m\n`)
-  return EXIT.ok
-}
+  })
 
-const docsCommand = (argv: ReadonlyArray<string>, io: IO): number => {
-  const { positionals, values } = parse(argv, {})
-  if (values.help) return help(io, "docs")
-  const [topic] = positionals
-  if (topic === "assertions") io.stdout(`${Scenario.ASSERTION_SYNTAX}\n`)
-  else if (topic === "faults") io.stdout(`${Fault.catalog.map((k) => `${k.tag}  targets: ${k.targets.join(", ")}\n  ${k.help}`).join("\n\n")}\n\nIn a scenario: "Outage", "Slow(250ms)", "Errors(20%)", "Loss(10%)", "Blackhole", or an object { type: Slow, extra: 250ms }.\nTargets: node:<id>, edge:<id>, region:<placement> (region:aws:us-east-1).\n`)
-  else if (topic === undefined || topic === "cli") {
-    const file = io.assets("docs/CLI.md")
-    if (!io.exists(file)) throw new UsageError("the CLI guide (docs/CLI.md) isn't available in this install")
-    io.stdout(io.readFile(file))
-  } else throw new UsageError(`docs: no topic "${topic}"`, ["topics: cli (default), assertions, faults"])
-  return EXIT.ok
-}
+const exampleId = Argument.String("id").pipe(Argument.withDescription("An example id, as listed by `infra-sim examples` (for example orders)"))
 
-const help = (io: IO, command?: string): number => {
-  io.stdout(command === undefined ? HELP : helpFor(command))
-  return EXIT.ok
-}
+const examplesShow = Command.make(
+  "show",
+  { id: exampleId },
+  Effect.fn("examples show")(function*(o) {
+    const io = yield* Io
+    io.stdout(yield* usage(() => io.readFile(resolveReference(io, `@${o.id}`))))
+  })
+).pipe(Command.withDescription("Print an example's source (a design or scenario in YAML)."), Command.withExamples([{ command: "infra-sim examples show orders" }]))
+
+const examplesPath = Command.make(
+  "path",
+  { id: exampleId },
+  Effect.fn("examples path")(function*(o) {
+    const io = yield* Io
+    io.stdout(`${yield* usage(() => resolveReference(io, `@${o.id}`))}\n`)
+  })
+).pipe(Command.withDescription("Print where an example lives on disk."), Command.withExamples([{ command: "infra-sim examples path orders" }]))
+
+const examples = Command.make(
+  "examples",
+  { format: formatFlag, json: jsonFlag },
+  Effect.fn("examples")(function*(o) {
+    const io = yield* Io
+    const format = formatOf(o.json, o.format)
+    const entries = exampleEntries(io)
+    if (format !== "text") io.stdout(dump(entries, format))
+    else io.stdout(`${table([["id", "title", "what it is"], ...entries.map((e) => [e.id, e.title, e.blurb.length > 90 ? `${e.blurb.slice(0, 87)}...` : e.blurb])])}\n\nRun one with: infra-sim run @<id> --duration 2m\n`)
+  })
+).pipe(
+  Command.withShortDescription("List the example designs; `examples show <id>` prints one"),
+  Command.withDescription("List the example designs that ship with the tool. Run one directly with `infra-sim run @<id>`."),
+  Command.withExamples([
+    { command: "infra-sim examples", description: "List them" },
+    { command: "infra-sim examples show orders", description: "Print one" },
+    { command: "infra-sim run @orders -d 2m", description: "Run one" }
+  ]),
+  Command.withSubcommands([examplesShow, examplesPath])
+)
+
+const TOPICS = ["cli", "assertions", "faults"] as const
+
+const docs = Command.make(
+  "docs",
+  { topic: Argument.Literals("topic", TOPICS).pipe(Argument.withDescription("cli (default; the full guide), assertions (the assertion syntax) or faults (what can be injected)"), Argument.optional) },
+  Effect.fn("docs")(function*(o) {
+    const io = yield* Io
+    const topic = undef(o.topic) ?? "cli"
+    if (topic === "assertions") io.stdout(`${Scenario.ASSERTION_SYNTAX}\n`)
+    else if (topic === "faults") io.stdout(`${Fault.catalog.map((k) => `${k.tag}  targets: ${k.targets.join(", ")}\n  ${k.help}`).join("\n\n")}\n\nIn a scenario: "Outage", "Slow(250ms)", "Errors(20%)", "Loss(10%)", "Blackhole", or an object { type: Slow, extra: 250ms }.\nTargets: node:<id>, edge:<id>, region:<placement> (region:aws:us-east-1).\n`)
+    else {
+      const file = io.assets("docs/CLI.md")
+      if (!io.exists(file)) return yield* new UsageError("the CLI guide (docs/CLI.md) isn't available in this install")
+      io.stdout(io.readFile(file))
+    }
+  })
+).pipe(
+  Command.withShortDescription("The full guide: scenarios, assertions, output, exit codes (topics: cli, assertions, faults)"),
+  Command.withDescription("Print the full guide: scenarios, assertions, output, exit codes. Topics: cli (default), assertions, faults."),
+  Command.withExamples([
+    { command: "infra-sim docs", description: "The guide" },
+    { command: "infra-sim docs assertions", description: "The assertion syntax" }
+  ])
+)
 
 // ---------------------------------------------------------------------------------------------------------
-// The entry point
+// The command tree
 // ---------------------------------------------------------------------------------------------------------
 
-/** Run the CLI. Returns the exit code; never throws and never exits the process, so it can be embedded and tested. */
-export const main = async (argv: ReadonlyArray<string>, io: IO): Promise<number> => {
-  const [command, ...rest] = argv
-  try {
-    switch (command) {
-      case undefined:
-      case "help":
-      case "--help":
-      case "-h":
-        return help(io, rest[0])
-      case "--version":
-      case "-v":
-      case "version": {
-        const file = io.assets("package.json")
-        io.stdout(`${io.exists(file) ? (JSON.parse(io.readFile(file)) as { version?: string }).version : "unknown"}\n`)
+/** `infra-sim`: the root. Everything it prints for `--help` comes from the descriptions and examples on the commands above. */
+export const root = Command.make("infra-sim").pipe(
+  Command.withDescription(block(
+    "Simulate cloud infrastructure under traffic and faults, from the command line.",
+    "",
+    "<file> is a path, or @<example-id> for an example that ships with the tool (infra-sim run @poshub). It can be a design",
+    "(YAML/JSON), a scenario (YAML/JSON that names a design), or a template an importer reads.",
+    "",
+    "Output is text by default; --json (or --format json|yaml) prints the whole result as data for scripts and agents. Results",
+    "go to stdout, messages and reports to stderr.",
+    "",
+    "Exit codes: 0 ok · 1 an assertion failed or a component crashed · 2 bad input (the message says what to fix) · 3 internal error",
+    "",
+    "Run `infra-sim <command> --help` for a command's options, or `infra-sim docs` for the guide."
+  )),
+  Command.withExamples([
+    { command: "infra-sim examples", description: "See what ships with the tool" },
+    { command: "infra-sim run @orders --duration 2m", description: "Run an example for two simulated minutes" },
+    { command: `infra-sim run @orders -d 5m --scale 3 --fault "node:ingest Outage at=2m for=1m" --assert "system.errorRatio < 5%"`, description: "Triple the traffic, lose a node, assert on the outcome" },
+    { command: "infra-sim import template.yaml --region eu-west-1 -o design.yaml", description: "Turn a CloudFormation template into a design" },
+    { command: "infra-sim run scenario.yaml --json", description: "Run a scenario, the result as data" }
+  ]),
+  Command.withSubcommands([run, check, importCommand, convert, components, describe, examples, docs])
+)
+
+// ---------------------------------------------------------------------------------------------------------
+// The entry points
+// ---------------------------------------------------------------------------------------------------------
+
+/** The framework's built-in global flags, minus `--wizard` (an interactive prompt UI) and `--log-level` (the simulator logs nothing). */
+const cliConfig = CliConfig.layer({ builtIns: [GlobalFlag.Help, GlobalFlag.Version, GlobalFlag.Completions] })
+
+/** The framework prints with `Console`; this one collects it, so `program` can send it to `io` once it knows where it belongs. */
+const collectingConsole = (out: Array<string>, err: Array<string>): Console.Console => {
+  const noop = () => {}
+  const line = (into: Array<string>) => (...args: ReadonlyArray<unknown>) => void into.push(`${args.map(String).join(" ")}\n`)
+  return {
+    assert: noop,
+    clear: noop,
+    count: noop,
+    countReset: noop,
+    debug: line(err),
+    dir: noop,
+    dirxml: noop,
+    error: line(err),
+    group: noop,
+    groupCollapsed: noop,
+    groupEnd: noop,
+    info: line(err),
+    log: line(out),
+    table: noop,
+    time: noop,
+    timeEnd: noop,
+    timeLog: noop,
+    trace: line(err),
+    warn: line(err)
+  }
+}
+
+/** The framework's formatter, with errors in this tool's voice (`infra-sim: ...`) and colour decided by `io` rather than the process. */
+const formatterFor = (io: IO, argv: ReadonlyArray<string>): CliOutput.Formatter => {
+  const base = CliOutput.defaultFormatter({ colors: io.isTTY && io.env.NO_COLOR === undefined && !argv.includes("--no-color") })
+  const message = (e: CliError.CliError) => `infra-sim: ${e.message}`
+  return { ...base, formatError: message, formatCliError: message, formatErrors: (errors) => errors.map(message).join("\n") }
+}
+
+const versionOf = (io: IO): string => {
+  const file = io.assets("package.json")
+  return io.exists(file) ? ((JSON.parse(io.readFile(file)) as { version?: string }).version ?? "unknown") : "unknown"
+}
+
+/**
+ * Run the CLI as an Effect: parse `argv`, run the command, print through `io`, and succeed with the exit code. It never fails:
+ * every outcome (bad flags, bad input, a failed assertion, a bug) is an exit code and a message on stderr.
+ *
+ * Needs the platform services the framework asks for (file system, path, terminal, stdio, child processes): `NodeServices.layer`.
+ */
+export const program = (argv: ReadonlyArray<string>, io: IO) =>
+  Effect.gen(function*() {
+    const out: Array<string> = []
+    const err: Array<string> = []
+    const exit = yield* Command.runWith(root, { version: versionOf(io) })(argv).pipe(
+      Effect.provideService(Io, io),
+      Effect.provideService(Console.Console, collectingConsole(out, err)),
+      Effect.provide(CliOutput.layer(formatterFor(io, argv))),
+      Effect.provide(cliConfig),
+      Effect.exit
+    )
+    if (exit._tag === "Success") {
+      io.stdout(out.join(""))
+      io.stderr(err.join(""))
+      return EXIT.ok
+    }
+    const error = Cause.squash(exit.cause)
+    if (CliError.isCliError(error) && error._tag === "ShowHelp") {
+      // `--help` and a group command with nothing to run: the help is the answer. Bad flags: the reasons, not the whole help.
+      if (error.errors.length === 0) {
+        io.stdout(out.join(""))
         return EXIT.ok
       }
-      case "run":
-        return await runCommand(rest, io)
-      case "check":
-        return checkCommand(rest, io)
-      case "import":
-        return importCommand(rest, io)
-      case "convert":
-        return convertCommand(rest, io)
-      case "components":
-        return componentsCommand(rest, io)
-      case "describe":
-        return describeCommand(rest, io)
-      case "examples":
-        return examplesCommand(rest, io)
-      case "docs":
-        return docsCommand(rest, io)
-      default:
-        throw new UsageError(`unknown command "${command}"`, ["commands: run, check, import, convert, components, describe, examples, docs, version (see --help)"])
+      io.stderr(err.join(""))
+      io.stderr(`Run "${error.commandPath.join(" ")} --help" for usage.\n`)
+      return EXIT.usage
     }
-  } catch (error) {
+    if (error instanceof Exited) return error.code
     if (error instanceof UsageError) {
       io.stderr(`infra-sim: ${error.message}\n${error.issues.map((i) => `  ${i}\n`).join("")}`)
       return EXIT.usage
     }
+    if (CliError.isCliError(error)) {
+      io.stderr(`infra-sim: ${error.message}\n`)
+      return EXIT.usage
+    }
+    io.stderr(`infra-sim: internal error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`)
+    return EXIT.internal
+  })
+
+/** Run the CLI. Returns the exit code; never throws and never exits the process, so it can be embedded and tested. */
+export const main = async (argv: ReadonlyArray<string>, io: IO): Promise<number> => {
+  try {
+    return await Effect.runPromise(program(argv, io).pipe(Effect.provide(NodeServices.layer)))
+  } catch (error) {
     io.stderr(`infra-sim: internal error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`)
     return EXIT.internal
   }
 }
-
-void fmtDuration

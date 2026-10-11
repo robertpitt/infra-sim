@@ -100,6 +100,7 @@ npm run cli -- run @multi-region -d 6m \
     --assert "users-us.errorRatio < 5%"                  # exit 1 if it doesn't hold
 npm run cli -- run examples/scenarios/lose-us-east-1.yaml --json
 npm run cli -- describe aws.lambda                       # every setting, range, and hard limit vs quota
+npm run cli -- run --help                                # flags and examples for any command (also --version, --completions zsh)
 npm run build:cli                                        # dist-cli/infra-sim.mjs: one file, Node 22+, the `infra-sim` bin
 ```
 
@@ -108,7 +109,8 @@ changes, and assertions (`api.errorRatio < 1%`, `orders-queue.gauge.depth:max < 
 Runs are on virtual time and deterministic, so a simulated hour takes seconds and the same seed gives the same result. Exit
 codes: `0` held, `1` an assertion failed, `2` the input was wrong. `--json` prints the whole result as data. The guide for
 people and agents, with the scenario format, assertion syntax and output schema, is [`docs/CLI.md`](docs/CLI.md) (also
-`infra-sim docs`).
+`infra-sim docs`). The command line is built with [`effect/cli`](https://effect.website), which provides `--help`,
+`--version`, shell completions and flag errors.
 
 ## Layout
 
