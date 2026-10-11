@@ -1,8 +1,28 @@
 # infra-sim
 
+[![Try the live demo](https://img.shields.io/badge/live%20demo-try%20it%20in%20your%20browser-5aa2ff?style=for-the-badge)](https://robertpitt.github.io/infra-sim/)
+
+**[Open the live demo →](https://robertpitt.github.io/infra-sim/)** Nothing to install: the whole simulator runs in your browser. Pick an example from the sidebar, press play, and break something.
+
 Simulate cloud infrastructure under traffic and faults. Draw a design (clients, API Gateway, Lambda, SQS, SNS, DynamoDB, S3, regions, external HTTP services), press play, and watch where it scales, where it pushes back, and where it falls over: throttling cascades, retry storms, redelivery loops, regional outages. AWS first, using AWS's published limits (each one marked **hard**, an adjustable **quota**, or **assumed**), with the structure to add other providers.
 
 The engine is pure [Effect](https://effect.website) (`src/simulator`, no DOM) and runs in a Web Worker in the browser; the UI (`src/ui`) is a client of it. How it works, and why it is fast: [SIMULATOR.md](SIMULATOR.md). Where every number comes from: [docs/AWS-LIMITS.md](docs/AWS-LIMITS.md).
+
+<a href="https://robertpitt.github.io/infra-sim/"><img src="docs/screenshots/scenario.png" alt="The Multi-region example losing us-east-1: the US stack and, through its synchronous ledger write, the European one fail; the header shows 100% errors and seven alerts firing, and the scenario panel shows its timeline and checks." width="100%"></a>
+
+<sub>The Multi-region example playing its <em>Lose us-east-1</em> scenario. The US region is down, and Europe fails with it because its handler writes to the US ledger synchronously. The header shows what the clients see (100% errors, seven alerts firing); the scenario panel shows the outage on its timeline and the checks it makes.</sub>
+
+## A quick tour
+
+**Break things and watch.** The examples ship with scenarios: a timeline of faults and changes (lose a region, slow a dependency, triple the traffic) and the checks that must hold. Play one and watch it unfold at up to 100× speed; the run stops at the end with a verdict. Standard alarms (errors, throttling, timeouts, dead letters, old backlogs, saturation) watch every component and show where it hurts.
+
+**Configure it while it runs.** Select a component and the path it is on lights up. Its gear, or a double-click, opens its settings, as sliders; where the provider publishes a limit, the slider stops at it and says whether it is *hard* or an adjustable *quota*. The charts underneath show the effect as you drag.
+
+<img src="docs/screenshots/settings.png" alt="The Fan-out example with the Emailer Lambda selected: the path from the app through SNS and SQS to the Emailer and the email provider is lit while the audit log and analytics branches are dimmed; its settings dialog is open, and the charts below show its rate, latency and concurrency." width="100%">
+
+**Designs are YAML, checked as you type.** The *Editor* tab shows the design as YAML, with completion, hover help and validation from the design's JSON Schema: the same schema VS Code uses for design files. Edits apply with ⌘S or when you go back to the canvas, as one undoable change.
+
+<img src="docs/screenshots/editor.png" alt="The YAML editor with a completion list inside a Lambda function's settings, offering only the settings a Lambda has that aren't set yet." width="100%">
 
 ## Quick start
 
@@ -23,6 +43,7 @@ npm run dev        # http://localhost:5173
 | `npm run cli -- <command>` | The command line: run, check, import, describe. See below. |
 | `npm run build:cli` | Bundles the command line to `dist-cli/infra-sim.mjs`. |
 | `npm run bench -- poshub 60000 10` | CPU cost of simulating an example, at a multiple of its traffic. See `tools/`. |
+| `node tools/screenshots.mjs` | Retakes the README's screenshots from the running app (`npm run dev` first; or `URL=<site>` to use the live demo). |
 
 ## Deployment
 
