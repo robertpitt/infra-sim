@@ -7,6 +7,7 @@ import type { Diagnostic } from "./Diagnostic.ts"
 import { keyOf, oneWayLatencyMs, type Placement } from "./Provider.ts"
 import type { Components } from "./Registry.ts"
 import type { Topology } from "./Topology.ts"
+import * as ScenarioSpec from "./ScenarioSpec.ts"
 
 /**
  * A design has two forms, joined by a codec.
@@ -82,7 +83,12 @@ export const Doc = Schema.Struct({
   nodes: Schema.Record(Schema.String, NodeDoc),
   edges: Schema.Record(Schema.String, EdgeDoc),
   /** Loops that watch nodes and change them while the design runs, by id. */
-  controllers: Schema.optionalKey(Schema.Record(Schema.String, ControllerDoc))
+  controllers: Schema.optionalKey(Schema.Record(Schema.String, ControllerDoc)),
+  /**
+   * What happens to this design, by id: the scenarios written for it (a peak, a lost region), each with its timeline and
+   * the checks that must hold (`ScenarioSpec.ts`). They travel with the design because they name its nodes.
+   */
+  scenarios: Schema.optionalKey(Schema.Record(Schema.String, ScenarioSpec.Spec))
 })
 
 export type Position = typeof Position.Type

@@ -4,6 +4,7 @@ import { type Assertion, clientIds, combine, compare, evaluate, measure, parseAs
 import * as Design from "./Design.ts"
 import * as Fault from "./Fault.ts"
 import { Registry } from "./Registry.ts"
+import * as ScenarioSpec from "./ScenarioSpec.ts"
 import * as Simulation from "./Simulation.ts"
 import type { Frame, Stats } from "./Telemetry.ts"
 import { VirtualTime } from "./VirtualTime.ts"
@@ -12,7 +13,8 @@ import { VirtualTime } from "./VirtualTime.ts"
  * Scenarios: a design plus what happens to it.
  *
  * A design says what the system is; a scenario says how long to run it, with what traffic, which settings changed,
- * what breaks and when, and what must hold. Running one gives a plain-data `Result` (per-node and per-edge summaries,
+ * what breaks and when, and what must hold. A design carries the scenarios written for it (`scenarios` in the design);
+ * a scenario can also be a file of its own that names its design, as below. Running one gives a plain-data `Result` (per-node and per-edge summaries,
  * the faults that happened, every assertion with its measured value), so the same scenario can be run from the
  * browser, a command line, a test or a CI job, and its result read by a person or a program.
  *
@@ -36,77 +38,24 @@ export { type Aggregate, ASSERTION_SYNTAX, type Assertion, parseAssertion, parse
 // The scenario document
 // ---------------------------------------------------------------------------------------------------------
 
-const DurationInput = Schema.Union([Schema.Number, Schema.String])
-
-const Settings = Schema.Record(Schema.String, Schema.Unknown)
-
-/** A fault given as `Outage`, `Slow(250ms)`, `Errors(20%)`, or as an object `{ type: Slow, extra: 250ms }`. */
-const FaultInput = Schema.Union([Schema.String, Schema.Record(Schema.String, Schema.Unknown)])
-
-const Event = Schema.Struct({
-  /** When it happens, from the start of the run. */
-  at: DurationInput,
-  /** Say what this event is, in the result's log. */
-  note: Schema.optionalKey(Schema.String),
-  /** Break something: `target` is `node:<id>`, `edge:<id>` or `region:<placement>` (`region:aws:us-east-1`). */
-  inject: Schema.optionalKey(
-    Schema.Struct({
-      target: Schema.String,
-      fault: FaultInput,
-      /** How long it lasts. Without it the fault lasts until cleared. */
-      for: Schema.optionalKey(DurationInput),
-      /** A name to clear it by later. */
-      id: Schema.optionalKey(Schema.String)
-    })
-  ),
-  /** Lift a named fault, or `all` of them. */
-  clear: Schema.optionalKey(Schema.String),
-  /** Change settings of a node (`node`) or an edge (`edge`) while running. Merged over what it already has. */
-  set: Schema.optionalKey(
-    Schema.Struct({ node: Schema.optionalKey(Schema.String), edge: Schema.optionalKey(Schema.String), settings: Settings })
-  ),
-  /** Change account-level quotas of a placement such as `aws:us-east-1` while running. */
-  account: Schema.optionalKey(Schema.Struct({ placement: Schema.String, settings: Settings }))
-})
-
-const AssertionInput = Schema.Union([
-  Schema.String,
-  Schema.Struct({
-    check: Schema.String,
-    name: Schema.optionalKey(Schema.String),
-    /** Measure only from here (default: the end of the warm-up). */
-    from: Schema.optionalKey(DurationInput),
-    /** ... to here (default: the end of the run). */
-    to: Schema.optionalKey(DurationInput)
-  })
-])
-
+/**
+ * A scenario file: the scenario's fields (`ScenarioSpec.ts`, the same ones a design carries under `scenarios`) plus the
+ * format version and the design it is for.
+ */
 export const Scenario = Schema.Struct({
   version: Schema.Literal(1),
-  name: Schema.optionalKey(Schema.String),
-  description: Schema.optionalKey(Schema.String),
   /** A path to a design file (resolved by whoever loads the scenario), or the design itself. */
   design: Schema.optionalKey(Schema.Union([Schema.String, Design.Doc])),
-  seed: Schema.optionalKey(Schema.Int),
-  duration: Schema.optionalKey(DurationInput),
-  /** Time to let the system settle before measuring. Assertions and summaries start after it. */
-  warmup: Schema.optionalKey(DurationInput),
-  /** Multiply every client's request rate. */
-  traffic: Schema.optionalKey(Schema.Struct({ scale: Schema.Number })),
-  /** Settings applied at the start, merged over the design's own, by node id, edge id and placement. */
-  overrides: Schema.optionalKey(
-    Schema.Struct({
-      nodes: Schema.optionalKey(Schema.Record(Schema.String, Settings)),
-      edges: Schema.optionalKey(Schema.Record(Schema.String, Settings)),
-      accounts: Schema.optionalKey(Schema.Record(Schema.String, Settings))
-    })
-  ),
-  timeline: Schema.optionalKey(Schema.Array(Event)),
-  assert: Schema.optionalKey(Schema.Array(AssertionInput))
+  ...ScenarioSpec.fields
 })
 export type Scenario = typeof Scenario.Type
 
-export type TimelineEvent = typeof Event.Type
+/** A scenario wherever it is written: in a file of its own, or in a design under `scenarios`. */
+export type Spec = ScenarioSpec.Spec
+export type TimelineEvent = ScenarioSpec.TimelineEvent
+
+/** The scenarios a design carries, by id, in the order it lists them. */
+export const ofDesign = (design: Design.Doc): ReadonlyArray<readonly [id: string, scenario: Spec]> => Object.entries(design.scenarios ?? {})
 
 /** Something is wrong with the scenario, the design or the way they fit together. Every problem is listed. */
 export class ScenarioError extends Error {
@@ -295,7 +244,7 @@ export interface RunOptions {
  * Check a scenario against a design without running it: every problem, listed, in one go. Assertions are parsed, events
  * are checked for ids that exist and times inside the run.
  */
-export const check = (design: Design.Doc, scenario: Scenario): ReadonlyArray<string> => {
+export const check = (design: Design.Doc, scenario: Spec): ReadonlyArray<string> => {
   const issues: Array<string> = []
   const duration = parseDuration(scenario.duration)
   if (scenario.duration !== undefined && duration === undefined) issues.push(`duration: can't read "${String(scenario.duration)}" (try 90s, 5m, 1h30m)`)
@@ -343,7 +292,7 @@ export const check = (design: Design.Doc, scenario: Scenario): ReadonlyArray<str
  * Apply the scenario's traffic scale and starting overrides to the design's own settings. The design is not changed:
  * a new document comes back.
  */
-export const prepare = (design: Design.Doc, scenario: Scenario, registry: { readonly get: (type: string) => { readonly type: string } | undefined }): Design.Doc => {
+export const prepare = (design: Design.Doc, scenario: Spec, registry: { readonly get: (type: string) => { readonly type: string } | undefined }): Design.Doc => {
   let doc = design
   const scale = scenario.traffic?.scale
   if (scale !== undefined && scale !== 1) {
@@ -461,7 +410,7 @@ const kindOf = (event: TimelineEvent): typeof EventKind.Type =>
  */
 export const playback = (
   design: Design.Doc,
-  scenario: Scenario,
+  scenario: Spec,
   registry: { readonly get: (type: string) => { readonly type: string; readonly inputs: boolean } | undefined }
 ): Effect.Effect<Playback, ScenarioError> =>
   Effect.gen(function*() {
@@ -623,7 +572,7 @@ export const playback = (
  * Run a scenario against a design, as fast as it goes. The design is checked first (every problem reported, by id),
  * then run on a fresh virtual-time world, stopping at each timeline event to apply it. The result is plain data.
  */
-export const run = (design: Design.Doc, scenario: Scenario, options: RunOptions = {}): Effect.Effect<Result, ScenarioError, Registry> =>
+export const run = (design: Design.Doc, scenario: Spec, options: RunOptions = {}): Effect.Effect<Result, ScenarioError, Registry> =>
   Effect.gen(function*() {
     const registry = yield* Registry
     const play = yield* playback(design, scenario, registry)

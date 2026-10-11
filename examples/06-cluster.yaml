@@ -75,3 +75,26 @@ controllers:
       period: 15 seconds
       scaleOutCooldown: 0
       scaleInCooldown: 2 minutes
+scenarios:
+  # Run in the app's Scenario tab, or: infra-sim run @cluster --scenario surge
+  surge:
+    name: Traffic surge
+    description: Three times the traffic for two minutes. The autoscaler adds replicas, but each takes 20 seconds to start, so for the first minute the queue overflows and some users are turned away; then it keeps up, and scales back in afterwards.
+    duration: 6m
+    warmup: 30s
+    overrides:
+      nodes:
+        users: { spike: { multiplier: 1 } }   # the example's own spike; this scenario brings a longer one
+    timeline:
+      - at: 1m
+        set: { node: users, settings: { rps: 450 } }
+        note: traffic triples
+      - at: 3m
+        set: { node: users, settings: { rps: 150 } }
+        note: traffic back to normal
+    assert:
+      - { name: Users are turned away while new replicas start, check: "users.errorRatio > 10%", from: 1m, to: 1m30s }
+      - { name: The autoscaler adds replicas, check: "api.gauge.replicas:max >= 6", from: 1m, to: 3m }
+      - { name: Once scaled out it keeps up, check: "users.errorRatio < 1%", from: 2m, to: 3m }
+      - { name: Latency settles, check: "users.latency.p99 < 400ms", from: 2m30s, to: 3m }
+      - { name: It scales back in, check: "api.gauge.replicas:last <= 4", from: 5m30s }

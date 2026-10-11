@@ -1,5 +1,5 @@
 import { examples } from "#examples"
-import { Design } from "#simulator"
+import { Design, type Scenario } from "#simulator"
 import type { Doc, Position } from "./types.ts"
 import { createStore } from "../lib/store.ts"
 import { containerAt, GROUP_DEFAULT, isContainer, rectOf, withDescendants } from "../canvas/groups.ts"
@@ -256,3 +256,25 @@ export const setDesignName = (name: string): void => commit((d) => ({ ...d, name
 export const setSeed = (seed: number): void => commit((d) => ({ ...d, seed }), "design-seed")
 
 export const applyLayout = (layout: (design: Doc) => Doc): void => commit(layout)
+
+// ---------------------------------------------------------------------------------------------------------
+// Scenarios travel with the design (its `scenarios` section): adding or removing one is an edit like any other.
+// ---------------------------------------------------------------------------------------------------------
+
+/** Add a scenario to the design under an id made from its name. Returns the id. */
+export const addScenario = (scenario: Scenario.Spec): string => {
+  let created = ""
+  commit((d) => {
+    created = Design.uniqueId((candidate) => candidate in (d.scenarios ?? {}), Design.slug(scenario.name ?? "scenario"))
+    return { ...d, scenarios: { ...d.scenarios, [created]: scenario } }
+  })
+  return created
+}
+
+export const removeScenario = (id: string): void =>
+  commit((d) => {
+    if (d.scenarios?.[id] === undefined) return d
+    const { [id]: _removed, ...rest } = d.scenarios
+    const { scenarios: _all, ...design } = d
+    return Object.keys(rest).length === 0 ? design : { ...design, scenarios: rest }
+  })

@@ -1,44 +1,28 @@
-import type { ComponentManifest, NodeDoc } from "../state/types.ts"
+import type { NodeProps } from "@xyflow/react"
 import { memo } from "react"
 import { useStore } from "../lib/store.ts"
 import { run } from "../state/run.ts"
 import { Icon } from "../ui/Icon.tsx"
-import { GROUP_DEFAULT, GROUP_HEAD_H } from "./groups.ts"
-
-interface Props {
-  readonly id: string
-  readonly spec: NodeDoc
-  readonly manifest: ComponentManifest | undefined
-  readonly selected: boolean
-  /** The placement (`aws:us-east-1`) the box draws, so regional faults show on it. */
-  readonly placement: string | undefined
-  /** Short description under the name: the region, the address block. */
-  readonly detail: string
-  readonly level: "error" | "warning" | "info" | undefined
-}
+import type { ContainerNode } from "./flow.ts"
+import { GROUP_HEAD_H } from "./groups.ts"
 
 /**
- * A container on the canvas: a labelled box drawn behind the nodes inside it. Only its title bar takes pointer
- * input (to select and drag it, and what is inside moves too) and its corner (to resize), so the empty middle
- * stays part of the canvas: you can still pan, and drop things in.
+ * A container on the canvas: a labelled box drawn behind the wires and the nodes inside it. Only its title bar takes
+ * pointer input (to select and drag it, and what is inside moves too), so the empty middle stays part of the canvas:
+ * you can still pan, and drop things in. Its resize corner is drawn above everything (`BoxGrips`), where what is
+ * inside the box can't cover it.
  */
-export const GroupView = memo(function GroupView({ id, spec, manifest, selected, placement, detail, level }: Props) {
+export const GroupView = memo(function GroupView({ id, data, selected }: NodeProps<ContainerNode>) {
+  const { spec, manifest, placement, detail, level } = data
   const down = useStore(run, (s) => s.faults.some((f) => f.target.kind === "region" && f.target.id === placement && f.fault._tag === "Outage"))
   const impaired = useStore(run, (s) => s.faults.some((f) => f.target.kind === "region" && f.target.id === placement))
-  const at = spec.position ?? { x: 0, y: 0 }
-  const size = spec.size ?? GROUP_DEFAULT
   return (
     <div
       className="group-box"
       data-group-id={id}
       data-selected={selected || undefined}
       data-down={down || undefined}
-      style={{
-        width: size.w,
-        height: size.h,
-        transform: `translate(${at.x}px, ${at.y}px)`,
-        ["--accent" as string]: manifest?.accent ?? "#8893a5"
-      }}
+      style={{ ["--accent" as string]: manifest?.accent ?? "#8893a5" }}
     >
       <div className="group-head" data-node-id={id} style={{ height: GROUP_HEAD_H }}>
         <span className="node-icon sm">
@@ -59,7 +43,6 @@ export const GroupView = memo(function GroupView({ id, spec, manifest, selected,
           </span>
         )}
       </div>
-      <span className="group-resize" data-resize-id={id} title="Drag to resize" />
     </div>
   )
 })

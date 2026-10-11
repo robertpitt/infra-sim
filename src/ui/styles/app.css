@@ -305,21 +305,21 @@ select:disabled { opacity: 0.55; }
 .metrics [data-tone="bad"] dd { color: #ff9c9c; }
 
 /* ---------- Canvas ---------- */
-.canvas {
-  position: absolute; inset: 0; overflow: hidden; touch-action: none; user-select: none;
-  background-color: var(--canvas);
-  background-image: radial-gradient(circle at 1px 1px, #212a38 1.1px, transparent 1.5px);
-  background-size: var(--grid, 24px) var(--grid, 24px);
-  background-position: var(--gx, 0) var(--gy, 0);
-}
-.canvas[data-panning] { cursor: grabbing; }
-.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
-.edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.canvas { position: absolute; inset: 0; overflow: hidden; user-select: none; background-color: var(--canvas); }
+.canvas .react-flow { --xy-background-color: var(--canvas); }
+.react-flow__pane { cursor: default; }
+.react-flow__pane.dragging { cursor: grabbing; }
+.arrowheads { position: absolute; width: 0; height: 0; overflow: hidden; }
+.react-flow__attribution { background: transparent; opacity: 0.5; }
+.react-flow__attribution a { color: var(--faint); }
+.minimap { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); }
+.minimap svg { display: block; }
+@media (max-width: 1000px) { .minimap { display: none; } }
 .empty-hint { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 6px; color: var(--muted); pointer-events: none; }
 .empty-hint b { color: var(--text); font-size: 16px; }
 
 .node {
-  position: absolute; left: 0; top: 0;
+  position: relative;
   border-radius: 13px; border: 1px solid var(--line);
   background: linear-gradient(180deg, #171e2a 0%, #121821 100%);
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.03);
@@ -327,8 +327,10 @@ select:disabled { opacity: 0.55; }
   transition: border-color 0.2s, box-shadow 0.2s, opacity 0.18s;
 }
 .node::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent); opacity: 0.85; }
+/* A box takes pointer input only at its title bar and corner: its middle is canvas. */
+.react-flow .react-flow__node-container { pointer-events: none !important; }
 .group-box {
-  position: absolute; left: 0; top: 0; pointer-events: none;
+  position: absolute; inset: 0; pointer-events: none;
   border: 1.5px dashed color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 16px;
   background: color-mix(in srgb, var(--accent) 5%, transparent);
   transition: border-color 0.2s, background 0.2s;
@@ -339,7 +341,11 @@ select:disabled { opacity: 0.55; }
 .group-title { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
 .group-title b { font-weight: 650; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .group-title i { font-style: normal; font-size: 10.5px; color: var(--muted); white-space: nowrap; }
-.group-resize { position: absolute; right: -1px; bottom: -1px; width: calc(22px / var(--k, 1)); height: calc(22px / var(--k, 1)); cursor: nwse-resize; pointer-events: auto; border-radius: 0 0 16px 0;
+/* Resize corners live in a layer above the nodes (`BoxGrips`); only the corners themselves take the pointer. */
+.react-flow__viewport-portal { z-index: 3; pointer-events: none; }
+.group-resize {
+  position: absolute; width: calc(22px / var(--k, 1)); height: calc(22px / var(--k, 1)); transform: translate(-100%, -100%); margin: 1px 0 0 1px;
+  border-radius: 0 0 16px 0; cursor: nwse-resize; pointer-events: auto; touch-action: none;
   background: linear-gradient(135deg, transparent 55%, color-mix(in srgb, var(--accent) 70%, transparent) 55% 62%, transparent 62% 74%, color-mix(in srgb, var(--accent) 70%, transparent) 74% 81%, transparent 81%); }
 
 .node[data-health="ok"] { border-color: rgba(62, 207, 154, 0.32); }
@@ -380,14 +386,18 @@ select:disabled { opacity: 0.55; }
 .node-ports { position: absolute; left: 0; right: 0; padding: 4px 18px 4px 14px; border-top: 1px dashed var(--line-soft); }
 .port-row { display: flex; align-items: center; justify-content: flex-end; font-size: 10.5px; color: var(--muted); letter-spacing: 0.02em; }
 
-.handle {
-  position: absolute; width: 13px; height: 13px; margin-top: -6.5px; border-radius: 50%;
+/* React Flow centres a handle on the node's side; this is how it looks. */
+.react-flow__handle.handle {
+  width: 13px; height: 13px; min-width: 0; min-height: 0; border-radius: 50%;
   background: var(--accent); border: 2.5px solid var(--panel); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
 }
-.handle.in { left: -7px; background: var(--faint); box-shadow: 0 0 0 1px var(--line); }
-.handle.out { right: -7px; cursor: crosshair; }
-.handle.out::before { content: ""; position: absolute; inset: -9px; }
-.handle.out:hover { transform: scale(1.25); }
+.react-flow__handle.handle.in { background: var(--faint); box-shadow: 0 0 0 1px var(--line); }
+.react-flow__handle.handle.out { cursor: crosshair; transition: transform 0.1s; }
+.react-flow__handle.handle.out::before { content: ""; position: absolute; inset: -9px; border-radius: 50%; }
+.react-flow__handle.handle.out:hover { transform: translate(50%, -50%) scale(1.25); }
+/* While a wire is being drawn, inputs it can reach say so. */
+.react-flow__handle.handle.in.connectingto { background: var(--blue); box-shadow: 0 0 0 3px rgba(90, 162, 255, 0.3); }
+.react-flow__handle.handle.in.valid { background: var(--blue); }
 
 .edge-hit { fill: none; stroke: transparent; stroke-width: 18; pointer-events: stroke; cursor: pointer; }
 .edge-line { fill: none; stroke: var(--edge, #2c3748); stroke-linecap: round; pointer-events: none; }
@@ -560,6 +570,11 @@ select:disabled { opacity: 0.55; }
 .scenario-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .scenario-card p { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
 .btn.small.primary { min-width: 0; }
+.scenario-card[data-broken] { border-color: rgba(242, 184, 75, 0.3); }
+.scenario-problem { display: flex; align-items: flex-start; gap: 6px; color: #f4d28d !important; }
+.scenario-problem svg { flex: none; margin-top: 2px; }
+.scenario-none { margin: 4px 0 0; }
+.scenario-none code { font: 11px var(--mono); color: var(--text); }
 
 .scenario { padding: 6px 12px 10px; display: grid; gap: 8px; }
 .scenario-head { display: flex; align-items: center; gap: 8px; color: var(--muted); }

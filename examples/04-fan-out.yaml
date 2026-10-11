@@ -91,3 +91,22 @@ edges:
       retry:
         maxAttempts: 3
     from: {node: emailer}
+scenarios:
+  # Run in the app's Scenario tab, or: infra-sim run @fan-out --scenario mail-provider-down
+  mail-provider-down:
+    name: Mail provider down
+    description: The external mail provider is unreachable for two minutes. Orders keep flowing and emails wait in the queue instead of being lost, but the provider's rate limit is close to normal traffic, so catching up takes three times as long as the outage did.
+    duration: 11m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        inject: { target: "node:mail-provider", fault: Outage, for: 2m }
+        note: the mail provider goes down
+      - at: 3m
+        note: the mail provider is back
+    assert:
+      - { name: Orders keep being placed, check: "app.errorRatio < 1%" }
+      - { name: Emails wait in the queue, check: "email-queue.gauge.depth:max > 5000", from: 1m, to: 3m }
+      - { name: No email is lost, check: "email-queue.total.deadLettered == 0" }
+      - { name: The rate limit holds back the catch-up, check: "email-queue.gauge.depth:last > 1000", from: 8m, to: 9m }
+      - { name: Caught up within eight minutes of the outage ending, check: "email-queue.gauge.depth:last < 100", from: 10m, to: 11m }

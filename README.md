@@ -98,15 +98,17 @@ npm run cli -- run @orders -d 5m --scale 3               # a design, at three ti
 npm run cli -- run @multi-region -d 6m \
     --fault "region:aws:us-east-1 Outage at=2m for=2m" \
     --assert "users-us.errorRatio < 5%"                  # exit 1 if it doesn't hold
-npm run cli -- run examples/scenarios/lose-us-east-1.yaml --json
+npm run cli -- run @multi-region --scenario lose-us-east-1 --json
 npm run cli -- describe aws.lambda                       # every setting, range, and hard limit vs quota
 npm run cli -- run --help                                # flags and examples for any command (also --version, --completions zsh)
 npm run build:cli                                        # dist-cli/infra-sim.mjs: one file, Node 22+, the `infra-sim` bin
 ```
 
-A **scenario** is a design plus what happens to it: duration, traffic, setting overrides, a timeline of faults and live
-changes, and assertions (`api.errorRatio < 1%`, `orders-queue.gauge.depth:max < 5000`, `system.latency.p99 < 800ms`).
-The app plays the same files live (the dock's **Scenario** tab): the timeline happens at its times, each check shows whether
+A **scenario** is what happens to a design: duration, traffic, setting overrides, a timeline of faults and live changes, and
+assertions (`api.errorRatio < 1%`, `orders-queue.gauge.depth:max < 5000`, `system.latency.p99 < 800ms`). A design carries
+the scenarios written for it under `scenarios` (every example has one: a retry storm, a lost region, a provider outage, a
+traffic surge), and `--scenario <id>` plays one; a scenario can also be a file of its own that names its design.
+The app plays the open design's scenarios live (the dock's **Scenario** tab): the timeline happens at its times, each check shows whether
 it is holding, and the run stops at the end with a verdict. Every run is also watched by standard **alarms** (errors,
 throttling, timeouts, dead-lettered and expired messages, old backlogs, saturation), shown in the **Alerts** tab and on the
 nodes, and listed in the CLI's report.
@@ -121,7 +123,7 @@ people and agents, with the scenario format, assertion syntax and output schema,
 ```
 src/simulator/   the engine: pure Effect, no DOM. Components, edges, faults, virtual time, the Engine protocol, importers
 src/cli/          the command line (Node only): a thin layer over the engine
-src/ui/          the React app: canvas, sidebar, and a dock with charts, alerts and scenarios. Runs the engine in a worker (src/ui/state/engine.worker.ts)
+src/ui/          the React app: a React Flow canvas, the sidebar, and a dock with charts, alerts and scenarios. Runs the engine in a worker (src/ui/state/engine.worker.ts)
 src/examples/    loads examples/*.yaml for the app and tests
 examples/        the example designs (and examples/imports: templates to try the importer on)
 docs/            AWS limits, with sources

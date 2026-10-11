@@ -120,12 +120,34 @@ Time values (`--duration`, `at`, `for`, windows) take `250ms`, `90s`, `2m`, `1h3
 
 ## Scenarios
 
-A scenario is a design plus what happens to it. YAML or JSON:
+A scenario is what happens to a design: how long to run, with what traffic, what breaks and when, and what must hold.
+Scenarios are usually written **in the design**, under `scenarios`, because they name its nodes; each example carries one
+or more (`infra-sim examples` lists them). Play one with `--scenario <id>`:
+
+```yaml
+# in the design (examples/03-multi-region.yaml)
+scenarios:
+  lose-us-east-1:
+    name: Lose us-east-1
+    duration: 6m
+    timeline:
+      - { at: 2m, inject: { target: "region:aws:us-east-1", fault: Outage, for: 2m } }
+    assert:
+      - { check: "users-eu.errorRatio > 90%", from: 2m30s, to: 4m }
+```
+
+```bash
+infra-sim run @multi-region --scenario lose-us-east-1
+infra-sim check @multi-region                    # also checks every scenario the design carries
+```
+
+A scenario can also be a file of its own that names its design (useful for scenarios kept apart from the design, or for a
+template an importer reads). Its fields are the same, plus `version` and `design`. YAML or JSON:
 
 ```yaml
 version: 1
 name: Lose us-east-1
-design: ../03-multi-region.yaml     # path (relative to this file) to a design, or a template an importer reads; or an inline design
+design: ../examples/03-multi-region.yaml   # path (relative to this file) to a design, or a template an importer reads; or an inline design
 seed: 5
 duration: 6m
 warmup: 30s
@@ -149,8 +171,10 @@ assert:
   - { name: Europe keeps serving, check: "users-eu.errorRatio < 1%", from: 2m30s, to: 4m }
 ```
 
-`infra-sim check scenario.yaml` lists every problem at once (unknown node ids, bad times, unreadable assertions) and exits
-2 if there are any; `run` refuses to start with the same list.
+`infra-sim check scenario.yaml` (or `check design.yaml` for the scenarios a design carries) lists every problem at once
+(unknown node ids, bad times, unreadable assertions, each named by its scenario) and exits 2 if there are any; `run` refuses
+to start with the same list. In the app, the Scenario tab lists the open design's scenarios, plays them live, and can add a
+scenario file to the design ("Add from file…") if everything it names is there.
 
 ### Faults
 

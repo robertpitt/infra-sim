@@ -60,3 +60,24 @@ edges:
         maxAttempts: 3
         backoff: 100 millis
     from: {node: checkout}
+scenarios:
+  # Run in the app's Scenario tab, or: infra-sim run @retry-storm --scenario slow-payments
+  slow-payments:
+    name: Payments slow down
+    description: The payment provider takes 3 s longer for a minute. Calls now outlast the gateway's 4 s timeout, every layer retries what timed out, and the provider gets several times the calls users send, just when it can least take them.
+    duration: 4m
+    warmup: 30s
+    overrides:
+      nodes:
+        clients: { spike: { multiplier: 1 } }   # the example's own spike would blur the picture
+    timeline:
+      - at: 1m
+        inject: { target: "node:payments", fault: "Slow(3s)", for: 1m }
+        note: payments slow down
+      - at: 2m
+        note: payments are fast again
+    assert:
+      - { name: "Before, the provider gets what users send", check: "payments.rate.in < 80/s", from: 30s, to: 1m }
+      - { name: Retries multiply the load on the provider, check: "payments.rate.in > 180/s", from: 1m15s, to: 2m }
+      - { name: Users see the slowdown as failures, check: "clients.errorRatio > 50%", from: 1m15s, to: 2m }
+      - { name: It recovers once payments are fast again, check: "clients.errorRatio < 1%", from: 3m }

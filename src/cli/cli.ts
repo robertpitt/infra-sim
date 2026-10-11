@@ -124,11 +124,28 @@ const parseFaultFlag = (text: string): Scenario.TimelineEvent => {
   return { at: kv.at, inject: { target, fault, ...(kv.for === undefined ? {} : { for: kv.for }), ...(kv.id === undefined ? {} : { id: kv.id }) } }
 }
 
-const designAndScenario = (loaded: Loaded, file: string): { design: Design.Doc; scenario: Scenario.Scenario } => {
-  if (loaded.kind === "design") return { design: loaded.doc, scenario: { version: 1 } }
+/**
+ * The design to run and the scenario to play on it: a scenario file's own, one of the design's (`--scenario <id>`), or
+ * none (the design runs as it is).
+ */
+const designAndScenario = (loaded: Loaded, file: string, id?: string): { design: Design.Doc; scenario: Scenario.Spec } => {
+  if (loaded.kind === "design") {
+    if (id === undefined) return { design: loaded.doc, scenario: {} }
+    const own = loaded.doc.scenarios?.[id]
+    if (own === undefined) {
+      const ids = Scenario.ofDesign(loaded.doc).map(([k]) => k)
+      throw new UsageError(`${file}: no scenario "${id}"`, [ids.length === 0 ? "this design has no scenarios" : `its scenarios: ${ids.join(", ")}`])
+    }
+    return { design: loaded.doc, scenario: own }
+  }
+  if (id !== undefined) throw new UsageError(`--scenario picks one of a design's own scenarios, and ${file} is a scenario file already`)
   if (loaded.design === undefined) throw new UsageError(`${file}: the scenario has no design (add \`design: path/to/design.yaml\`)`)
   return { design: loaded.design, scenario: loaded.scenario }
 }
+
+/** A design's own scenarios, checked against it, each problem named by the scenario it is in. */
+const ownScenarioIssues = (design: Design.Doc): ReadonlyArray<string> =>
+  Scenario.ofDesign(design).flatMap(([id, scenario]) => Scenario.check(design, scenario).map((issue) => `scenarios.${id}: ${issue}`))
 
 const fileArgument = (what: string) => Argument.String("file").pipe(Argument.withDescription(what))
 
@@ -136,6 +153,7 @@ const run = Command.make(
   "run",
   {
     file: fileArgument("A design, a scenario, or a template an importer reads; or @<example-id> (for example @orders)"),
+    scenario: Flag.String("scenario").pipe(Flag.withAlias("s"), Flag.withMetavar("id"), Flag.withDescription("Play one of the design's own scenarios (its `scenarios` section; `infra-sim examples` lists them)"), Flag.optional),
     duration: Flag.String("duration").pipe(Flag.withAlias("d"), Flag.withMetavar("time"), Flag.withDescription("How long to simulate: 90s, 5m, 1h30m (default 60s, or the scenario's)"), Flag.optional),
     warmup: Flag.String("warmup").pipe(Flag.withMetavar("time"), Flag.withDescription("Let the system settle first; summaries and assertions start after it"), Flag.optional),
     seed: Flag.Finite("seed").pipe(Flag.withDescription("Random seed. The same design and seed always give the same result"), Flag.optional),
@@ -172,7 +190,7 @@ const run = Command.make(
     const format = formatOf(o.json, o.format)
     const prepared = yield* usage(() => {
       const loaded = load(io, o.file, templateOptions(o.region, o.rps), importerOf(undef(o.importer)))
-      const { design, scenario: fromFile } = designAndScenario(loaded, o.file)
+      const { design, scenario: fromFile } = designAndScenario(loaded, o.file, undef(o.scenario))
 
       // Flags win over the file.
       const overrides = { nodes: { ...(fromFile.overrides?.nodes ?? {}) } as Record<string, Record<string, unknown>>, edges: { ...(fromFile.overrides?.edges ?? {}) } as Record<string, Record<string, unknown>>, accounts: { ...(fromFile.overrides?.accounts ?? {}) } as Record<string, Record<string, unknown>> }
@@ -181,7 +199,7 @@ const run = Command.make(
         const bag = (overrides[s.kind][s.id] ??= {})
         setPath(bag, s.path, s.value)
       }
-      const scenario: Scenario.Scenario = {
+      const scenario: Scenario.Spec = {
         ...fromFile,
         duration: undef(o.duration) ?? fromFile.duration ?? "60s",
         ...(Option.isSome(o.warmup) ? { warmup: o.warmup.value } : {}),
@@ -206,7 +224,10 @@ const run = Command.make(
 
     if (Option.isSome(o.frames)) write(io, o.frames.value, renderFrames(result.frames ?? []))
     const { frames: _frames, ...publish } = full
-    const text = format === "text" ? renderResult(result, style, { nodes: undef(o.nodes) ?? 20 }) + (diagnostics.length > 0 ? `\nDesign warnings\n${renderDiagnostics(diagnostics, style)}\n` : "") : dump(publish, format)
+    // A design with scenarios of its own, run without one, says what it could have played.
+    const own = loaded.kind === "design" && Option.isNone(o.scenario) ? Scenario.ofDesign(design).map(([id]) => id) : []
+    const hint = own.length === 0 ? "" : `\n${style.dim(`This design has scenarios: ${own.join(", ")}. Play one with --scenario <id>.`)}\n`
+    const text = format === "text" ? renderResult(result, style, { nodes: undef(o.nodes) ?? 20 }) + (diagnostics.length > 0 ? `\nDesign warnings\n${renderDiagnostics(diagnostics, style)}\n` : "") + hint : dump(publish, format)
     if (Option.isSome(o.out)) write(io, o.out.value, text)
     else io.stdout(text)
     if (!result.passed) return yield* new Exited({ code: EXIT.failed })
@@ -221,7 +242,8 @@ const run = Command.make(
   Command.withExamples([
     { command: "infra-sim run @orders --duration 2m", description: "Run a bundled example for two simulated minutes" },
     { command: `infra-sim run @orders -d 5m --scale 3 --fault "node:ingest Outage at=2m for=1m" --assert "system.errorRatio < 5%"`, description: "Triple the traffic, lose a node for a minute, assert on the outcome" },
-    { command: "infra-sim run scenario.yaml --json", description: "Run a scenario and print the whole result as data" },
+    { command: "infra-sim run @multi-region --scenario lose-us-east-1", description: "Play one of the design's own scenarios" },
+    { command: "infra-sim run scenario.yaml --json", description: "Run a scenario file and print the whole result as data" },
     { command: "infra-sim run @poshub -d 10m --frames frames.csv --json -o result.json", description: "Write the result and every metrics frame to files" }
   ])
 )
@@ -250,7 +272,8 @@ const check = Command.make(
     })
     const { loaded, design, scenario } = prepared
     const diagnostics = Diagnostics.diagnose(design, registry)
-    const issues = loaded.kind === "scenario" ? Scenario.check(design, scenario) : []
+    // A scenario file is checked against its design; a design, against every scenario it carries.
+    const issues = loaded.kind === "scenario" ? Scenario.check(design, scenario) : ownScenarioIssues(design)
     const errors = diagnostics.filter((d) => d.level === "error")
     const warnings = diagnostics.filter((d) => d.level === "warning")
     const ok = errors.length === 0 && issues.length === 0 && (!o.strict || warnings.length === 0)
@@ -268,7 +291,7 @@ const check = Command.make(
 ).pipe(
   Command.withShortDescription("Validate a design or scenario without running it"),
   Command.withDescription(block(
-    "Validate a design or scenario without running it. Lists every problem at once, by id.",
+    "Validate a design or scenario without running it, and the scenarios a design carries. Lists every problem at once, by id.",
     "Exit 0 ok, 2 errors (invalid settings, unknown ids, a scenario that can't run), 1 only warnings with --strict."
   )),
   Command.withExamples([
@@ -452,13 +475,21 @@ interface ExampleEntry {
   readonly title: string
   readonly blurb: string
   readonly file: string
+  /** The scenarios the design carries, by id. */
+  readonly scenarios: ReadonlyArray<string>
 }
 
 const exampleEntries = (io: IO): ReadonlyArray<ExampleEntry> =>
   exampleFiles(io).map((f) => {
     const file = path.join(io.assets("examples"), f)
-    const doc = (YAML.parse(io.readFile(file)) ?? {}) as { name?: string; description?: string }
-    return { id: stem(f), title: doc.name ?? stem(f), blurb: (doc.description ?? "").split(/\n\s*\n/)[0]?.replace(/\s+/g, " ").trim() ?? "", file }
+    const doc = (YAML.parse(io.readFile(file)) ?? {}) as { name?: string; description?: string; scenarios?: Record<string, unknown> }
+    return {
+      id: stem(f),
+      title: doc.name ?? stem(f),
+      blurb: (doc.description ?? "").split(/\n\s*\n/)[0]?.replace(/\s+/g, " ").trim() ?? "",
+      file,
+      scenarios: Object.keys(doc.scenarios ?? {})
+    }
   })
 
 const exampleId = Argument.String("id").pipe(Argument.withDescription("An example id, as listed by `infra-sim examples` (for example orders)"))
@@ -489,7 +520,7 @@ const examples = Command.make(
     const format = formatOf(o.json, o.format)
     const entries = exampleEntries(io)
     if (format !== "text") io.stdout(dump(entries, format))
-    else io.stdout(`${table([["id", "title", "what it is"], ...entries.map((e) => [e.id, e.title, e.blurb.length > 90 ? `${e.blurb.slice(0, 87)}...` : e.blurb])])}\n\nRun one with: infra-sim run @<id> --duration 2m\n`)
+    else io.stdout(`${table([["id", "title", "scenarios", "what it is"], ...entries.map((e) => [e.id, e.title, e.scenarios.join(", "), e.blurb.length > 80 ? `${e.blurb.slice(0, 77)}...` : e.blurb])])}\n\nRun one with: infra-sim run @<id> --duration 2m\nPlay one of its scenarios: infra-sim run @<id> --scenario <scenario>\n`)
   })
 ).pipe(
   Command.withShortDescription("List the example designs; `examples show <id>` prints one"),

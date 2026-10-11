@@ -1,16 +1,17 @@
-import { scenarios } from "#examples"
-import { Check } from "#simulator"
+import { Check, Scenario } from "#simulator"
 import { fmtTime, fmtUnit } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
+import { doc } from "../state/document.ts"
 import { run } from "../state/run.ts"
-import { openScenarioDialog, playExample, restartScenario, stopScenario } from "../state/scenario.ts"
+import { deleteScenario, importScenarioDialog, playScenario, restartScenario, stopScenario } from "../state/scenario.ts"
 import type { CheckProgress, ScenarioProgress } from "../state/types.ts"
 import { Icon } from "./Icon.tsx"
 
 /**
- * Scenarios: a timeline of what goes wrong (and what changes) played against a design, with checks on what must hold.
- * With none playing this is a list to pick from; with one playing it shows where the run is, what has happened and
- * what is coming, and how each check is doing, live, until the run stops at the end with a verdict.
+ * Scenarios: a timeline of what goes wrong (and what changes) played against the design, with checks on what must hold.
+ * They are part of the design (its `scenarios` section), so this lists the ones the open design carries; with one
+ * playing it shows where the run is, what has happened and what is coming, and how each check is doing, live, until the
+ * run stops at the end with a verdict.
  */
 export function ScenarioPanel() {
   const progress = useStore(run, (s) => s.scenario)
@@ -18,37 +19,57 @@ export function ScenarioPanel() {
 }
 
 function Picker() {
+  const design = useStore(doc, (s) => s.design)
+  // A scenario names nodes and edges: after an edit, one may no longer fit, and says why.
+  const entries = Scenario.ofDesign(design).map(([id, spec]) => ({ id, spec, problems: Scenario.check(design, spec) }))
   return (
     <div className="scenario-picker">
       <div className="scenario-intro">
         <p className="muted small">
-          A scenario plays a timeline of faults and changes against a design and checks what must hold, like <code>api.errorRatio &lt; 1%</code>. The same
-          files run in CI with <code>infra-sim run</code>.
+          Scenarios are saved with the design, under <code>scenarios</code>: a timeline of faults and changes, and checks like <code>api.errorRatio &lt; 1%</code>.
+          The same ones run in CI with <code>infra-sim run design.yaml --scenario &lt;id&gt;</code>.
         </p>
-        <button className="btn small" onClick={() => void openScenarioDialog()}>
-          <Icon name="upload" size={13} /> Open scenario…
+        <button className="btn small" onClick={() => void importScenarioDialog()}>
+          <Icon name="upload" size={13} /> Add from file…
         </button>
       </div>
-      <div className="scenario-cards">
-        {scenarios.map((s) => {
-          const spec = s.scenario()
-          const duration = Check.parseDuration(spec.duration)
-          return (
-            <div className="scenario-card" key={s.id}>
-              <div className="scenario-card-head">
-                <b>{s.title}</b>
-                <button className="btn small primary" onClick={() => playExample(s)}>
-                  <Icon name="play" size={12} /> Run
-                </button>
+      {entries.length === 0 ? (
+        <p className="scenario-none muted small">
+          This design has no scenarios yet. Add one from a scenario file, or write one into the design's YAML under <code>scenarios:</code>. The Order pipeline and
+          Multi-region examples carry some to start from.
+        </p>
+      ) : (
+        <div className="scenario-cards">
+          {entries.map(({ id, spec, problems }) => {
+            const duration = Check.parseDuration(spec.duration)
+            return (
+              <div className="scenario-card" key={id} data-broken={problems.length > 0 || undefined}>
+                <div className="scenario-card-head">
+                  <b title={id}>{spec.name ?? id}</b>
+                  <span className="spacer" />
+                  <button className="icon-btn" title="Remove from the design" onClick={() => deleteScenario(id)}>
+                    <Icon name="trash" size={13} />
+                  </button>
+                  <button className="btn small primary" disabled={problems.length > 0} onClick={() => playScenario(id)}>
+                    <Icon name="play" size={12} /> Run
+                  </button>
+                </div>
+                {spec.description !== undefined && <p>{spec.description.split(/\n\s*\n/)[0]}</p>}
+                {problems.length > 0 ? (
+                  <p className="scenario-problem">
+                    <Icon name="warn" size={12} /> {problems[0]}
+                    {problems.length > 1 ? ` (and ${problems.length - 1} more)` : ""}
+                  </p>
+                ) : (
+                  <span className="muted small">
+                    {duration === undefined ? "?" : fmtTime(duration)} · {spec.timeline?.length ?? 0} events · {spec.assert?.length ?? 0} checks
+                  </span>
+                )}
               </div>
-              <p>{s.blurb}</p>
-              <span className="muted small">
-                {s.design?.title ?? "Current design"} · {duration === undefined ? "?" : fmtTime(duration)} · {spec.timeline?.length ?? 0} events · {spec.assert?.length ?? 0} checks
-              </span>
-            </div>
-          )
-        })}
-      </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

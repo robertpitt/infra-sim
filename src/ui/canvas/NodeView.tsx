@@ -1,23 +1,14 @@
-import type { ComponentManifest, Highlight, NodeDoc, Stats } from "../state/types.ts"
+import { Handle, type NodeProps, Position } from "@xyflow/react"
+import type { ComponentManifest, Highlight, Stats } from "../state/types.ts"
 import { memo } from "react"
 import { fmtCount, fmtMs, fmtPct, fmtRate } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
 import { doc } from "../state/document.ts"
-import { run } from "../state/run.ts"
+import { run, smoothed } from "../state/run.ts"
 import { Icon } from "../ui/Icon.tsx"
+import type { ComponentNode } from "./flow.ts"
 import { HEAD_H, NODE_W, PORT_H, STATS_H, nodeHeight } from "./geometry.ts"
 import { failRatio, healthOf, useStats } from "./stats.ts"
-
-interface Props {
-  readonly id: string
-  readonly spec: NodeDoc
-  readonly manifest: ComponentManifest | undefined
-  readonly selected: boolean
-  /** Whether the node is on the path through the selection; undefined when nothing is in focus. */
-  readonly path: boolean | undefined
-  /** Worst diagnostic on this node, if any. */
-  readonly level: "error" | "warning" | "info" | undefined
-}
 
 const highlightValue = (h: Highlight, stats: Stats | undefined): string => {
   if (stats === undefined) return "—"
@@ -28,8 +19,15 @@ const highlightValue = (h: Highlight, stats: Stats | undefined): string => {
   return h.rate !== undefined ? fmtRate(raw) : fmtCount(raw)
 }
 
-export const NodeView = memo(function NodeView({ id, spec, manifest, selected, path, level }: Props) {
-  const stats = useStats("nodes", id)
+/**
+ * A component on the canvas: a card with its live numbers. React Flow places it and draws the wires between its
+ * handles: one input on the left, an output on the right for each port.
+ *
+ * The numbers change several times a second; the card around them hardly ever. So the numbers are a component of
+ * their own (`Figures`), and the card re-renders only when what it shows changes: its health, a fault, an alert.
+ */
+export const NodeView = memo(function NodeView({ id, data, selected }: NodeProps<ComponentNode>) {
+  const { spec, manifest, path, level } = data
   const faults = useStore(run, (s) => s.faults.filter((f) => f.target.kind === "node" && f.target.id === id).length)
   const down = useStore(run, (s) => s.faults.some((f) => f.target.kind === "node" && f.target.id === id && f.fault._tag === "Outage"))
   // Alarms firing on this node: the worst severity, and what they are, for the badge.
@@ -44,13 +42,9 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, p
   })
   const alertTitles = useStore(run, (s) => s.alerts.filter((a) => a.resolvedAt === undefined && a.target.id === id).map((a) => a.title).join(", "))
   const controlled = useStore(doc, (s) => Object.values(s.design.controllers ?? {}).filter((c) => c.target === id).length)
-  const at = spec.position ?? { x: 0, y: 0 }
+  // Read on every frame, but only a change of health re-renders the card.
+  const health = useStore(run, () => healthOf(smoothed("nodes", id), down))
   const height = nodeHeight(manifest)
-  const source = manifest !== undefined && !manifest.inputs
-  const health = healthOf(stats, down)
-  const rate = source ? stats?.rates.sent : stats?.rates.in
-  const p95 = stats?.dist.latency?.p95
-  const ratio = failRatio(stats)
   const outputs = manifest?.outputs ?? []
   const multi = outputs.length > 1
 
@@ -63,12 +57,7 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, p
       data-health={health}
       data-faulted={faults > 0 || undefined}
       data-unknown={manifest === undefined || undefined}
-      style={{
-        width: NODE_W,
-        height,
-        transform: `translate(${at.x}px, ${at.y}px)`,
-        ["--accent" as string]: manifest?.accent ?? "#8893a5"
-      }}
+      style={{ width: NODE_W, height, ["--accent" as string]: manifest?.accent ?? "#8893a5" }}
     >
       <div className="node-head" style={{ height: HEAD_H }}>
         <span className="node-icon">
@@ -100,20 +89,7 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, p
         )}
       </div>
 
-      <div className="node-stats" style={{ height: STATS_H }}>
-        <div className="stat-row">
-          <Stat label={source ? "sent/s" : "in/s"} value={rate === undefined ? "—" : fmtRate(rate)} />
-          <Stat label="errors" value={stats === undefined ? "—" : fmtPct(ratio)} tone={ratio > 0.2 ? "bad" : ratio > 0.02 ? "warn" : undefined} />
-          <Stat label="p95" value={p95 === undefined ? "—" : fmtMs(p95)} />
-        </div>
-        <div className="chip-row">
-          {(manifest?.highlights ?? []).slice(0, 3).map((h) => (
-            <span className="chip" key={h.label}>
-              <b>{highlightValue(h, stats)}</b> {h.label}
-            </span>
-          ))}
-        </div>
-      </div>
+      <Figures id={id} manifest={manifest} />
 
       {multi && (
         <div className="node-ports" style={{ top: HEAD_H + STATS_H }}>
@@ -125,13 +101,17 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, p
         </div>
       )}
 
-      {manifest?.inputs !== false && <span className="handle in" style={{ top: height / 2 }} />}
+      {manifest?.inputs !== false && (
+        <Handle type="target" id="in" position={Position.Left} className="handle in" isConnectableStart={false} style={{ top: height / 2 }} />
+      )}
       {outputs.map((o, i) => (
-        <span
+        <Handle
+          type="source"
+          id={o.port}
+          position={Position.Right}
           className="handle out"
           key={o.port}
-          data-port-node={id}
-          data-port-name={o.port}
+          isConnectableEnd={false}
           title={multi ? o.label : "Drag to connect"}
           style={{ top: multi ? HEAD_H + STATS_H + 4 + i * PORT_H + PORT_H / 2 : height / 2 }}
         />
@@ -139,6 +119,31 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, p
     </div>
   )
 })
+
+/** The live numbers on a card: rate, errors, p95, and up to three of the component's own highlights. */
+function Figures({ id, manifest }: { id: string; manifest: ComponentManifest | undefined }) {
+  const stats = useStats("nodes", id)
+  const source = manifest !== undefined && !manifest.inputs
+  const rate = source ? stats?.rates.sent : stats?.rates.in
+  const p95 = stats?.dist.latency?.p95
+  const ratio = failRatio(stats)
+  return (
+    <div className="node-stats" style={{ height: STATS_H }}>
+      <div className="stat-row">
+        <Stat label={source ? "sent/s" : "in/s"} value={rate === undefined ? "—" : fmtRate(rate)} />
+        <Stat label="errors" value={stats === undefined ? "—" : fmtPct(ratio)} tone={ratio > 0.2 ? "bad" : ratio > 0.02 ? "warn" : undefined} />
+        <Stat label="p95" value={p95 === undefined ? "—" : fmtMs(p95)} />
+      </div>
+      <div className="chip-row">
+        {(manifest?.highlights ?? []).slice(0, 3).map((h) => (
+          <span className="chip" key={h.label}>
+            <b>{highlightValue(h, stats)}</b> {h.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 const Stat = ({ label, value, tone }: { label: string; value: string; tone?: "warn" | "bad" | undefined }) => (
   <span className="stat" data-tone={tone}>

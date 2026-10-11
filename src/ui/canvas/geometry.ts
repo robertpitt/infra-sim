@@ -1,7 +1,10 @@
 import type { ComponentManifest, Doc, NodeDoc } from "../state/types.ts"
 import { rectOf } from "./groups.ts"
 
-/** Node cards have a fixed geometry so edges can be computed from the design alone, without measuring the DOM. */
+/**
+ * Node cards have a fixed geometry, so the design alone says where everything is: placing new nodes, fitting the view
+ * and hit-testing a wire's end need no DOM. (Where wires attach, React Flow measures from the handles.)
+ */
 export const NODE_W = 236
 export const HEAD_H = 42
 export const STATS_H = 54
@@ -16,24 +19,6 @@ export const nodeHeight = (manifest: ComponentManifest | undefined): number => {
 export interface Point {
   readonly x: number
   readonly y: number
-}
-
-export const portIndex = (manifest: ComponentManifest | undefined, port: string): number =>
-  Math.max(0, manifest?.outputs.findIndex((o) => o.port === port) ?? 0)
-
-/** Where an edge leaves a node. */
-export const outPoint = (node: NodeDoc, manifest: ComponentManifest | undefined, port: string): Point => {
-  const at = node.position ?? { x: 0, y: 0 }
-  const height = nodeHeight(manifest)
-  const multi = (manifest?.outputs.length ?? 1) > 1
-  const y = multi ? HEAD_H + STATS_H + PORTS_PAD / 2 + portIndex(manifest, port) * PORT_H + PORT_H / 2 : height / 2
-  return { x: at.x + NODE_W, y: at.y + y }
-}
-
-/** Where an edge arrives at a node. */
-export const inPoint = (node: NodeDoc, manifest: ComponentManifest | undefined): Point => {
-  const at = node.position ?? { x: 0, y: 0 }
-  return { x: at.x, y: at.y + nodeHeight(manifest) / 2 }
 }
 
 export const edgePath = (a: Point, b: Point): string => {

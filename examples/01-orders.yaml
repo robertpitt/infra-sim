@@ -97,3 +97,25 @@ edges:
       request:
         operation: write
     from: {node: worker}
+scenarios:
+  # Run in the app's Scenario tab, or: infra-sim run @orders --scenario orders-peak
+  orders-peak:
+    name: Orders at peak
+    description: Three times the traffic for a minute, with the payment-side table squeezed. Does the order pipeline hold?
+    duration: 4m
+    warmup: 30s
+    overrides:
+      nodes:
+        web: { spike: { multiplier: 1 } }   # the example has its own spike; this scenario brings its own
+        orders-table: { mode: on-demand }
+    timeline:
+      - at: 1m
+        set: { node: web, settings: { rps: 300 } }
+        note: traffic triples
+      - at: 2m
+        set: { node: web, settings: { rps: 100 } }
+        note: traffic back to normal
+    assert:
+      - system.errorRatio < 2%
+      - { check: "orders-queue.gauge.depth:max < 5000", name: The backlog stays bounded }
+      - { check: "orders-table.rate.fail.Throttled == 0", name: On-demand absorbs the peak }

@@ -1,26 +1,23 @@
+import type { EdgeProps } from "@xyflow/react"
 import { memo } from "react"
 import { fmtPct, fmtRate, clamp } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
 import { run } from "../state/run.ts"
-import type { ConnectorManifest } from "../state/types.ts"
 import { Icon } from "../ui/Icon.tsx"
-import type { Point } from "./geometry.ts"
+import type { FlowEdge } from "./flow.ts"
 import { edgePath, midpoint } from "./geometry.ts"
 import { failRatio, useStats } from "./stats.ts"
 
-interface EdgeProps {
-  readonly id: string
-  readonly a: Point
-  readonly b: Point
-  readonly selected: boolean
-  /** Whether the edge is on the path through the selection; undefined when nothing is in focus. */
-  readonly path: boolean | undefined
-  readonly label: string | undefined
-  /** What sits between the two nodes, when it is more than a plain link: drawn as a badge on the line. */
-  readonly connector: ConnectorManifest | undefined
-}
-
-export const EdgeView = memo(function EdgeView({ id, a, b, selected, path, label, connector }: EdgeProps) {
+/**
+ * A connection, drawn as traffic: thicker with more calls, coloured by how many fail, with the rate, errors and retries
+ * on it and a moving dash for the flow. React Flow says where its ends are; this draws everything in between.
+ */
+export const EdgeView = memo(function EdgeView({ id, sourceX, sourceY, targetX, targetY, selected, data }: EdgeProps<FlowEdge>) {
+  const label = data?.label
+  const connector = data?.connector
+  const path = data?.path
+  const a = { x: sourceX, y: sourceY }
+  const b = { x: targetX, y: targetY }
   const stats = useStats("edges", id)
   const faults = useStore(run, (s) => s.faults.filter((f) => f.target.kind === "edge" && f.target.id === id).length)
   const calls = stats?.rates.calls ?? 0
@@ -75,13 +72,18 @@ const ARROWS: ReadonlyArray<readonly [string, string]> = [
   ["fault", "#d95858"]
 ]
 
-/** One marker per tone: SVG markers can't see CSS variables set on the edge that references them. */
-export const Arrowhead = () => (
-  <defs>
-    {ARROWS.map(([tone, color]) => (
-      <marker key={tone} id={`arrow-${tone}`} viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto" markerUnits="userSpaceOnUse">
-        <path d="M1 1 L9 5 L1 9 z" fill={color} />
-      </marker>
-    ))}
-  </defs>
+/**
+ * One marker per tone: SVG markers can't see CSS variables set on the edge that references them. React Flow draws each
+ * edge in an SVG of its own, so the markers live in one hidden SVG that every edge points into.
+ */
+export const Arrowheads = () => (
+  <svg className="arrowheads" width="0" height="0" aria-hidden="true">
+    <defs>
+      {ARROWS.map(([tone, color]) => (
+        <marker key={tone} id={`arrow-${tone}`} viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto" markerUnits="userSpaceOnUse">
+          <path d="M1 1 L9 5 L1 9 z" fill={color} />
+        </marker>
+      ))}
+    </defs>
+  </svg>
 )

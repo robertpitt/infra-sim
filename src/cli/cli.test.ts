@@ -242,7 +242,20 @@ assert:
 describe("check", () => {
   it("passes a sound design and a sound scenario", async () => {
     expect(await cli(["check", "@orders"])).toMatchObject({ code: EXIT.ok, out: expect.stringContaining("ok") })
-    expect((await cli(["check", "examples/scenarios/lose-us-east-1.yaml"])).code).toBe(EXIT.ok)
+    expect((await cli(["check", "@multi-region"])).code).toBe(EXIT.ok)
+  })
+
+  it("checks the scenarios a design carries, and a scenario file against its design", async () => {
+    const dir = scratch({
+      "d.yaml": `${DESIGN}scenarios:\n  bad: { duration: 1m, timeline: [{ at: 10s, inject: { target: "node:ghost", fault: Outage } }] }\n`,
+      "s.yaml": "version: 1\ndesign: d.yaml\nduration: 30s\nassert: [ nope.errorRatio < 1% ]\n"
+    })
+    const own = await cli(["check", "d.yaml"], dir)
+    expect(own.code).toBe(EXIT.usage)
+    expect(own.out).toContain(`scenarios.bad: timeline[0].inject.target: no node "ghost"`)
+    const file = await cli(["check", "s.yaml"], dir)
+    expect(file.code).toBe(EXIT.usage)
+    expect(file.out).toContain(`no node "nope"`)
   })
 
   it("exits 2 for an invalid design, listing the problems by id", async () => {
@@ -298,13 +311,24 @@ describe("import and convert", () => {
   })
 })
 
-describe("the sample scenarios", () => {
-  const files = fs.readdirSync("examples/scenarios").filter((f) => f.endsWith(".yaml"))
+describe("the examples' scenarios", () => {
+  // Every scenario an example design carries, as "example scenario".
+  const cases = fs
+    .readdirSync("examples")
+    .filter((f) => f.endsWith(".yaml"))
+    .flatMap((f) => Object.keys((YAML.parse(fs.readFileSync(`examples/${f}`, "utf8")) as { scenarios?: object }).scenarios ?? {}).map((id) => [f.replace(/^\d+-/, "").replace(/\.yaml$/, ""), id] as const))
 
-  it.each(files)("%s checks clean and holds", async (file) => {
-    expect((await cli(["check", `examples/scenarios/${file}`])).code).toBe(EXIT.ok)
-    const r = await cli(["run", `examples/scenarios/${file}`, "--json"])
+  it("ships some", () => expect(cases.length).toBeGreaterThanOrEqual(2))
+
+  it.each(cases)("@%s --scenario %s holds", async (example, id) => {
+    const r = await cli(["run", `@${example}`, "--scenario", id, "--json"])
     expect(r.code).toBe(EXIT.ok)
     expect(json(r.out).assertions.length).toBeGreaterThan(0)
+  })
+
+  it("says which scenarios there are when one doesn't exist", async () => {
+    const r = await cli(["run", "@multi-region", "--scenario", "nope"])
+    expect(r.code).toBe(EXIT.usage)
+    expect(r.err).toContain("lose-us-east-1")
   })
 })

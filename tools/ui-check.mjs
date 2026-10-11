@@ -138,7 +138,7 @@ const apiAfter = await box('[data-node-id="api-eu"]')
 check("dragging a box carries its contents", Math.abs(apiAfter.y - apiBefore.y - 50) < 6, `moved ${apiAfter.y - apiBefore.y}`)
 
 // 9. Resizing.
-const resize = await box('[data-group-id="region-eu"] .group-resize')
+const resize = await box('[data-resize-id="region-eu"]')
 const size0 = (await saved()).nodes["region-eu"].size
 await page.mouse.move(resize.x + resize.width / 2, resize.y + resize.height / 2)
 await page.mouse.down()

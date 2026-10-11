@@ -192,7 +192,10 @@ Every setting is checked against the component's schema (nodes and edges alike) 
 
 ## Scenarios and the command line
 
-A **scenario** (`Scenario.ts`) is a design plus what happens to it, in the pure engine so any host can run one: a duration,
+A **scenario** (`Scenario.ts`) is what happens to a design, in the pure engine so any host can run one. Its shape
+(`ScenarioSpec.ts`) is written in two places with the same fields: inside the design, under `scenarios.<id>` (a design
+carries the scenarios written for it, since they name its nodes), and as a file of its own that adds `version` and the
+`design` it is for. A scenario has a duration,
 a warm-up, a traffic scale, starting overrides (by node id, edge id and placement), a **timeline** (inject a fault at a
 time for a time, clear it, change a node's or edge's settings live, change account quotas), and **assertions**. `Scenario.run`
 checks everything first and reports every problem at once (unknown ids, unreadable times and assertions), then runs on a
@@ -304,6 +307,7 @@ Doc (JSON, string-keyed, settings = overrides)  ⇄  Design (Graph of configured
 ```
 
 - **`Doc`** is what lives on disk. Nodes and edges are keyed by id so diffs are clean and an importer (CloudFormation, say) can re-run and merge by id; `origin` records where something came from. Settings hold only chosen overrides.
+- A `Doc` also carries its **scenarios** (`scenarios.<id>`, see below): they name its nodes and edges, so they travel and are versioned with it. The codec ignores them; `Scenario.check` and `infra-sim check` test them against the design.
 - **`Design.codec(registry)`** is a real `Schema` from `Doc` to `Design`. It validates every node's settings against its component schema and every edge's against the edge policy plus its port's settings, checks the wiring, and **reports every problem in one pass, each located by id** (`nodes.worker.settings.concurrency`). It composes: `Schema.fromJsonString(Design.codec(registry))` goes straight from file text to a design. `Design.encode` writes a design back in full.
 - **`Design`** is a `Graph.DirectedGraph<Node, Edge>` plus id↔index maps. Node `config` is decoded and fully defaulted.
 - **`Topology`** answers graph questions: `downstream`/`upstream` (blast radius), `sources`, `reachable`, `feedbackLoops` (strongly connected components, where retries can amplify), `toMermaid`.
@@ -364,7 +368,9 @@ To profile: `scratchpad/bench.ts` (a design for N virtual seconds at a traffic m
 
 ## The UI
 
-The canvas gets the room: a 40 px header holds the transport (a draggable, log-scale speed bar), the whole design's numbers as its clients see them (requests, errors, p95 latency, with a minute of sparkline) and the count of alerts firing. Selecting a node or connection lights up the path it is on and dims the rest. Under the canvas a dock, folded by default, has three tabs: charts for the selection, alerts (firing, then a history with the faults beside them; click one to see its node), and scenarios (pick one, then watch its track, timeline and checks until it stops with a verdict).
+The canvas gets the room: a 40 px header holds the transport (a draggable, log-scale speed bar), the whole design's numbers as its clients see them (requests, errors, p95 latency, with a minute of sparkline) and the count of alerts firing. Selecting a node or connection lights up the path it is on and dims the rest. Under the canvas a dock, folded by default, has three tabs: charts for the selection, alerts (firing, then a history with the faults beside them; click one to see its node), and scenarios (the open design's own: pick one, then watch its track, timeline and checks until it stops with a verdict; a scenario file can be added to the design if everything it names is there).
+
+The canvas is [React Flow](https://reactflow.dev) (`@xyflow/react`), driven by the document: nodes and edges are derived from it (reusing objects whose inputs didn't change, so dragging one node redraws one node), and what React Flow reports becomes an edit (a drag through `beginMove`, which carries a box's contents; a wire through `connect`, which can be dropped anywhere on its target). React Flow owns pan and zoom; `canvas/viewport.ts` mirrors it for the rest of the app. Boxes draw behind wires and wires behind components (explicit z-indexes), and box resize corners live in React Flow's viewport portal above everything, where a node inside a box can't cover them. A card's live numbers are a component of their own, so the card and its React Flow handles re-render only when its health, faults or alerts change.
 
 One sidebar. With nothing selected it is a condensed component picker (grouped by provider, searchable, with examples); select a node, a container or a connection and it becomes that thing's settings. Forms are derived from the schema: every bounded number is a slider (logarithmic when the range spans three orders of magnitude), durations are typed with units (`250`, `1.5s`, `10m`), limits show as `hard` or `quota` pills linking to their source, and groups with an `enabled` switch collapse until it is on. A node's region is a selector, locked when a Region box decides it; a Region box shows its account quotas and takes regional faults. Containers are drawn as boxes behind their contents: drag one and its contents move, drop a node inside to adopt it, drag it out to release it.
 
