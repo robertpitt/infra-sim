@@ -9,3 +9,4 @@ scripts/
 scratchpad/
 .cursor/
 yarn.lock
+dist-cli/

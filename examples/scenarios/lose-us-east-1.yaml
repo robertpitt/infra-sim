@@ -1,0 +1,23 @@
+# Lose the US region for two minutes and see who notices.
+#
+# The multi-region example has a US ledger that the EU handler writes to synchronously. Run this and the assertions show
+# what that costs: Europe goes down with the US even though its own stack is healthy. (To fix the design, make the ledger
+# write asynchronous or give Europe its own ledger, then flip the first assertion to `< 1%`.)
+#
+#   infra-sim run examples/scenarios/lose-us-east-1.yaml
+version: 1
+name: Lose us-east-1
+design: ../03-multi-region.yaml
+seed: 5
+duration: 6m
+warmup: 30s
+timeline:
+  - at: 2m
+    inject: { target: "region:aws:us-east-1", fault: Outage, for: 2m }
+    note: us-east-1 goes down
+  - at: 4m
+    note: us-east-1 is back
+assert:
+  - { name: US users see the outage, check: "users-us.errorRatio > 90%", from: 2m30s, to: 4m }
+  - { name: Europe is dragged down by its synchronous ledger write, check: "users-eu.errorRatio > 90%", from: 2m30s, to: 4m }
+  - { name: Both recover afterwards, check: "system.errorRatio < 2%", from: 5m }

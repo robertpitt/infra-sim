@@ -1,0 +1,22 @@
+# Three times the traffic for a minute, with the payment-side table squeezed: does the order pipeline hold?
+# Run it:  infra-sim run examples/scenarios/orders-peak.yaml --json
+version: 1
+name: Orders at peak
+design: ../01-orders.yaml
+duration: 4m
+warmup: 30s
+overrides:
+  nodes:
+    web: { spike: { multiplier: 1 } }   # the example has its own spike; this scenario brings its own
+    orders-table: { mode: on-demand }
+timeline:
+  - at: 1m
+    set: { node: web, settings: { rps: 300 } }
+    note: traffic triples
+  - at: 2m
+    set: { node: web, settings: { rps: 100 } }
+    note: traffic back to normal
+assert:
+  - system.errorRatio < 2%
+  - { check: "orders-queue.gauge.depth:max < 5000", name: The backlog stays bounded }
+  - { check: "orders-table.rate.fail.Throttled == 0", name: On-demand absorbs the peak }

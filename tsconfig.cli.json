@@ -1,0 +1,10 @@
+{
+  // The command line: Node only (it reads files and writes to a terminal). The engine it drives stays portable.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2023"],
+    "types": ["node"]
+  },
+  "include": ["src/cli"],
+  "exclude": []
+}

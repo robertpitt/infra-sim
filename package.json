@@ -8,10 +8,13 @@
   },
   "private": true,
   "type": "module",
+  "license": "MIT",
   "engines": {
     "node": ">=22.12.0"
   },
-  "license": "MIT",
+  "bin": {
+    "infra-sim": "dist-cli/infra-sim.mjs"
+  },
   "imports": {
     "#simulator": "./src/simulator/index.ts",
     "#simulator/components": "./src/simulator/components/index.ts",
@@ -22,11 +25,13 @@
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.simulator.json && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.simulator.json && tsc -p tsconfig.cli.json && tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "bench": "tsx tools/bench.ts",
-    "profile": "tools/prof.sh"
+    "profile": "tools/prof.sh",
+    "cli": "tsx src/cli/main.ts",
+    "build:cli": "node tools/build-cli.mjs"
   },
   "dependencies": {
     "effect": "^4.0.2",
@@ -39,6 +44,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "esbuild": "^0.28.2",
     "playwright": "^1.59.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
