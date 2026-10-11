@@ -1,0 +1,238 @@
+import type { ReactNode } from "react"
+
+const paths: Record<string, ReactNode> = {
+  users: (
+    <>
+      <circle cx="9" cy="8" r="3" />
+      <path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" />
+      <circle cx="17" cy="9" r="2.5" />
+      <path d="M17 14c2.5 0 4 2 4 5" />
+    </>
+  ),
+  cpu: (
+    <>
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+      <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
+      <path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" />
+    </>
+  ),
+  inbox: (
+    <>
+      <path d="M3 13h5l1.5 3h5L16 13h5" />
+      <path d="M5 13l2-8h10l2 8v6H5z" />
+    </>
+  ),
+  share: (
+    <>
+      <circle cx="6" cy="12" r="2.5" />
+      <circle cx="18" cy="6" r="2.5" />
+      <circle cx="18" cy="18" r="2.5" />
+      <path d="M8.2 11l7.6-4M8.2 13l7.6 4" />
+    </>
+  ),
+  database: (
+    <>
+      <ellipse cx="12" cy="6" rx="7" ry="3" />
+      <path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6" />
+      <path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" />
+    </>
+  ),
+  box: (
+    <>
+      <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" />
+      <path d="M4 7.5l8 4.5 8-4.5M12 12v9" />
+    </>
+  ),
+  bucket: (
+    <>
+      <path d="M4 7c0 1.4 3.6 2.5 8 2.5S20 8.4 20 7s-3.6-2.5-8-2.5S4 5.6 4 7z" />
+      <path d="M4 7l2 12c.2 1.2 2.7 2 6 2s5.8-.8 6-2l2-12" />
+    </>
+  ),
+  gateway: (
+    <>
+      <path d="M3 12h5M16 12h5" />
+      <rect x="8" y="7" width="8" height="10" rx="2" />
+      <path d="M11 10.5l2 1.5-2 1.5" />
+    </>
+  ),
+  lambda: <path d="M6 20l5.5-11L9 4H6M10 12l3.5 8h4" />,
+  queue: (
+    <>
+      <rect x="3" y="7" width="18" height="10" rx="2" />
+      <path d="M8 7v10M13 7v10M18 7v10" />
+    </>
+  ),
+  topic: (
+    <>
+      <circle cx="6" cy="12" r="2.2" />
+      <circle cx="18" cy="6" r="2.2" />
+      <circle cx="18" cy="12" r="2.2" />
+      <circle cx="18" cy="18" r="2.2" />
+      <path d="M8.2 12h7.6M8 11l8-4M8 13l8 4" />
+    </>
+  ),
+  table: (
+    <>
+      <rect x="3.5" y="5" width="17" height="14" rx="2" />
+      <path d="M3.5 10h17M3.5 14.5h17M9.5 5v14" />
+    </>
+  ),
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" />
+    </>
+  ),
+  region: (
+    <>
+      <path d="M4 8V5h3M20 8V5h-3M4 16v3h3M20 16v3h-3" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  vpc: (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" strokeDasharray="3 2.5" />
+      <rect x="8" y="9" width="8" height="6" rx="1.2" />
+    </>
+  ),
+  search: (
+    <>
+      <circle cx="11" cy="11" r="6" />
+      <path d="M16 16l4 4" />
+    </>
+  ),
+  back: <path d="M15 6l-6 6 6 6" />,
+  link: (
+    <>
+      <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
+      <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
+    </>
+  ),
+  chevronDown: <path d="M6 9l6 6 6-6" />,
+  play: <path d="M7 4.5v15l12-7.5z" fill="currentColor" />,
+  pause: (
+    <>
+      <rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" />
+      <rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" />
+    </>
+  ),
+  reset: (
+    <>
+      <path d="M4 12a8 8 0 1 0 2.5-5.8" />
+      <path d="M4 4v4.5h4.5" />
+    </>
+  ),
+  step: (
+    <>
+      <path d="M6 5v14l9-7z" fill="currentColor" />
+      <path d="M18 5v14" />
+    </>
+  ),
+  plus: <path d="M12 5v14M5 12h14" />,
+  minus: <path d="M5 12h14" />,
+  fit: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
+  undo: (
+    <>
+      <path d="M9 14L4 9l5-5" />
+      <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+    </>
+  ),
+  redo: (
+    <>
+      <path d="M15 14l5-5-5-5" />
+      <path d="M20 9H10a6 6 0 0 0 0 12h3" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M4 7h16M10 11v6M14 11v6" />
+      <path d="M6 7l1 13h10l1-13M9 7V4h6v3" />
+    </>
+  ),
+  bolt: <path d="M13 3L5 14h6l-1 7 8-11h-6z" />,
+  x: <path d="M6 6l12 12M18 6L6 18" />,
+  chevron: <path d="M9 6l6 6-6 6" />,
+  down: <path d="M6 9l6 6 6-6" />,
+  menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  warn: (
+    <>
+      <path d="M12 3l10 18H2z" />
+      <path d="M12 10v5M12 18v.5" />
+    </>
+  ),
+  layout: (
+    <>
+      <rect x="3" y="4" width="6" height="6" rx="1" />
+      <rect x="15" y="4" width="6" height="6" rx="1" />
+      <rect x="9" y="14" width="6" height="6" rx="1" />
+      <path d="M6 10v2h12v-2M12 12v2" />
+    </>
+  ),
+  download: (
+    <>
+      <path d="M12 4v11M7 11l5 5 5-5" />
+      <path d="M5 20h14" />
+    </>
+  ),
+  upload: (
+    <>
+      <path d="M12 16V5M7 9l5-5 5 5" />
+      <path d="M5 20h14" />
+    </>
+  ),
+  copy: (
+    <>
+      <rect x="8" y="8" width="12" height="12" rx="2" />
+      <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+    </>
+  ),
+  reload: (
+    <>
+      <path d="M20 12a8 8 0 1 1-2.5-5.8" />
+      <path d="M20 4v4.5h-4.5" />
+    </>
+  ),
+  panelLeft: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+    </>
+  ),
+  panelRight: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M15 4v16" />
+    </>
+  ),
+  charts: (
+    <>
+      <path d="M4 19V5" />
+      <path d="M4 19h16" />
+      <path d="M7 15l4-5 3 3 5-6" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5M12 8v.5" />
+    </>
+  )
+}
+
+export const Icon = ({ name, size = 16, className }: { name: string; size?: number; className?: string }) => (
+  <svg
+    className={className}
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.7"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    {paths[name] ?? paths.box}
+  </svg>
+)

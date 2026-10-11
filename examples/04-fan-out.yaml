@@ -1,0 +1,93 @@
+version: 1
+name: Fan-out
+description: An async Lambda publishes to an SNS topic that fans out to a queue-backed emailer (calling an external provider), an audit table and analytics.
+seed: 3
+nodes:
+  app:
+    type: common.client
+    name: App
+    region: eu-west
+    position: {x: 80, y: 230}
+    settings:
+      rps: 120
+      invocation: async
+  place-order:
+    type: aws.lambda
+    name: Place order
+    region: eu-west-1
+    position: {x: 400, y: 230}
+    settings:
+      memory: 512
+      duration:
+        mean: 30
+  order-placed:
+    type: aws.sns
+    name: Order placed
+    region: eu-west-1
+    position: {x: 720, y: 230}
+  email-queue:
+    type: aws.sqs
+    name: Email queue
+    region: eu-west-1
+    position: {x: 1040, y: 80}
+  emailer:
+    type: aws.lambda
+    name: Emailer
+    region: eu-west-1
+    position: {x: 1360, y: 230}
+    settings:
+      memory: 256
+      timeout: 10 seconds
+      duration:
+        mean: 300
+        cv: 0.6
+  mail-provider:
+    type: common.http-endpoint
+    name: Email provider
+    region: us-east
+    position: {x: 1680, y: 230}
+    settings:
+      latency:
+        mean: 250
+      rateLimit: 200
+  audit-log:
+    type: aws.dynamodb
+    name: Audit log
+    region: eu-west-1
+    position: {x: 1040, y: 230}
+    settings:
+      mode: on-demand
+  analytics:
+    type: aws.lambda
+    name: Analytics
+    region: eu-west-1
+    position: {x: 1040, y: 380}
+    settings:
+      memory: 256
+      duration:
+        mean: 120
+edges:
+  app.out->place-order:
+    to: place-order
+    from: {node: app}
+  place-order.out->order-placed:
+    to: order-placed
+    from: {node: place-order}
+  order-placed.out->email-queue:
+    to: email-queue
+    from: {node: order-placed}
+  order-placed.out->audit-log:
+    to: audit-log
+    from: {node: order-placed}
+  order-placed.out->analytics:
+    to: analytics
+    from: {node: order-placed}
+  email-queue.deliver->emailer:
+    to: emailer
+    from: {node: email-queue, port: deliver}
+  emailer.out->mail-provider:
+    to: mail-provider
+    settings:
+      retry:
+        maxAttempts: 3
+    from: {node: emailer}

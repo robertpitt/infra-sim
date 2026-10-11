@@ -1,0 +1,131 @@
+version: 1
+name: Multi-region
+description: Users in the US and Europe each hit a regional stack, and both write to a ledger in us-east-1. Inject a regional outage on us-east-1, and see what cross-region calls cost.
+seed: 5
+nodes:
+  region-us:
+    type: aws.region
+    name: US
+    position: {x: 300, y: 0}
+    size: {w: 1900, h: 300}
+    settings:
+      region: us-east-1
+  region-eu:
+    type: aws.region
+    name: Europe
+    position: {x: 300, y: 340}
+    size: {w: 980, h: 250}
+    settings:
+      region: eu-west-1
+  users-us:
+    type: common.client
+    name: Users (us-east)
+    region: us-east
+    position: {x: 0, y: 70}
+    settings:
+      rps: 150
+  api-us:
+    type: aws.apigateway
+    name: API us-east-1
+    parent: region-us
+    position: {x: 330, y: 70}
+    settings:
+      apiType: http
+  fn-us:
+    type: aws.lambda
+    name: Handler us-east-1
+    parent: region-us
+    position: {x: 660, y: 70}
+    settings:
+      memory: 1024
+      timeout: 10 seconds
+      duration:
+        mean: 50
+  table-us:
+    type: aws.dynamodb
+    name: Table us-east-1
+    parent: region-us
+    position: {x: 990, y: 70}
+    settings:
+      mode: on-demand
+  users-eu:
+    type: common.client
+    name: Users (eu-west)
+    region: eu-west
+    position: {x: 0, y: 410}
+    settings:
+      rps: 100
+  api-eu:
+    type: aws.apigateway
+    name: API eu-west-1
+    parent: region-eu
+    position: {x: 330, y: 410}
+    settings:
+      apiType: http
+  fn-eu:
+    type: aws.lambda
+    name: Handler eu-west-1
+    parent: region-eu
+    position: {x: 660, y: 410}
+    settings:
+      memory: 1024
+      timeout: 10 seconds
+      duration:
+        mean: 50
+  table-eu:
+    type: aws.dynamodb
+    name: Table eu-west-1
+    parent: region-eu
+    position: {x: 990, y: 410}
+    settings:
+      mode: on-demand
+  ledger:
+    type: aws.sqs
+    name: Ledger queue
+    parent: region-us
+    position: {x: 1320, y: 70}
+  bookkeeper:
+    type: aws.lambda
+    name: Bookkeeper
+    parent: region-us
+    position: {x: 1620, y: 70}
+    settings:
+      memory: 512
+      duration:
+        mean: 80
+  ledger-table:
+    type: aws.dynamodb
+    name: Ledger table
+    parent: region-us
+    position: {x: 1920, y: 70}
+edges:
+  users-us.out->api-us:
+    to: api-us
+    from: {node: users-us}
+  api-us.out->fn-us:
+    to: fn-us
+    from: {node: api-us}
+  fn-us.out->table-us:
+    to: table-us
+    from: {node: fn-us}
+  users-eu.out->api-eu:
+    to: api-eu
+    from: {node: users-eu}
+  api-eu.out->fn-eu:
+    to: fn-eu
+    from: {node: api-eu}
+  fn-eu.out->table-eu:
+    to: table-eu
+    from: {node: fn-eu}
+  fn-eu.out->ledger:
+    to: ledger
+    from: {node: fn-eu}
+  fn-us.out->ledger:
+    to: ledger
+    from: {node: fn-us}
+  ledger.deliver->bookkeeper:
+    to: bookkeeper
+    from: {node: ledger, port: deliver}
+  bookkeeper.out->ledger-table:
+    to: ledger-table
+    from: {node: bookkeeper}

@@ -1,0 +1,99 @@
+version: 1
+name: Order pipeline
+description: "Clients → API Gateway → Lambda → SQS → Lambda → DynamoDB. A traffic spike outruns the table's provisioned write capacity: watch throttling, redelivery and the dead-letter queue."
+seed: 7
+nodes:
+  web:
+    type: common.client
+    name: Web clients
+    region: us-east
+    position: {x: 80, y: 155}
+    settings:
+      rps: 120
+      payload: 2
+      spike:
+        multiplier: 5
+        start: 60 seconds
+        duration: 30 seconds
+  api:
+    type: aws.apigateway
+    name: Orders API
+    position: {x: 400, y: 155}
+    settings:
+      apiType: http
+  ingest:
+    type: aws.lambda
+    name: Ingest
+    position: {x: 720, y: 155}
+    settings:
+      memory: 512
+      timeout: 5 seconds
+      duration:
+        mean: 40
+      coldStart:
+        init:
+          mean: 250
+  orders-queue:
+    type: aws.sqs
+    name: Orders queue
+    position: {x: 1040, y: 155}
+    settings:
+      visibilityTimeout: 30 seconds
+      maxReceives: 3
+  worker:
+    type: aws.lambda
+    name: Order worker
+    position: {x: 1360, y: 80}
+    settings:
+      memory: 1024
+      timeout: 5 seconds
+      duration:
+        mean: 150
+        cv: 0.4
+      reserved:
+        enabled: true
+        concurrency: 40
+  orders-table:
+    type: aws.dynamodb
+    name: Orders table
+    position: {x: 1680, y: 155}
+    settings:
+      readCapacity: 200
+      writeCapacity: 200
+      burstSeconds: 60
+  dead-letters:
+    type: aws.sqs
+    name: Dead letters
+    position: {x: 1360, y: 230}
+    settings:
+      retention: 14 days
+edges:
+  web.out->api:
+    to: api
+    settings:
+      timeout: 10 seconds
+      retry:
+        maxAttempts: 2
+        backoff: 100 millis
+    from: {node: web}
+  api.out->ingest:
+    to: ingest
+    from: {node: api}
+  ingest.out->orders-queue:
+    to: orders-queue
+    from: {node: ingest}
+  orders-queue.deliver->worker:
+    to: worker
+    settings:
+      batchSize: 10
+      batchWindow: 0
+    from: {node: orders-queue, port: deliver}
+  orders-queue.dlq->dead-letters:
+    to: dead-letters
+    from: {node: orders-queue, port: dlq}
+  worker.out->orders-table:
+    to: orders-table
+    settings:
+      request:
+        operation: write
+    from: {node: worker}

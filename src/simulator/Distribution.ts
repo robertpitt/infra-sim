@@ -1,0 +1,68 @@
+import { Duration, Effect, Random } from "effect"
+import type { Latency } from "./Setting.ts"
+
+/** Sampling. Uses whatever `Random` service is in scope, so a seeded one makes everything repeatable. */
+
+/** What a latency needs for sampling, worked out once per setting rather than once per sample. */
+interface Shape {
+  readonly mean: number
+  readonly mu: number
+  readonly sigma: number
+}
+const shapes = new WeakMap<Latency, Shape>()
+const shapeOf = (l: Latency): Shape => {
+  let shape = shapes.get(l)
+  if (shape === undefined) {
+    const mean = Duration.toMillis(l.mean)
+    const sigma2 = l.cv > 0 && mean > 0 ? Math.log(1 + l.cv * l.cv) : 0
+    shape = { mean, mu: sigma2 > 0 ? Math.log(mean) - sigma2 / 2 : mean, sigma: Math.sqrt(sigma2) }
+    shapes.set(l, shape)
+  }
+  return shape
+}
+
+/** Anything that can say a number in [0, 1): a `SeededRandom`. */
+export interface Source {
+  readonly nextDoubleUnsafe: () => number
+}
+
+/**
+ * A lognormal latency in milliseconds, drawn straight from a random source: no effects, no services. This is what
+ * the hot paths use; `latency` below is the same draw as an `Effect`.
+ */
+export const latencyMs = (l: Latency, random: Source): number => {
+  const shape = shapeOf(l)
+  if (shape.sigma === 0) return shape.mean
+  // Box–Muller; 1 - u keeps the argument of log in (0, 1].
+  const u = 1 - random.nextDoubleUnsafe()
+  const v = random.nextDoubleUnsafe()
+  return Math.exp(shape.mu + shape.sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v))
+}
+
+/** A lognormal duration with the given mean and coefficient of variation; `cv` of 0 is exactly the mean. */
+export const latency = (l: Latency): Effect.Effect<Duration.Duration> => {
+  const shape = shapeOf(l)
+  if (shape.sigma === 0) return Effect.succeed(l.mean)
+  return Effect.map(Effect.zip(Random.next, Random.next), ([a, b]) => {
+    const u = 1 - a
+    return Duration.millis(Math.exp(shape.mu + shape.sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * b)))
+  })
+}
+
+/** An exponentially distributed duration: the gaps between arrivals of a Poisson process. */
+export const exponential = (mean: Duration.Duration): Effect.Effect<Duration.Duration> =>
+  Effect.map(Random.next, (u) => Duration.millis(-Duration.toMillis(mean) * Math.log(1 - u)))
+
+/** Pick by weight. `undefined` when there is nothing to pick or every weight is zero. */
+export const weighted = <T>(items: ReadonlyArray<T>, weights: ReadonlyArray<number>): Effect.Effect<T | undefined> =>
+  Effect.gen(function*() {
+    let total = 0
+    for (const w of weights) total += Math.max(0, w)
+    if (total <= 0) return undefined
+    let r = (yield* Random.next) * total
+    for (let i = 0; i < items.length; i++) {
+      r -= Math.max(0, weights[i] ?? 0)
+      if (r < 0) return items[i]
+    }
+    return items[items.length - 1]
+  })

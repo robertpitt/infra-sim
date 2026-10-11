@@ -1,0 +1,45 @@
+{
+  "name": "infra-sim",
+  "version": "0.1.0",
+  "description": "Simulate cloud infrastructure (AWS first) under traffic and faults: a pure-Effect engine and a drag-and-drop UI.",
+  "repository": {
+    "type": "git",
+    "url": "git@robertpitt1988:robertpitt/infra-sim.git"
+  },
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "imports": {
+    "#simulator": "./src/simulator/index.ts",
+    "#simulator/components": "./src/simulator/components/index.ts",
+    "#examples": "./src/examples/index.ts"
+  },
+  "scripts": {
+    "dev": "vite",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.simulator.json && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "tsx tools/bench.ts",
+    "profile": "tools/prof.sh"
+  },
+  "dependencies": {
+    "effect": "^4.0.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "playwright": "^1.59.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.tmp/
+*.tsbuildinfo
+
+# Not part of this project: a local copy of the Effect source for reference, and older tooling and editor logs.
+vendor/
+scripts/
+scratchpad/
+.cursor/
+yarn.lock

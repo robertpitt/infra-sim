@@ -1,0 +1,10 @@
+{
+  // The simulator must stay portable (workers, node, servers): pure Effect, no DOM, no React.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2023", "WebWorker"],
+    "jsx": "preserve",
+    "types": []
+  },
+  "include": ["src/simulator"]
+}
