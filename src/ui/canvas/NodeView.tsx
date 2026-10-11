@@ -13,6 +13,8 @@ interface Props {
   readonly spec: NodeDoc
   readonly manifest: ComponentManifest | undefined
   readonly selected: boolean
+  /** Whether the node is on the path through the selection; undefined when nothing is in focus. */
+  readonly path: boolean | undefined
   /** Worst diagnostic on this node, if any. */
   readonly level: "error" | "warning" | "info" | undefined
 }
@@ -26,7 +28,7 @@ const highlightValue = (h: Highlight, stats: Stats | undefined): string => {
   return h.rate !== undefined ? fmtRate(raw) : fmtCount(raw)
 }
 
-export const NodeView = memo(function NodeView({ id, spec, manifest, selected, level }: Props) {
+export const NodeView = memo(function NodeView({ id, spec, manifest, selected, path, level }: Props) {
   const stats = useStats("nodes", id)
   const faults = useStore(run, (s) => s.faults.filter((f) => f.target.kind === "node" && f.target.id === id).length)
   const down = useStore(run, (s) => s.faults.some((f) => f.target.kind === "node" && f.target.id === id && f.fault._tag === "Outage"))
@@ -46,6 +48,7 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, l
       className="node"
       data-node-id={id}
       data-selected={selected || undefined}
+      data-path={path}
       data-health={health}
       data-faulted={faults > 0 || undefined}
       data-unknown={manifest === undefined || undefined}

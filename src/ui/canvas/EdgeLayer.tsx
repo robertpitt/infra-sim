@@ -13,12 +13,14 @@ interface EdgeProps {
   readonly a: Point
   readonly b: Point
   readonly selected: boolean
+  /** Whether the edge is on the path through the selection; undefined when nothing is in focus. */
+  readonly path: boolean | undefined
   readonly label: string | undefined
   /** What sits between the two nodes, when it is more than a plain link: drawn as a badge on the line. */
   readonly connector: ConnectorManifest | undefined
 }
 
-export const EdgeView = memo(function EdgeView({ id, a, b, selected, label, connector }: EdgeProps) {
+export const EdgeView = memo(function EdgeView({ id, a, b, selected, path, label, connector }: EdgeProps) {
   const stats = useStats("edges", id)
   const faults = useStore(run, (s) => s.faults.filter((f) => f.target.kind === "edge" && f.target.id === id).length)
   const calls = stats?.rates.calls ?? 0
@@ -36,7 +38,7 @@ export const EdgeView = memo(function EdgeView({ id, a, b, selected, label, conn
   ].filter(Boolean)
 
   return (
-    <g className="edge" data-tone={tone} data-selected={selected || undefined} data-edge-id={id}>
+    <g className="edge" data-tone={tone} data-selected={selected || undefined} data-path={path} data-edge-id={id}>
       <path className="edge-hit" d={d} data-edge-id={id} />
       {selected && <path className="edge-glow" d={d} style={{ strokeWidth: width + 7 }} />}
       <path className="edge-line" d={d} markerEnd={`url(#arrow-${tone})`} style={{ strokeWidth: width }} />

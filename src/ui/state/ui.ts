@@ -7,9 +7,28 @@ export interface UiState {
   readonly dockCollapsed: boolean
 }
 
+// The charts dock starts folded away so the canvas gets the room; once someone opens or closes it, that sticks.
+const DOCK_KEY = "sim:ui:dock"
+const savedDock = (): boolean | undefined => {
+  try {
+    const raw = localStorage.getItem(DOCK_KEY)
+    return raw === null ? undefined : raw === "collapsed"
+  } catch {
+    return undefined
+  }
+}
+
 export const ui = createStore<UiState>({
   sidebar: window.innerWidth >= 1000,
-  dockCollapsed: window.innerHeight < 760
+  dockCollapsed: savedDock() ?? true
+})
+
+ui.subscribe(() => {
+  try {
+    localStorage.setItem(DOCK_KEY, ui.get().dockCollapsed ? "collapsed" : "open")
+  } catch {
+    // Storage blocked: the dock just starts collapsed next time.
+  }
 })
 
 export const togglePanel = (key: keyof UiState): void => ui.set((s) => ({ ...s, [key]: !s[key] }))

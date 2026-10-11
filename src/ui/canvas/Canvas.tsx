@@ -11,6 +11,7 @@ import { NODE_W, edgePath, inPoint, nodeHeight, outPoint } from "./geometry.ts"
 import { GroupView } from "./GroupView.tsx"
 import { containersByDepth, GROUP_MIN, isContainer, regionOf } from "./groups.ts"
 import { NodeView } from "./NodeView.tsx"
+import { pathThrough } from "./path.ts"
 import * as viewport from "./viewport.ts"
 
 export const PALETTE_MIME = "application/x-sim-component"
@@ -82,6 +83,10 @@ export function Canvas() {
       viewport.attach(undefined)
     }
   }, [])
+
+  // Selecting something lights up the path it is part of and the rest of the design steps back. `edges` keeps its
+  // identity while nodes are dragged, so this is only recomputed when the wiring or the selection changes.
+  const focus = useMemo(() => pathThrough(design.edges, selection), [design.edges, selection])
 
   const worstLevel = useMemo(() => {
     const rank = { error: 3, warning: 2, info: 1 } as const
@@ -216,6 +221,7 @@ export function Canvas() {
       ref={containerRef}
       className="canvas"
       data-panning={panning || undefined}
+      data-focus={focus !== undefined || undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -258,7 +264,18 @@ export function Canvas() {
             // Anything but a plain link is something between the two nodes, drawn on the line.
             const between = connectorOf({ type: from.type, port }, to.type, edge.connector)?.connector
             const connector = between === undefined || Connector.isPlain(between.type) ? undefined : between
-            return <EdgeView key={id} id={id} a={a} b={b} selected={selection?.kind === "edge" && selection.id === id} label={edge.name} connector={connector} />
+            return (
+              <EdgeView
+                key={id}
+                id={id}
+                a={a}
+                b={b}
+                selected={selection?.kind === "edge" && selection.id === id}
+                path={focus === undefined ? undefined : focus.edges.has(id)}
+                label={edge.name}
+                connector={connector}
+              />
+            )
           })}
           {ghost !== undefined && (
             <path className="edge-ghost" data-valid={ghost.valid || undefined} d={edgePath({ x: ghost.x1, y: ghost.y1 }, { x: ghost.x2, y: ghost.y2 })} />
@@ -271,6 +288,7 @@ export function Canvas() {
             spec={spec}
             manifest={manifests[spec.type] as ComponentManifest | undefined}
             selected={selection?.kind === "node" && selection.id === id}
+            path={focus === undefined ? undefined : focus.nodes.has(id)}
             level={worstLevel[id]}
           />
         ))}

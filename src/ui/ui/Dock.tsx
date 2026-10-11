@@ -65,7 +65,7 @@ export function Dock() {
           {charts.length === 0 ? (
             <p className="muted small pad">Charts appear here once the simulation is running.</p>
           ) : (
-            charts.map((c) => <LineChart key={c.id} title={c.title} series={c.series} tMin={tMin} tMax={tMax} spans={relevant} format={c.format} />)
+            charts.map((c) => <LineChart key={c.id} title={c.title} series={c.series} tMin={tMin} tMax={tMax} spans={relevant} format={c.format} height={120} />)
           )}
         </div>
       )}
