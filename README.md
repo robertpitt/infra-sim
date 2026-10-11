@@ -20,6 +20,8 @@ npm run dev        # http://localhost:5173
 | `npm run preview` | Serves `dist/` locally. |
 | `npm test` | The test suite (vitest). |
 | `npm run typecheck` | Type-checks the engine (with no DOM types) and the app. |
+| `npm run cli -- <command>` | The command line: run, check, import, describe. See below. |
+| `npm run build:cli` | Bundles the command line to `dist-cli/infra-sim.mjs`. |
 | `npm run bench -- poshub 60000 10` | CPU cost of simulating an example, at a multiple of its traffic. See `tools/`. |
 
 ## Deployment
@@ -28,7 +30,7 @@ Every push to `main` runs the typecheck and tests, builds the app, and publishes
 
 ## Designs are files
 
-A design is YAML or JSON. The [`examples/`](examples) folder holds the ones that ship with the app, and the app opens and saves the same format (File menu).
+YAML is the primary format; JSON works everywhere YAML does. **File ▸ Open** (⌘O) reads either, **File ▸ Save** (⌘S) writes YAML, and **Save as JSON** is there for tools that want it. The [`examples/`](examples) folder holds the designs that ship with the app, in the same format.
 
 ```yaml
 version: 1
@@ -62,13 +64,60 @@ edges:
 
 Add a file to `examples/` (a numeric prefix sets the order) and it appears in the app. Settings are validated against each component's schema, with every problem reported by its location, e.g. `nodes.api.settings.apiType`.
 
+## Importing existing infrastructure
+
+**File ▸ Import** turns infrastructure someone else described into a design, and shows a report of what became of every part of it. **File ▸ Open** recognises these files too, so dropping a CloudFormation template into Open works.
+
+| Importer | Reads |
+| --- | --- |
+| CloudFormation | CloudFormation templates, AWS SAM, and `cdk synth` output, as YAML or JSON |
+
+For CloudFormation it carries over what the template says, service by service:
+
+- **Lambda**: memory, timeouts, reserved and provisioned concurrency (also from versions and aliases), SnapStart, retries and maximum event age, success and failure destinations, dead-letter targets, function URLs, and the VPC a function is attached to.
+- **SQS**: FIFO, visibility timeout, retention, delay, redrive, high throughput, content-based deduplication, and what a consumer reads with (batch size and window, maximum concurrency, provisioned pollers).
+- **SNS**: FIFO, throughput scope, deduplication, maximum message size, and per subscription raw delivery, redrive to a dead-letter queue, retry and throttle from the delivery policy.
+- **DynamoDB** (tables, global tables, SAM `SimpleTable`): billing mode and capacity, on-demand maximum and warm throughput, global and local indexes, the stream view and every function reading the stream (batching, parallelization, record age, retries, bisecting, discarded batches), and a global table's replicas as one table per region box.
+- **S3**: versioning, directory buckets, event notifications (event types, the share a key filter lets through), replication and Replication Time Control.
+- **API Gateway** (REST, HTTP, SAM): API type and endpoint type, integrations and timeouts, MOCK integrations, stage throttling, the stage cache, usage plans, Lambda, JWT, Cognito and IAM authorizers, and the number of routes.
+- **CloudFront**: each origin (S3 or custom, failover groups, Origin Shield, timeouts), the default behavior's cache policy, compression and methods, price class, edge functions and error caching.
+- **SES**: configuration sets (suppression, delivery window), event destinations to SNS with the event types they match, and the functions allowed to send mail.
+- **VPC**: VPCs with a subnet plan, NAT gateways, VPC endpoints, and the functions placed inside.
+
+It resolves parameters, mappings and conditions on the way. It draws the wiring the template states (event source mappings, SNS subscriptions, S3 notifications and replication, API integrations, CDN origins, EventBridge rules, SAM events, dead-letter targets) and the wiring it implies: a function that names a queue, table or configuration set in an environment variable or its own policies is taken to use it, with reads and writes told apart. Everything AWS goes inside a region box (a VPC's functions inside the VPC's box), and traffic sources are added where something is called from outside, at an assumed rate; viewers of a CloudFront distribution read, so something is cached.
+
+A template can't say how long a handler takes or how much traffic there is, so those keep their defaults and the report says so. Resources with no component yet (OpenSearch, Kinesis, ECS...) are listed, never dropped quietly; permissions and logging are listed separately because they don't change behaviour under load. What a template says that the simulator can't represent (a filter policy, partial batch responses, extra cache behaviors, a TTL's rate, the share of objects a key filter lets through) is reported as a warning or an assumption, and values the template computes at deploy time, or that the simulator doesn't accept, are reported rather than guessed. Try it with [`examples/imports/`](examples/imports).
+
+## Command line
+
+Everything the app does with a design, from a terminal, a script, CI or an agent: run it, break it, assert on the result.
+
+```sh
+npm run cli -- examples                                  # what ships with it
+npm run cli -- run @orders -d 5m --scale 3               # a design, at three times the traffic
+npm run cli -- run @multi-region -d 6m \
+    --fault "region:aws:us-east-1 Outage at=2m for=2m" \
+    --assert "users-us.errorRatio < 5%"                  # exit 1 if it doesn't hold
+npm run cli -- run examples/scenarios/lose-us-east-1.yaml --json
+npm run cli -- describe aws.lambda                       # every setting, range, and hard limit vs quota
+npm run build:cli                                        # dist-cli/infra-sim.mjs: one file, Node 22+, the `infra-sim` bin
+```
+
+A **scenario** is a design plus what happens to it: duration, traffic, setting overrides, a timeline of faults and live
+changes, and assertions (`api.errorRatio < 1%`, `orders-queue.gauge.depth:max < 5000`, `system.latency.p99 < 800ms`).
+Runs are on virtual time and deterministic, so a simulated hour takes seconds and the same seed gives the same result. Exit
+codes: `0` held, `1` an assertion failed, `2` the input was wrong. `--json` prints the whole result as data. The guide for
+people and agents, with the scenario format, assertion syntax and output schema, is [`docs/CLI.md`](docs/CLI.md) (also
+`infra-sim docs`).
+
 ## Layout
 
 ```
-src/simulator/   the engine: pure Effect, no DOM. Components, edges, faults, virtual time, the Engine protocol
+src/simulator/   the engine: pure Effect, no DOM. Components, edges, faults, virtual time, the Engine protocol, importers
+src/cli/          the command line (Node only): a thin layer over the engine
 src/ui/          the React app: canvas, sidebar, charts. Runs the engine in a worker (src/ui/state/engine.worker.ts)
 src/examples/    loads examples/*.yaml for the app and tests
-examples/        the example designs
+examples/        the example designs (and examples/imports: templates to try the importer on)
 docs/            AWS limits, with sources
 tools/           benchmarks, profiler, headless UI checks
 ```

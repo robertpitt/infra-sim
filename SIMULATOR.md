@@ -108,10 +108,10 @@ Every node has a **placement** (`aws:eu-west-1`). Placement decides:
 
 ### Limits: hard, quota, assumed
 
-Published limits are modelled in three ways, and `docs/AWS-LIMITS.md` records every number with its source URL:
+Published limits are modelled in three ways. Each service's README lists its numbers with their source URLs, and `docs/AWS-LIMITS.md` indexes them:
 
 - **hard**: the service enforces it and nobody can change it (DynamoDB's 1,000 writes/s per partition, Lambda's 6 MB sync payload). It is the min/max of the setting, or a read-only entry in the component's `limits`, and the UI marks it `hard`;
-- **quota**: an adjustable default (Lambda's 1,000 concurrent executions, API Gateway's 10,000 rps). It is an **editable setting** whose default is AWS's published number, and the UI marks it `quota` with a link to the docs. Account-level quotas live in the document's `accounts` map and are edited per placement;
+- **quota**: an adjustable default (Lambda's 1,000 concurrent executions, API Gateway's 10,000 rps). It is an **editable setting** whose default is AWS's published number, and the UI marks it `quota` with a link to the docs. Account-level quotas live in the document's `accounts` map and are edited per placement (each service contributes its own fields: `aws/<service>/quotas.ts`, merged by `aws/account.ts`);
 - **assumed**: a number AWS doesn't publish (Lambda's idle environment lifetime, S3's first-byte latency) is a setting too, and says so in its help text.
 
 A provider can also `audit` a design against its account's quotas: reservations that add up to more than Lambda allows, provisioned DynamoDB capacity over the account total. Findings are diagnostics.
@@ -122,20 +122,76 @@ A component can be a **container**: it draws a boundary round other nodes instea
 
 ### The standard components
 
-**Common**
+Each AWS service lives in its own folder, `src/simulator/aws/<service>/`, with its component(s), its slice of the account-level
+quotas (`quotas.ts`), its design checks (`audit.ts`), tests, and a README that says what is simulated (a ✅/🟡/❌ coverage
+table), what isn't yet, every limit with its source, the settings, the metrics and the assumptions. `src/simulator/aws/README.md`
+is the guide to writing one. The READMEs are the reference; this is the overview.
 
-- `common.client`: a traffic source (nothing connects into it). Poisson or constant arrivals, optional spike, payload size, hot keys and message groups (to exercise partitions and FIFO), sync or async invocation. Splits by edge weight. Records `sent`, `ok`, `fail` and end-to-end `latency`.
-- `common.http-endpoint`: something outside your system: a payment provider, a partner webhook. Latency distribution, error rate, rate limit (429), concurrency limit (503), maximum payload.
+**Common** (`common/`)
 
-**AWS** (each with its published limits; see `docs/AWS-LIMITS.md`)
+- `common.client`: a traffic source. Poisson or constant arrivals, a spike, payload size, hot keys, message groups, sync or async. A chain of timers, no fiber per request.
+- `common.http-endpoint`: something outside your system. Latency, error rate, rate limit (429), concurrency limit (503), payload limit.
 
-- `aws.apigateway`: REST or HTTP API. Account and stage token buckets (429), integration timeout (504, with the backend left running), payload limit (413), 502 on backend failure.
-- `aws.lambda`: execution environments in a `Pool` with a TTL (cold starts, idle expiry), regional concurrency shared by every function in the account, reserved and provisioned concurrency, the scale-up rate (1,000 environments per 10 s), memory-proportional CPU, timeouts, payload limits, asynchronous invocation with retries, maximum event age and an on-failure destination, and batch handling for SQS.
-- `aws.sqs`: standard and FIFO queues. Visibility timeouts, retention, delay, in-flight limits, a DLQ port, FIFO group ordering and throughput limits (with the regional high-throughput quota), and an event-source-mapping poller that ramps 5 → +300/min → 1,250 concurrent batches as the backlog grows.
-- `aws.sns`: regional publish quotas, FIFO per-group limits, subscriptions delivered asynchronously with AWS's delivery-retry policy.
-- `aws.dynamodb`: provisioned and on-demand capacity units by item size and consistency, partitions with the hard 3,000-read / 1,000-write per-second ceiling (hot keys), burst capacity, on-demand scaling to double the previous peak, per-table and per-account quotas, the 400 KB item limit.
-- `aws.s3`: per-prefix request rates (3,500 writes/s, 5,500 reads/s) with 503 Slow Down, first-byte latency plus transfer time, and event notifications on an `events` port.
-- `aws.region` and `aws.vpc`: containers, above.
+**AWS** (`aws/`)
+
+| Service | What it models |
+| --- | --- |
+| [API Gateway](src/simulator/aws/apigateway/README.md) | REST and HTTP APIs: throttling in AWS's order (usage plan, stage and route, account), Lambda/JWT/IAM authorizers with result caching, REST response cache, integration timeouts and the 429/502/503/504 mapping |
+| [CloudFront](src/simulator/aws/cloudfront/README.md) | an edge cache whose hit ratio emerges from traffic, TTL and object count; request collapsing; regional cache and Origin Shield; origin failover; error caching; invalidation; edge functions |
+| [DynamoDB](src/simulator/aws/dynamodb/README.md) | provisioned and on-demand capacity (the documented doubling), per-partition hard limits and hot keys, GSIs with back-pressure on the table, LSIs, Streams (a `stream` port), TTL, global-table replication, the account ledger |
+| [Lambda](src/simulator/aws/lambda/README.md) | the regional concurrency pool, reserved and provisioned concurrency, scale-up rate, cold starts, Init limit, SnapStart, timeouts, async invocation with retries, event age and destinations, SQS batches |
+| [S3](src/simulator/aws/s3/README.md) | per-prefix request rates with 503 Slow Down, request kinds, multipart, directory buckets, storage classes, event notifications, replication |
+| [SES](src/simulator/aws/ses/README.md) | sandbox and production quotas, throttling, the fate of each accepted message (delivered, bounced, complained, delayed), event fan-out, and the reputation thresholds that put an account in review or pause it |
+| [SNS](src/simulator/aws/sns/README.md) | standard and FIFO topics, regional publish quotas, deduplication, per-subscription delivery with retries, filters as rates, dead-letter queues, bounded memory for stuck subscribers |
+| [SQS](src/simulator/aws/sqs/README.md) | standard and FIFO, visibility timeouts, delay, retention, deduplication, dead-letter queues and redrive, in-flight limits, and the Lambda event source mapping with its scaling |
+| [Region](src/simulator/aws/region/README.md), [VPC](src/simulator/aws/vpc/README.md) | the boundary boxes: placement and regional quotas; VPC address plans and quotas, NAT gateways with their connection and bandwidth limits, VPC endpoints |
+
+## Importers
+
+An importer is a pure function from someone else's description of infrastructure to a design: `Importer.run(text, registry, options) -> { doc, report }` (`src/simulator/importers`). It is portable like the rest of the engine, so a CLI can use it. `detect(text)` recognises text an importer can read, which is how File ▸ Open routes a CloudFormation file to the importer without being told. New importers (Terraform plan output, say) are added to `importers` in `importers/index.ts`.
+
+The `report` is the other half of the contract: nothing is dropped silently. It lists what became components (with the source's own ids, and each node keeps `origin: {source, ref, type}` so a re-import can find and merge it), what was added that the source doesn't say (a region box, traffic sources), settings that were brought into range or couldn't be resolved, connections (stated versus inferred), and everything left out with a reason, split into things that don't change behaviour under load and things with no component yet.
+
+**CloudFormation** (`CloudFormation.ts`, with `Intrinsics.ts` and one module per service in `importers/cloudformation/`) reads CloudFormation, SAM and `cdk synth` output as YAML or JSON. `Intrinsics.ts` parses the short forms (`!Ref`, `!GetAtt`, `!Sub`, `!If`...) and evaluates them against parameter defaults, mappings and conditions; what can't be known from the template (`Fn::ImportValue`, a parameter with no default) comes back `Unresolved`, so the component keeps its default and the report says so. The import then runs in phases:
+
+1. **Components**: Lambda and SAM functions, SQS, SNS, DynamoDB (tables, global tables, SimpleTable), S3 and directory buckets, API Gateway REST and HTTP, CloudFront distributions, SES configuration sets, VPCs, NAT gateways and VPC endpoints, and EventBridge and Scheduler schedules (as traffic sources). Versions, aliases and function URLs are read next, so anything may name them.
+2. **The wiring the template states**: event source mappings (SQS, DynamoDB streams), subscriptions, S3 notifications and replication (and CDK's `Custom::S3BucketNotifications`), integrations, authorizers, CloudFront origins, SES event destinations, SAM events, redrive and failure destinations, success destinations, aliases and async invoke config.
+3. **What needs everything read first**: the number of routes of an API, an authorizer, MOCK integrations, a VPC's subnet plan, the VPC a function is in.
+4. **The wiring it implies**: environment variables and permissions that name a resource (a role shared by several functions is not read as any one's behaviour; a resource that already triggers a function is not drawn back as a loop), and `ses:SendEmail` or SAM's `SES*Policy`, which connect a function to the SES node.
+5. **Traffic**: a source wherever something is called from outside; the one in front of a CloudFront distribution reads, since the engine's edge default is a write that nothing would cache.
+
+What each service takes from a template, and what it can't:
+
+| Service | Mapped | Reported, not simulated |
+| --- | --- | --- |
+| DynamoDB | `BillingMode`, capacity, `OnDemandThroughput` (-1 is none), `WarmThroughput`, global indexes (count, the widest index's capacity, keys-only entry size), local indexes, `StreamSpecification`, every event source mapping or SAM `DynamoDB` event on the stream (batching, parallelization, record age, retries, bisect) with its on-failure destination on the `discarded` port, `GlobalTable` replicas (a table per region box, `replicas` edges between them) | TTL (no rate), `FilterCriteria`, `ReportBatchItemFailures`, tumbling windows, indexes that differ (modelled alike), autoscaling (its ceiling is used), `INCLUDE` projections |
+| SQS | the existing settings, content-based deduplication, provisioned pollers | `ReportBatchItemFailures`, `FilterCriteria` |
+| SNS | FIFO throughput scope, deduplication, maximum size, raw delivery (AWS's default off), dead-letter redrive, HTTP/S delivery policy (and AWS's default of 3 retries 20 s apart) | `FilterPolicy`, delivery policies on other protocols, a second dead-letter queue (one port) |
+| Lambda | `SnapStart`, `OnSuccess` and `OnFailure` destinations (also SAM's inline form), versions and aliases' provisioned concurrency, `VpcConfig` | destinations that aren't in the template (an EventBridge bus) |
+| API Gateway | endpoint type, `MOCK`, stage cache (`CacheClusterEnabled`, `CacheClusterSize`, `MethodSettings`), usage plans and keys, authorizers (`TOKEN`, `REQUEST`, `JWT`, Cognito, IAM, SAM `Auth`), routes (a CORS `OPTIONS` isn't one) | an authorizer on only some routes, mixed authorizers, partly MOCK APIs (the component has one of each per API) |
+| S3 | versioning, directory buckets, event types and key filters on notifications, replication and RTC | the share a key filter lets through is assumed (half for one rule, a quarter for two) and listed; other event types (restore, tagging), EventBridge notifications; lifecycle, encryption, CORS, tags and policies are left out quietly |
+| CloudFront | origins (S3 or custom, groups, shield, timeouts), cache policy TTLs (the template's or a known managed one), compression, methods, price class, edge functions, error caching | extra `CacheBehaviors`, unknown managed policies, `Lambda@Edge` as a node |
+| SES | configuration set suppression and delivery window, SNS event destinations and their event types, senders by permission | `RENDERING_FAILURE` and `SUBSCRIPTION` events, Firehose, EventBridge and CloudWatch destinations; identities, templates, contact lists, pools and receipt rules are listed as skipped |
+| VPC | VPC prefix, subnets as the plan, public NAT gateways (zone, addresses), endpoints (type, zones), functions inside | private NAT and Gateway Load Balancer endpoints; routes aren't read, so nothing is drawn through a NAT gateway or endpoint |
+
+Every setting is checked against the component's schema (nodes and edges alike) and clamped to its range before it is written, and what was changed is in the report. A step that can't read a property of an unexpected shape costs that one thing, with a warning, not the import. The result is laid out with `Layout.autoLayout`, then made to respect boxes: each region's nodes in a band of their own, nodes that aren't in a VPC kept out of its box, unwired VPC members placed under the connected ones, and `fitContainers` last.
+
+## Scenarios and the command line
+
+A **scenario** (`Scenario.ts`) is a design plus what happens to it, in the pure engine so any host can run one: a duration,
+a warm-up, a traffic scale, starting overrides (by node id, edge id and placement), a **timeline** (inject a fault at a
+time for a time, clear it, change a node's or edge's settings live, change account quotas), and **assertions**. `Scenario.run`
+checks everything first and reports every problem at once (unknown ids, unreadable times and assertions), then runs on a
+fresh virtual-time world, stopping at each timeline event to apply it, and returns a plain-data `Result`: a summary per node
+and edge over the measured window (rates per second, gauges as mean/max/last, latency percentiles, totals, error ratio), the
+faults that happened, and each assertion with its measured value. Assertions are small expressions
+(`<subject>.<metric>[:<aggregate>] <op> <value> [@ from..to]`; `Scenario.ASSERTION_SYNTAX` documents them). Percentiles over a
+window are a sample-weighted estimate from per-frame summaries; maxima are exact.
+
+`src/cli` is a thin Node layer over it (argument parsing, file loading, rendering): `run`, `check`, `import`, `convert`,
+`components`, `describe`, `examples`, `docs`. It loads designs, scenarios (resolving the design they name, which may itself
+be a template an importer reads) and templates, and exits 0/1/2/3 (held / assertion failed or component crashed / bad input /
+internal). `main(argv, io)` takes an `IO` object, so the commands are tested in-process. The guide is `docs/CLI.md`.
 
 ## Edges: the policy layer
 
@@ -237,10 +293,40 @@ One sidebar. With nothing selected it is a condensed component picker (grouped b
 
 ## Known gaps and next steps
 
-- Tests for SNS, DynamoDB, API Gateway, S3, the HTTP endpoint and regional behaviour are not written yet, and `Design.test.ts`, `Probe.test.ts` and `Engine.test.ts` still use the old generic component types and need porting.
-- `aws.vpc` only groups and bounds addresses; NAT, endpoints and ENI limits are not modelled.
-- S3 multipart upload, storage classes, lifecycle and replication; EventBridge, Kinesis, ALB/ECS; partial batch responses for SQS → Lambda.
-- Cloudflare and Azure providers, cross-region and cross-provider partitions.
-- The engine runs at roughly 40–55× real time; profiling the node guard and edge hot paths should win some of the cost back.
-- Circuit breakers and bulkheads, hedged requests; policy as an ordered list of tagged Schema members (timeout, retry, breaker…), so order is expressible.
-- An importer (CloudFormation → `Doc`) using `Builder`, `origin` and `Layout`: the container model maps naturally onto `AWS::EC2::VPC` and the stack's region.
+What each service doesn't simulate yet is in its README ("Not yet simulated"). The items below are the ones that need a change
+to the engine itself, and several services asked for the same thing, so they are the most useful to do next.
+
+**The call and the message**
+
+- **Partial results.** A call succeeds or fails whole. SQS and DynamoDB Streams → Lambda partial batch responses
+  (`ReportBatchItemFailures`), DynamoDB `UnprocessedItems`, and S3/SES per-recipient outcomes all need an outcome that carries
+  *which part* failed.
+- **What a message says.** `Message` has `operation: read | write` and nothing about the item or the event. Services want: a request
+  kind (S3's get/head/list/put/copy/delete, today four bucket-wide share settings), an event kind (SES bounce vs delivery),
+  an item identity (DynamoDB transaction conflicts, per-key stream ordering), a deduplication id and a per-message delay (SQS).
+- **Who calls with what.** An edge overrides the call's `operation` (default `write`), so a client wired to CloudFront or S3
+  writes unless the edge is set to read, and one edge can't carry both cached reads and proxied writes. Passing the caller's
+  operation through, and a better default, would fix both.
+- **Control actions.** Start or cancel a SQS redrive, `ChangeMessageVisibility`: a channel from a caller to a component besides the call.
+
+**The design and its checks**
+
+- **Audits see nodes, not edges or containers.** Checks like "FIFO subscribers must be SQS", more than 100 subscriptions on a
+  topic, quotas counted per VPC, or a Lambda in a VPC with no NAT calling the internet need edges and parents in `Provider.audit`'s input.
+- **Availability zones.** A zone in `Placement`, a `zone` fault target beside `region`, and the zone on a node would give zonal NAT
+  gateways, single-AZ failures and subnet-level IP capacity.
+- **Routing through a container.** A call that leaves a VPC without a NAT or endpoint should fail like it does in AWS; that needs a routing hook on `Container`.
+
+**Edges, retries and faults**
+
+- **Retries.** `Edge.retryWith` caps at 100 attempts and has one backoff shape, where SNS delivers for 23 days on a phased schedule.
+- **Faults.** There is no fault that fails *after* a timeout rather than at once, so an unreachable origin can't be told from a slow one
+  (CloudFront's connection timeout); clients record latency only for successes, so time-to-failure can't be measured.
+- `Setting.latency` caps a mean at 10 minutes, too short for SES retries and complaint delays (SES defines its own setting).
+
+**Beyond AWS**
+
+- Cloudflare and Azure providers; cross-region and cross-provider partitions.
+- EventBridge, Kinesis, Step Functions, ALB/ECS, RDS/Aurora, ElastiCache, OpenSearch.
+- Circuit breakers and bulkheads, hedged requests; policy as an ordered list of tagged members, so order is expressible.
+- The importer reading other sources (Terraform plan output, CDK constructs).

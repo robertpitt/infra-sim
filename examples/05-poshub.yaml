@@ -1,27 +1,28 @@
 version: 1
 name: POS Hub
 description: |-
-  The whole POS Hub stack from falcon/cdk/services/pos-hub: REST API, 28 tables, the change-event bus with webhooks, search, menu and delivery consumers, the delayed-task scheduler, billing and reports. Stand-ins and omissions are listed at the end of poshub.ts.
+  The whole POS Hub stack from falcon/cdk/services/pos-hub: REST API with its Lambda authorizer, 28 tables, the change-event bus with webhooks, search, menu and delivery consumers, the delayed-task scheduler, billing, reports, email and the media CDN. What is stood in for or left out is listed at the end of this description.
 
-  POS Hub, mapped from `falcon/cdk/services/pos-hub` (the CDK stacks and the Lambda runtime they deploy) into one design.
+  POS Hub, mapped from `falcon/cdk/services/pos-hub` (the CDK stacks and the Lambda runtime they deploy) into one design. The
+  hand-mapping works from the CDK stacks as far as they were read; the rest (traffic, handler durations, anything marked
+  "assumed") is an assumption you should replace with production numbers.
 
-  What is modelled: the REST API and its single handler Lambda, all 28 DynamoDB tables, the three S3 buckets, the
-  table-change pipeline (store-change-handler -> SNS event bus -> its six subscribers), outbound webhooks, the
-  delayed-task scheduler, billing, performance reports, report generation, image processing, and the external HTTP
-  services the runtime calls. Everything AWS sits inside one `aws.region` box (eu-west-1); callers and external
-  services sit outside it.
+  What is modelled: the REST API, its request authorizer and its single handler Lambda, all 28 DynamoDB tables (with their
+  global secondary indexes and, on 19 of them, a real DynamoDB Stream), the three S3 buckets and the assets bucket's
+  notification, the table-change pipeline (streams -> store-change-handler -> SNS event bus -> its six subscribers), outbound
+  webhooks, the delayed-task scheduler (stream, queue, handlers), billing, performance reports, report generation, image
+  processing, SES email, a CloudFront distribution in front of the media bucket, and the external HTTP services the runtime
+  calls. Everything AWS sits inside one `aws.region` box (eu-west-1); callers and external services sit outside it.
 
-  Where the simulator has no component for something the stack uses, this file follows three rules:
+  Where the simulator has no component for something the stack uses, this file follows two rules:
 
-    1. A service that only RECEIVES work (OpenSearch, SES, SSM, CloudFront) is left out. The time it costs is folded
-       into the calling Lambda's handler duration and the call is not drawn. See the list at the end of this description.
+    1. A service that only RECEIVES work (OpenSearch, SSM) is left out. The time it costs is folded into the calling
+       Lambda's handler duration and the call is not drawn. See the list at the end of this description.
     2. A service that only STARTS work (EventBridge schedules, CloudWatch Logs subscription filters) is replaced by a
        `common.client` whose `origin.source` is "approximation", firing at the real rate.
-    3. DynamoDB Streams sits between two things we do have (tables and a Lambda), so dropping it would orphan the whole
-       event backbone. It is approximated by an SQS queue the writers send to (`change-stream`, `scheduler-stream`).
-       Nothing is captured automatically: each writer has an explicit edge, which is how write volume reaches the bus.
 
-  Every node carries `origin` (the CDK file and construct id), so an importer could re-run and merge by id.
+  Every node carries `origin` (the CDK file and construct id, or "assumed" with what is assumed), so an importer could re-run
+  and merge by id.
 
   Numbers that come from the CDK (memory, timeouts, batch sizes, batching windows, visibility timeouts, retention, redrive
   counts, concurrency caps, FIFO, schedules) are exact. Numbers that do not (handler durations, traffic rates, the route
@@ -29,41 +30,80 @@ description: |-
   duration is the time at 1,769 MB or more; the Lambda component stretches it for smaller memory sizes (about 7x at the
   128 MB the CDK leaves on several of these functions).
 
+  Assumptions added with the newer service components (each is `origin: assumed` on its node or edge, or stated here):
+
+    - DYNAMODB STREAMS. The CDK says change capture feeds store-change-handler from 18 tables and the scheduler stream handler
+      from the scheduler table; it is not in hand which 18. The design captures orders, orders-association, invitations,
+      reports, deliveries, invoices, locations, accounts, users, applications, connections, menus, menu-categories,
+      menu-items, catalog-products, catalog-categories, catalog-modifiers and catalog-modifier-groups. The first seven
+      OpenSearch indexes (orders, deliveries, locations, accounts, users, applications, connections) are the evidence for
+      those tables; the rest are a guess (edges whose table is a guess say so in their origin). Each stream edge is the event
+      source mapping: batch size 100, batching window 1 second and a 10 second timeout, exactly what the retired SQS edge
+      carried (the scheduler's: batch 100, 5 minutes). Retry, record age and bisect settings are left at their defaults
+      (retry until the batch succeeds, as for an unset mapping) because the CDK values are not in hand, and no `discarded`
+      port is wired because no failure destination is described. Records are produced by whatever writes the table, so every
+      write edge to a captured table now feeds the bus.
+    - GLOBAL SECONDARY INDEXES. "About 70 across the 28 tables" is all the stack says. Every table has `gsi.count` 2 or 3
+      (14 of each, 70 in all): 3 for the tables the design sends the most requests to (auth, orders, locations, connections,
+      audits, deliveries, applications, menus, menu-items, payments, catalog-products, users, accounts, resellers) and 2 for
+      the rest. That split is a guess; the sum is the only fact. Indexes are alike here, project everything and every write
+      touches every index (the component's defaults).
+    - SNS FILTER POLICIES. Every event-bus subscription filters on EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE; the shares are
+      not known. The four low-volume subscribers (delivery auto-dispatch, image import, store cleanup, menu change) get
+      `filterMatch: 0.05` (assumed, "a small share"); the webhook router and the search queue stay at 1, an upper bound. The
+      shares also keep a consumer that writes a captured table from feeding itself: without them its write would emit an
+      event that reaches it again.
+    - API GATEWAY AUTHORIZER. The request authorizer (TokenAuthorizer, `authorizerV2.ts`, result cache TTL 0 per the stack)
+      is a Lambda on the gateway's authorizer port, invoked for every request. Its memory, duration and the three table
+      reads it makes (auth, memberships, roles) are assumed.
+    - SES. EmailService/AmazonSESProvider sends invitations (API handler), invoice emails (process-invoice-queue) and
+      performance emails (performance-report-handler). The API handler's share (weight 1, as for invitations) and one
+      recipient per send are assumed; the account is out of the sandbox with the SES defaults (14 recipients a second,
+      50,000 a day, recipient bounce and complaint rates), which are assumptions too. Nothing is wired to its `events` port
+      because the stack as read does not say where SES events go.
+    - CLOUDFRONT. The media domain and signed deliveries CSV links are served by pos-hub-cdn, a separate stack not read. The
+      distribution here is a stand-in: viewers (20 requests a second, assumed) -> one CloudFront distribution (4 edge
+      locations, 20,000 objects of 120 KB, popularity skew 2, a one day default TTL, regional cache on, all assumed) ->
+      the assets bucket (read). Signed URLs, geo restriction and the real object count are not modelled.
+    - S3 NOTIFICATION FILTER. The assets bucket notifies image-drop-handler only for keys under `media/` and only for
+      creates. The edge sets `eventTypes: created` and `filter: 0.9` (assumed share of writes under `media/`: the other
+      writes are exports and invoice files).
+
   Known accuracy limits, all consequences of the simulator rather than of the stack:
 
-    - SNS subscription FILTER POLICIES are not modelled, so every subscriber of the event bus receives every event. The
-      real filters pass a small share to the low-volume subscribers (delivery auto-dispatch, image import, store cleanup,
-      menu change), so their load here is an upper bound. To stop runaway loops (a consumer writes a table, which emits an
-      event, which reaches the same consumer), Lambdas reachable from the event bus (including image-drop, through S3) do NOT send
-      their writes back into `change-stream`.
-    - The API Gateway REQUEST AUTHORIZER Lambda (TokenAuthorizer, cache TTL 0, so one extra invocation and a few table
-      reads on every request) cannot be drawn: the gateway has one integration port and picks by weight.
     - The API handler is one Lambda behind about 800 routes. With `fanOut: "weighted"` each request makes ONE downstream
       call, picked by the weights below, where a real request makes several. Read the table rates as the mix, and scale the
-      client `rps` up for realistic per-table load.
-    - S3 event notifications have no prefix filter, so every write to the assets bucket (exports and invoice files as
-      well as media/ uploads) invokes image-drop-handler, and its own writes to thumbs/ are not drawn (they would loop).
-    - SQS stands in for DynamoDB Streams, so stream retries are SQS redeliveries (up to 1,000), not a blocked shard.
+      client `rps` up for realistic per-table load. The writes the old design sent to the stand-in queues are now the weighted
+      write edges to the captured tables (orders, orders-association, invitations, reports) only.
+    - The scheduler stream handler's write back to the scheduler table (real: a status update) is not drawn: the simulator
+      has no stream event filter, so the write would be captured and re-invoke the handler without end.
+    - Audits are written by the webhook dispatcher, which runs on the event path, and the design has no stream filter, so the
+      audits table is NOT captured (the real stack indexes audits in OpenSearch, so it is captured there). A captured
+      audits table would feed itself.
+    - Tables with replicas, the stack's reason for a stream on every table, are drawn as single-region tables.
+    - S3's prefix and event-type filters are one fraction, not key matching; image-drop's own writes to thumbs/ are not drawn
+      (they would invoke it again).
     - One invocation sends one message. The billing seeder (one message per account), the schedule feeder (up to 250 per
-      page) and the webhook router (one per matching connection) really send many.
-    - DynamoDB secondary indexes (about 70), global-table replication, Lambda layers and IAM are not modelled.
+      page), and the webhook router (one per matching connection) really send many.
+    - Lambda layers and IAM are not modelled.
     - The EventBridge stand-ins fire once per period (daily billing, hourly reports, 14-minute feeder): raise their `rps`
       to watch them in a short run.
 
   What the simulator cannot show, and why:
   - S3 (partly) (left out): The three buckets are drawn, but not every object path: presigned downloads (reports, deliveries CSV, images) are served by S3 to the caller without touching the API, thumbs/ writes by image-drop-handler, multipart uploads, lifecycle expiry (1 day exports, 30 day backups).
   - OpenSearch (left out): The poshub-orders, -deliveries, -locations, -accounts, -users, -applications, -connections and -audits indexes. Written by opensearch-ingress and reindex-handler; read by the API's search and metrics endpoints and by the performance report.
-  - SES (left out): Invitations, invoice and performance emails (EmailService, AmazonSESProvider). Resellers can also configure a custom SMTP provider.
+  - SES (partly): Sends from the three Lambdas are modelled against an assumed account. Not modelled: sender identities and templates, the reseller's custom SMTP provider, and where SES delivery, bounce and complaint events go.
   - SSM Parameter Store (left out): JWT signing key, CloudFront signing key pair for deliveries CSV links, Twilio credentials.
-  - CloudFront, Route 53, ACM (left out): Media domain and signed deliveries CSV links (the CDN itself is a separate service, pos-hub-cdn), the API custom domain and its certificates.
+  - Route 53, ACM (left out): The API custom domain and its certificates, and the CDN's domain.
+  - CloudFront (assumed stand-in): The real CDN is the separate pos-hub-cdn stack, not read. The distribution, its traffic and cache settings are assumed; signed URLs and behaviours by path are not modelled.
   - EventBridge (approximated): Three schedule rules: scheduleFeedHandlerRule (every 14 min), seedInvoiceQueueRule (daily 00:00), hourlyScheduleRule (hourly). Each is a constant-rate client.
-  - DynamoDB Streams (approximated): Change capture on 18 tables into storeChangeHandler, and on the scheduler table into its stream handler. Each is an SQS queue the writers send to; see the accuracy notes.
+  - DynamoDB Streams (partly assumed): Modelled with a real stream per captured table. Which 18 tables, the retry and bisect settings, the audits table, the scheduler handler's write-back, event filters and a failure destination are covered in the notes above.
   - CloudWatch Logs subscription filter (approximated): BAD_REQUEST_BODY lines in the API access log invoking validation-failure-consumer. A constant-rate client.
-  - DynamoDB global tables and GSIs (left out): About 70 global secondary indexes (query paths and their throughput), and cross-region replication, which the stack says is why every table has a stream.
-  - S3 notification prefix filter (simulator): The assets bucket notifies image-drop-handler only for keys under media/. Here every write to the bucket does, and image-drop's own thumbs/ writes are left out so it cannot invoke itself.
-  - SNS subscription filter policies (simulator): All six subscriptions on the event bus filter on EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE. Without them every subscriber gets every event.
+  - DynamoDB global tables (left out): Cross-region replication, which the stack says is why every table has a stream. The regions are not named, so no replica tables are drawn.
+  - GSIs (assumed): 70 indexes spread 3 or 2 per table; the real distribution, key shapes and any index with its own capacity are not known.
+  - SNS subscription filter policies (assumed): Shares for four subscribers are guesses; the policies themselves (EVENT_NAME, CHANGE_TYPE, OBJECT_TYPE) are not simulated.
   - API Gateway path-based routing (simulator): A gateway has one integration port, so the /docs S3 integration is a weighted share of all requests, not a route.
-  - API Gateway Lambda authorizer (simulator): TokenAuthorizer (authorizerV2.ts) on every route, result cache TTL 0: one extra Lambda invocation and several table reads per request, which also count against Lambda concurrency.
+  - API Gateway authorizer (assumed): The authorizer Lambda's duration, memory and reads are assumed; one invocation per request (result cache TTL 0).
   - One-to-many sends from one invocation (simulator): seed-invoices, schedule-feed-handler and webhook-router each send many messages per invocation; here one invocation sends one.
   - API Gateway request validation and gateway responses (simulator): Body and parameter validation (a source of the BAD_REQUEST_BODY audit), custom gateway responses, per-stage access logs.
   - Lambda layer, IAM roles, log groups (not runtime): ApiLambdaLayer (sharp, axios, twilio, react-pdf...), per-construct roles, 1 to 4 week log retention.
@@ -119,6 +159,7 @@ nodes:
     settings:
       apiType: rest
       integrationTimeout: 29 seconds
+      authorizer: {type: lambda, ttl: 0}
     origin: {source: falcon/cdk/services/pos-hub/POSHubCoreStack.ts, ref: api-v2, type: apigateway.RestApi}
   api-handler:
     type: aws.lambda
@@ -143,6 +184,7 @@ nodes:
     position: {x: 1040, y: 80}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: auth, type: dynamodb.Table}
   roles:
     type: aws.dynamodb
@@ -151,6 +193,7 @@ nodes:
     position: {x: 1040, y: 230}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: roles, type: dynamodb.Table}
   memberships:
     type: aws.dynamodb
@@ -159,6 +202,7 @@ nodes:
     position: {x: 1040, y: 680}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: memberships, type: dynamodb.Table}
   invitations:
     type: aws.dynamodb
@@ -167,6 +211,7 @@ nodes:
     position: {x: 1040, y: 830}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: invitations, type: dynamodb.Table}
   resellers:
     type: aws.dynamodb
@@ -175,6 +220,7 @@ nodes:
     position: {x: 3920, y: 1505}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: resellers, type: dynamodb.Table}
   applications:
     type: aws.dynamodb
@@ -183,6 +229,7 @@ nodes:
     position: {x: 3920, y: 1205}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: applications, type: dynamodb.Table}
   connections:
     type: aws.dynamodb
@@ -191,6 +238,7 @@ nodes:
     position: {x: 3920, y: 905}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: connections, type: dynamodb.Table}
   users:
     type: aws.dynamodb
@@ -199,6 +247,7 @@ nodes:
     position: {x: 1040, y: 1130}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: users, type: dynamodb.Table}
   accounts:
     type: aws.dynamodb
@@ -207,6 +256,7 @@ nodes:
     position: {x: 1360, y: 980}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: accounts, type: dynamodb.Table}
   invoices:
     type: aws.dynamodb
@@ -215,6 +265,7 @@ nodes:
     position: {x: 1360, y: 1130}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: invoices, type: dynamodb.Table}
   catalog-products:
     type: aws.dynamodb
@@ -223,6 +274,7 @@ nodes:
     position: {x: 4240, y: 1205}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: catalog-products, type: dynamodb.Table}
   catalog-categories:
     type: aws.dynamodb
@@ -231,6 +283,7 @@ nodes:
     position: {x: 3600, y: 530}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: catalog-categories, type: dynamodb.Table}
   catalog-modifiers:
     type: aws.dynamodb
@@ -239,6 +292,7 @@ nodes:
     position: {x: 3600, y: 830}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: catalog-modifiers, type: dynamodb.Table}
   catalog-modifier-groups:
     type: aws.dynamodb
@@ -247,6 +301,7 @@ nodes:
     position: {x: 3600, y: 980}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: catalog-modifier-groups, type: dynamodb.Table}
   menus:
     type: aws.dynamodb
@@ -255,6 +310,7 @@ nodes:
     position: {x: 3920, y: 1355}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menus, type: dynamodb.Table}
   menu-categories:
     type: aws.dynamodb
@@ -263,6 +319,7 @@ nodes:
     position: {x: 3920, y: 605}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-categories, type: dynamodb.Table}
   menu-items:
     type: aws.dynamodb
@@ -271,6 +328,7 @@ nodes:
     position: {x: 4240, y: 1055}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-items, type: dynamodb.Table}
   menu-modifiers:
     type: aws.dynamodb
@@ -279,6 +337,7 @@ nodes:
     position: {x: 1040, y: 1280}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-modifiers, type: dynamodb.Table}
   menu-modifier-groups:
     type: aws.dynamodb
@@ -287,6 +346,7 @@ nodes:
     position: {x: 1040, y: 1430}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-modifier-groups, type: dynamodb.Table}
   promotions:
     type: aws.dynamodb
@@ -295,6 +355,7 @@ nodes:
     position: {x: 1040, y: 1580}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: promotions, type: dynamodb.Table}
   locations:
     type: aws.dynamodb
@@ -303,6 +364,7 @@ nodes:
     position: {x: 3600, y: 1730}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: locations, type: dynamodb.Table}
   orders:
     type: aws.dynamodb
@@ -311,6 +373,7 @@ nodes:
     position: {x: 3600, y: 1580}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: orders, type: dynamodb.Table}
   orders-association:
     type: aws.dynamodb
@@ -319,6 +382,7 @@ nodes:
     position: {x: 1040, y: 1730}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: orders-association, type: dynamodb.Table}
   deliveries:
     type: aws.dynamodb
@@ -327,6 +391,7 @@ nodes:
     position: {x: 3600, y: 1880}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: deliveries, type: dynamodb.Table}
   payments:
     type: aws.dynamodb
@@ -335,6 +400,7 @@ nodes:
     position: {x: 1360, y: 1280}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: payments, type: dynamodb.Table}
   audits:
     type: aws.dynamodb
@@ -343,6 +409,7 @@ nodes:
     position: {x: 4560, y: 1130}
     settings:
       mode: on-demand
+      gsi: {count: 3}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: audits, type: dynamodb.Table}
   reports:
     type: aws.dynamodb
@@ -351,6 +418,7 @@ nodes:
     position: {x: 1680, y: 1130}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: reports, type: dynamodb.Table}
   scheduler-table:
     type: aws.dynamodb
@@ -359,6 +427,7 @@ nodes:
     position: {x: 2320, y: 1280}
     settings:
       mode: on-demand
+      gsi: {count: 2}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-table, type: dynamodb.Table}
   assets:
     type: aws.s3
@@ -378,16 +447,6 @@ nodes:
     parent: aws-eu-west-1
     position: {x: 1680, y: 980}
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: report-artifacts, type: s3.Bucket}
-  change-stream:
-    type: aws.sqs
-    name: Table changes (DynamoDB Streams stand-in)
-    parent: aws-eu-west-1
-    position: {x: 2320, y: 980}
-    settings:
-      retention: 1 day
-      visibilityTimeout: 60 seconds
-      maxReceives: 1000
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: storeChangeHandler/streams, type: sqs.Queue}
   store-change-handler:
     type: aws.lambda
     name: Store change handler
@@ -607,16 +666,6 @@ nodes:
         mean: 150
       fanOut: weighted
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: store-cleanup-handler, type: lambda.Function}
-  scheduler-stream:
-    type: aws.sqs
-    name: Scheduler changes (DynamoDB Streams stand-in)
-    parent: aws-eu-west-1
-    position: {x: 1040, y: 380}
-    settings:
-      retention: 1 day
-      visibilityTimeout: 6 minutes
-      maxReceives: 1000
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: schedulerStreamHandler/streams, type: sqs.Queue}
   scheduler-queue:
     type: aws.sqs
     name: Scheduler queue
@@ -847,6 +896,55 @@ nodes:
         mean: 350
         cv: 0.5
     origin: {source: external, ref: twilio}
+  token-authorizer:
+    type: aws.lambda
+    name: Token authorizer (request authorizer)
+    parent: aws-eu-west-1
+    position: {x: 720, y: 830}
+    settings:
+      memory: 256
+      timeout: 10 seconds
+      duration:
+        mean: 20
+        cv: 0.5
+      coldStart:
+        init:
+          mean: 400
+      fanOut: sequential
+    origin: {source: assumed, ref: "TokenAuthorizer (authorizerV2.ts) on the REST API, result cache TTL 0; memory, duration and init are assumed"}
+  ses:
+    type: aws.ses
+    name: SES (invitation, invoice and performance emails)
+    parent: aws-eu-west-1
+    position: {x: 400, y: 1505}
+    settings:
+      call: send
+      batchSize: 1
+    origin: {source: assumed, ref: "EmailService / AmazonSESProvider; account production quotas and recipient behaviour are the component defaults, assumed"}
+  media-cdn:
+    type: aws.cloudfront
+    name: Media CDN (stand-in for pos-hub-cdn)
+    parent: aws-eu-west-1
+    position: {x: 3280, y: 530}
+    settings:
+      objects: 20000
+      popularitySkew: 2
+      objectSize: 120
+      allowedMethods: read
+      cache:
+        defaultTtl: 1 day
+      edge:
+        locations: 4
+        priceClass: "100"
+    origin: {source: assumed, ref: "pos-hub-cdn is a separate stack not read; distribution, object count and size, TTL and edge count are assumed"}
+  media-viewers:
+    type: common.client
+    name: Media and CSV viewers (assumed traffic)
+    region: eu-west
+    position: {x: -6, y: 1280}
+    settings:
+      rps: 20
+    origin: {source: assumed, ref: "viewers of media and signed deliveries CSV links; rate assumed"}
 edges:
   partner-apps.out->api:
     to: api
@@ -862,15 +960,150 @@ edges:
     settings:
       weight: 100
     from: {node: api}
-  change-stream.deliver->store-change-handler:
+  orders.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-      maxConcurrency: 40
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: store-change-handler/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: change-stream, port: deliver}
+    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
+    from: {node: orders, port: stream}
+  deliveries.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
+    from: {node: deliveries, port: stream}
+  locations.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
+    from: {node: locations, port: stream}
+  accounts.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
+    from: {node: accounts, port: stream}
+  users.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
+    from: {node: users, port: stream}
+  applications.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
+    from: {node: applications, port: stream}
+  connections.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
+    from: {node: connections, port: stream}
+  orders-association.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: orders-association, port: stream}
+  invitations.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: invitations, port: stream}
+  reports.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: reports, port: stream}
+  invoices.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: invoices, port: stream}
+  menus.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: menus, port: stream}
+  menu-categories.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: menu-categories, port: stream}
+  menu-items.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: menu-items, port: stream}
+  catalog-products.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: catalog-products, port: stream}
+  catalog-categories.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: catalog-categories, port: stream}
+  catalog-modifiers.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: catalog-modifiers, port: stream}
+  catalog-modifier-groups.stream->store-change-handler:
+    to: store-change-handler
+    settings:
+      timeout: 10 seconds
+      batchSize: 100
+      batchWindow: 1 second
+    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
+    from: {node: catalog-modifier-groups, port: stream}
   store-change-handler.out->events:
     to: events
     from: {node: store-change-handler}
@@ -944,6 +1177,9 @@ edges:
     from: {node: opensearch-events, port: deliver}
   events.out->menu-change-queue:
     to: menu-change-queue
+    settings:
+      filterMatch: 0.05
+    origin: {source: assumed, ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share"}
     from: {node: events}
   menu-change-queue.dlq->menu-change-dlq:
     to: menu-change-dlq
@@ -963,6 +1199,9 @@ edges:
     from: {node: menu-change-handler}
   events.out->delivery-auto-dispatcher:
     to: delivery-auto-dispatcher
+    settings:
+      filterMatch: 0.05
+    origin: {source: assumed, ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share"}
     from: {node: events}
   delivery-auto-dispatcher.out->applications:
     to: applications
@@ -991,6 +1230,9 @@ edges:
     from: {node: delivery-auto-dispatcher}
   events.out->image-import-handler:
     to: image-import-handler
+    settings:
+      filterMatch: 0.05
+    origin: {source: assumed, ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share"}
     from: {node: events}
   image-import-handler.out->image-hosts:
     to: image-hosts
@@ -1013,6 +1255,9 @@ edges:
     from: {node: media-uploads}
   assets.events->image-drop-handler:
     to: image-drop-handler
+    settings:
+      eventTypes: created
+      filter: 0.9
     origin: {source: falcon/cdk/services/pos-hub/ApiImageProcessor.ts, ref: image-drop-handler/S3 notification, type: s3.NotificationDestination}
     from: {node: assets, port: events}
   image-drop-handler.out->assets:
@@ -1029,6 +1274,9 @@ edges:
     from: {node: image-drop-handler}
   events.out->store-cleanup-handler:
     to: store-cleanup-handler
+    settings:
+      filterMatch: 0.05
+    origin: {source: assumed, ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share"}
     from: {node: events}
   store-cleanup-handler.out->connections:
     to: connections
@@ -1062,19 +1310,15 @@ edges:
     to: catalog-modifier-groups
     settings: *a2
     from: {node: store-cleanup-handler}
-  scheduler-stream.deliver->scheduler-stream-handler:
+  scheduler-table.stream->scheduler-stream-handler:
     to: scheduler-stream-handler
     settings:
       timeout: 5 minutes
       batchSize: 100
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-stream-handler/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: scheduler-stream, port: deliver}
+    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-stream-handler/DynamoEventSource, type: lambda.EventSourceMapping}
+    from: {node: scheduler-table, port: stream}
   scheduler-stream-handler.out->scheduler-queue:
     to: scheduler-queue
-    from: {node: scheduler-stream-handler}
-  scheduler-stream-handler.out->scheduler-table:
-    to: scheduler-table
-    settings: *a2
     from: {node: scheduler-stream-handler}
   schedule-feed-rule.out->schedule-feed-handler:
     to: schedule-feed-handler
@@ -1102,11 +1346,6 @@ edges:
     settings:
       request: *a3
       weight: 3
-    from: {node: scheduler-queue-handler}
-  scheduler-queue-handler.out->change-stream:
-    to: change-stream
-    settings:
-      weight: 2
     from: {node: scheduler-queue-handler}
   scheduler-queue-handler.out->deliveries:
     to: deliveries
@@ -1148,11 +1387,6 @@ edges:
     to: scheduler-table
     settings:
       request: *a3
-      weight: 0.4
-    from: {node: scheduler-queue-handler}
-  scheduler-queue-handler.out->scheduler-stream:
-    to: scheduler-stream
-    settings:
       weight: 0.4
     from: {node: scheduler-queue-handler}
   billing-rule.out->seed-invoices:
@@ -1211,9 +1445,6 @@ edges:
   process-invoice-queue.out->assets:
     to: assets
     settings: *a2
-    from: {node: process-invoice-queue}
-  process-invoice-queue.out->change-stream:
-    to: change-stream
     from: {node: process-invoice-queue}
   performance-report-rule.out->performance-report-handler:
     to: performance-report-handler
@@ -1283,9 +1514,6 @@ edges:
   validation-failure-consumer.out->audits:
     to: audits
     settings: *a2
-    from: {node: validation-failure-consumer}
-  validation-failure-consumer.out->change-stream:
-    to: change-stream
     from: {node: validation-failure-consumer}
   api-handler.out->auth:
     to: auth
@@ -1476,20 +1704,10 @@ edges:
       request:
         operation: write
     from: {node: api-handler}
-  api-handler.out->change-stream:
-    to: change-stream
-    settings:
-      weight: 30.300000000000004
-    from: {node: api-handler}
   api-handler.out->scheduler-table:
     to: scheduler-table
     settings:
       request: *a3
-      weight: 2
-    from: {node: api-handler}
-  api-handler.out->scheduler-stream:
-    to: scheduler-stream
-    settings:
       weight: 2
     from: {node: api-handler}
   api-handler.out->reports-queue:
@@ -1538,3 +1756,52 @@ edges:
       request: *a4
       weight: 0.2
     from: {node: api}
+  api.authorizer->token-authorizer:
+    to: token-authorizer
+    origin: {source: assumed, ref: "TokenAuthorizer (authorizerV2.ts) invoked on every request, cache TTL 0"}
+    from: {node: api, port: authorizer}
+  token-authorizer.out->auth:
+    to: auth
+    settings:
+      request: {operation: read}
+    origin: {source: assumed, ref: "authorizer reads (which tables and how many is assumed)"}
+    from: {node: token-authorizer}
+  token-authorizer.out->memberships:
+    to: memberships
+    settings:
+      request: {operation: read}
+    origin: {source: assumed, ref: "authorizer reads (which tables and how many is assumed)"}
+    from: {node: token-authorizer}
+  token-authorizer.out->roles:
+    to: roles
+    settings:
+      request: {operation: read}
+    origin: {source: assumed, ref: "authorizer reads (which tables and how many is assumed)"}
+    from: {node: token-authorizer}
+  api-handler.out->ses:
+    to: ses
+    settings:
+      weight: 1
+    origin: {source: assumed, ref: "invitation email (EmailService/AmazonSESProvider); share of requests assumed, same weight as the invitation write"}
+    from: {node: api-handler}
+  process-invoice-queue.out->ses:
+    to: ses
+    origin: {source: assumed, ref: "invoice email (EmailService/AmazonSESProvider), one per invoice processed"}
+    from: {node: process-invoice-queue}
+  performance-report-handler.out->ses:
+    to: ses
+    origin: {source: assumed, ref: "performance email (EmailService/AmazonSESProvider), one per run"}
+    from: {node: performance-report-handler}
+  media-viewers.out->media-cdn:
+    to: media-cdn
+    settings:
+      request: {operation: read}
+    origin: {source: assumed, ref: "viewers of media and signed deliveries CSV links"}
+    from: {node: media-viewers}
+  media-cdn.out->assets:
+    to: assets
+    settings:
+      originType: s3
+      request: {operation: read}
+    origin: {source: assumed, ref: "CDN origin is the media bucket (assets); pos-hub-cdn itself not read"}
+    from: {node: media-cdn, port: out}
