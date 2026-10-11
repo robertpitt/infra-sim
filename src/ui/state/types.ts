@@ -1,4 +1,4 @@
-import type { Component, Describe, Design, Engine, Fault, Telemetry } from "#simulator"
+import type { Component, Connector, Controller, Describe, Design, Engine, Fault, Telemetry } from "#simulator"
 
 /**
  * The shapes the UI works with, named plainly. Everything here is plain data (durations are milliseconds,
@@ -12,6 +12,8 @@ export type EdgeDoc = Design.EdgeDoc
 export type Position = Design.Position
 
 export type ComponentManifest = Component.Manifest
+export type ConnectorManifest = Connector.Manifest
+export type ControllerManifest = Controller.Manifest
 export type Highlight = Component.Highlight
 
 export type FieldSpec = Describe.FieldSpec

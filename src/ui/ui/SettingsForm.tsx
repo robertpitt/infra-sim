@@ -116,14 +116,14 @@ const Field = ({ spec, value, path, onChange }: { spec: FieldSpec; value: unknow
   const label = (
     <label className="field-label" title={spec.help}>
       {spec.label}
-      {spec.kind !== "boolean" && spec.kind !== "choice" && spec.unit !== undefined && spec.kind !== "duration" && <span className="unit">{spec.unit}</span>}
+      {(spec.kind === "int" || spec.kind === "number") && spec.unit !== undefined && <span className="unit">{spec.unit}</span>}
     </label>
   )
   const lead = (
     <span className="field-lead">
       {label}
       <Hint text={spec.help} />
-      {spec.kind !== "boolean" && spec.kind !== "choice" && <LimitPill spec={spec} />}
+      {(spec.kind === "int" || spec.kind === "number" || spec.kind === "duration") && <LimitPill spec={spec} />}
       {reset}
     </span>
   )
@@ -150,7 +150,50 @@ const Field = ({ spec, value, path, onChange }: { spec: FieldSpec; value: unknow
         </div>
       )
     }
+    case "text":
+      return (
+        <div className="field stack" data-modified={modified || undefined}>
+          {lead}
+          <TextBox value={typeof value === "string" ? value : spec.default} placeholder={spec.placeholder} label={spec.label} onCommit={(v) => onChange(path, v)} />
+        </div>
+      )
   }
+}
+
+/** A line of text, committed when it loses focus or Enter is pressed, so a half-typed name isn't applied letter by letter. */
+const TextBox = ({ value, placeholder, label, onCommit }: { value: string; placeholder: string | undefined; label: string; onCommit: (v: string) => void }) => {
+  const [draft, setDraft] = useState(value)
+  const [editing, setEditing] = useState(false)
+  const shown = editing ? draft : value
+  const commit = () => {
+    setEditing(false)
+    const v = draft.trim()
+    if (v !== value) onCommit(v)
+  }
+  return (
+    <input
+      className="text-box"
+      type="text"
+      value={shown}
+      placeholder={placeholder}
+      aria-label={label}
+      spellCheck={false}
+      onFocus={() => {
+        setDraft(value)
+        setEditing(true)
+      }}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur()
+        if (e.key === "Escape") {
+          setDraft(value)
+          setEditing(false)
+          ;(e.target as HTMLInputElement).blur()
+        }
+      }}
+    />
+  )
 }
 
 /** A nested set of settings. One that opens with an on/off switch hides the rest until it's switched on. */

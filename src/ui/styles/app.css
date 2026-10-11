@@ -232,6 +232,11 @@ a.pill:hover { filter: brightness(1.2); }
 .number-box[data-invalid] { border-color: var(--red); }
 .number-box input { flex: 1; min-width: 0; height: 24px; padding: 0 7px; border: 0; background: none; font: 500 12px var(--mono); text-align: right; outline: none; }
 .suffix { padding-right: 7px; color: var(--muted); font: 12px var(--mono); }
+.controller { margin: 4px 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); }
+.controller-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; color: var(--muted); }
+.controller-title { flex: 1; color: var(--text); font-weight: 600; font-size: 12px; }
+.text-box { width: 100%; height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); font: 500 12px var(--mono); outline: none; }
+.text-box:focus { border-color: var(--blue); }
 .problem { color: var(--red); font-size: 11px; text-align: right; }
 .slider { width: 100%; margin: 0; height: 14px; accent-color: var(--blue); }
 select { height: 26px; max-width: 58%; min-width: 0; padding: 0 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); font-size: 12px; }
@@ -313,6 +318,7 @@ select:disabled { opacity: 0.55; }
 .node-type { font-size: 10.5px; color: var(--muted); letter-spacing: 0.02em; }
 .node-badge { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; }
 .node-badge.fault { background: rgba(255, 107, 107, 0.18); color: #ff8f8f; }
+.node-badge.controlled { background: rgba(90, 162, 255, 0.16); color: var(--blue); }
 .node-badge.warning { background: rgba(242, 184, 75, 0.16); color: var(--amber); }
 .node-badge.error { background: rgba(255, 107, 107, 0.18); color: #ff8f8f; }
 .node-stats { padding: 0 12px 0 14px; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
@@ -348,6 +354,9 @@ select:disabled { opacity: 0.55; }
 .edge[data-tone="fault"] .edge-line { stroke: #8a3a3a; stroke-dasharray: 7 6; }
 .edge[data-selected] .edge-line { filter: brightness(1.5); }
 .edge-label { font: 600 11px var(--mono); fill: #c4cedd; paint-order: stroke; stroke: var(--canvas); stroke-width: 5px; stroke-linejoin: round; pointer-events: none; }
+.edge-connector { cursor: pointer; color: #c4cedd; pointer-events: all; }
+.edge-connector circle { fill: var(--canvas); stroke: var(--edge, #2c3748); stroke-width: 1.5; }
+.edge-connector:hover circle, .edge[data-selected] .edge-connector circle { stroke: var(--blue); }
 .edge-fault circle { fill: #2a1416; stroke: #ff6b6b; stroke-width: 1.5; }
 .edge-fault path { fill: #ff8f8f; }
 .edge-ghost { fill: none; stroke: var(--faint); stroke-width: 2; stroke-dasharray: 6 6; pointer-events: none; }

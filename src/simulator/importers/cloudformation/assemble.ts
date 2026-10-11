@@ -1,5 +1,6 @@
 import { Schema } from "effect"
-import { type AnyComponent, edgeConfigFor, type PortDefs } from "../../Component.ts"
+import type { PortDefs } from "../../Component.ts"
+import * as Connector from "../../Connector.ts"
 import * as Design from "../../Design.ts"
 import { fields as describeFields, type FieldSpec } from "../../Describe.ts"
 import * as Layout from "../../Layout.ts"
@@ -270,7 +271,12 @@ export const assemble = (run: Run, registry: Components, name: string): Assembly
       }
       singles.set(key, 1)
     }
-    const settings = edgeSettings(run, component, w)
+    const picked = registry.connectorFor({ type: w.from.type, port: w.port }, w.to.type)
+    if (!picked.ok) {
+      run.warn(`${w.from.name} → ${w.to.name} isn't drawn: ${picked.reason}.`)
+      continue
+    }
+    const settings = edgeSettings(run, Connector.edgeSchema(picked.connector, def), w)
     preserved += leaves(settings).length
     doc = Design.connect(doc, {
       from: { node: w.from.id, port: w.port },
@@ -292,9 +298,8 @@ export const assemble = (run: Run, registry: Components, name: string): Assembly
   return { doc, preserved }
 }
 
-/** An edge's settings, each checked against the universal edge policy plus the settings of the port it leaves. */
-const edgeSettings = (run: Run, component: AnyComponent, w: Wire): Bag => {
-  const schema = edgeConfigFor(component, w.port)
+/** An edge's settings, each checked against the edge's schema: its port's settings, its connector's and transport's. */
+const edgeSettings = (run: Run, schema: Connector.Settings, w: Wire): Bag => {
   const specs = describeFields(schema)
   const out: Bag = {}
   for (const { path, value } of leaves(w.settings)) {

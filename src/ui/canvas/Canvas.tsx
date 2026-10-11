@@ -1,10 +1,10 @@
-import { Design } from "#simulator"
+import { Connector, Design } from "#simulator"
 import type { ComponentManifest, Position } from "../state/types.ts"
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { PointerEvent as ReactPointerEvent } from "react"
 import { useStore } from "../lib/store.ts"
 import { addNode, beginMove, beginResize, connect, doc, select, settleNode } from "../state/document.ts"
-import { catalog, registry } from "../state/engine.ts"
+import { catalog, connectorOf, registry } from "../state/engine.ts"
 import { run } from "../state/run.ts"
 import { Arrowhead, EdgeView } from "./EdgeLayer.tsx"
 import { NODE_W, edgePath, inPoint, nodeHeight, outPoint } from "./geometry.ts"
@@ -132,11 +132,15 @@ export function Canvas() {
     gesture.current = { kind: "pan", startX: e.clientX, startY: e.clientY, origin: viewport.view.get(), moved: false }
   }
 
-  const validTarget = (from: string, element: Element | null): string | undefined => {
+  /** The node under `element`, if a wire from `from`'s `port` can go there: something must be able to sit between them. */
+  const validTarget = (from: string, port: string, element: Element | null): string | undefined => {
     const id = element?.closest<HTMLElement>("[data-node-id]")?.dataset.nodeId
     if (id === undefined || id === from) return undefined
-    const type = doc.get().design.nodes[id]?.type
-    return type !== undefined && manifests[type]?.inputs !== false ? id : undefined
+    const design = doc.get().design
+    const source = design.nodes[from]?.type
+    const type = design.nodes[id]?.type
+    if (source === undefined || type === undefined) return undefined
+    return connectorOf({ type: source, port }, type) !== undefined ? id : undefined
   }
 
   const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -169,7 +173,7 @@ export function Canvas() {
       const from = outPoint(node, manifests[node.type], g.port)
       const to = viewport.toWorld(e.clientX, e.clientY)
       const over = document.elementFromPoint(e.clientX, e.clientY)
-      setGhost({ x1: from.x, y1: from.y, x2: to.x, y2: to.y, valid: validTarget(g.node, over) !== undefined })
+      setGhost({ x1: from.x, y1: from.y, x2: to.x, y2: to.y, valid: validTarget(g.node, g.port, over) !== undefined })
     }
   }
 
@@ -182,7 +186,7 @@ export function Canvas() {
     if (g.kind === "node" && g.moved) settleNode(g.id)
     if (g.kind === "connect") {
       setGhost(undefined)
-      const target = validTarget(g.node, document.elementFromPoint(e.clientX, e.clientY))
+      const target = validTarget(g.node, g.port, document.elementFromPoint(e.clientX, e.clientY))
       if (target !== undefined) connect(g.node, g.port, target)
     }
   }
@@ -248,9 +252,13 @@ export function Canvas() {
             const from = design.nodes[edge.from.node]
             const to = design.nodes[edge.to]
             if (from === undefined || to === undefined) return null
-            const a = outPoint(from, manifests[from.type], Design.portOf(edge))
+            const port = Design.portOf(edge)
+            const a = outPoint(from, manifests[from.type], port)
             const b = inPoint(to, manifests[to.type])
-            return <EdgeView key={id} id={id} a={a} b={b} selected={selection?.kind === "edge" && selection.id === id} label={edge.name} />
+            // Anything but a plain link is something between the two nodes, drawn on the line.
+            const between = connectorOf({ type: from.type, port }, to.type, edge.connector)?.connector
+            const connector = between === undefined || Connector.isPlain(between.type) ? undefined : between
+            return <EdgeView key={id} id={id} a={a} b={b} selected={selection?.kind === "edge" && selection.id === id} label={edge.name} connector={connector} />
           })}
           {ghost !== undefined && (
             <path className="edge-ghost" data-valid={ghost.valid || undefined} d={edgePath({ x: ghost.x1, y: ghost.y1 }, { x: ghost.x2, y: ghost.y2 })} />

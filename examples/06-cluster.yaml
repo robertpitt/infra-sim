@@ -1,0 +1,77 @@
+version: 1
+name: Autoscaled cluster
+description: |-
+  No cloud at all: users call a service of replicas (a Kubernetes Deployment, say) that keeps a session object per user (actors: Durable Objects or Orleans grains would do the same) in front of a database. At one minute traffic triples. An autoscaler adds replicas, but each takes 20 seconds to start, so the queue in front of the service fills first and some requests are refused until they are ready. A few heavy users are one session object each, and one object runs one request at a time, so their requests wait on their own however many replicas there are.
+
+  Built only from the provider-neutral parts: a service, a family of keyed objects, an HTTP endpoint standing in for the database, and the target-tracking controller (busy workers per replica against 6 of 10, as a horizontal autoscaler's CPU target would). The network inside the cluster is set on each edge (1 ms), because placement still only knows cloud regions.
+seed: 31
+nodes:
+  users:
+    type: common.client
+    name: Users
+    position: {x: 80, y: 80}
+    settings:
+      rps: 150
+      hotKeys: 0.05
+      spike:
+        multiplier: 3
+        start: 1 minute
+        duration: 1 minute
+  api:
+    type: common.service
+    name: API
+    position: {x: 400, y: 80}
+    settings:
+      replicas: 2
+      concurrency: 10
+      serviceTime: {mean: 100, cv: 0.5}
+      queueLimit: 200
+      startup: 20 seconds
+  sessions:
+    type: common.actor
+    name: Sessions
+    position: {x: 720, y: 80}
+    settings:
+      objects: 5000
+      handlerTime: {mean: 3, cv: 0.5}
+      idle: 2 minutes
+  database:
+    type: common.http-endpoint
+    name: Database
+    position: {x: 1040, y: 80}
+    settings:
+      latency: {mean: 8, cv: 0.4}
+      maxConcurrency: 200
+edges:
+  users.out->api:
+    from: {node: users}
+    to: api
+    settings:
+      timeout: 10 seconds
+  api.out->sessions:
+    from: {node: api}
+    to: sessions
+    settings:
+      timeout: 5 seconds
+      latency: {mean: 1, cv: 0.3}
+  sessions.out->database:
+    from: {node: sessions}
+    to: database
+    settings:
+      latency: {mean: 1, cv: 0.3}
+controllers:
+  api-autoscaler:
+    type: core.target-tracking
+    target: api
+    name: API autoscaler
+    settings:
+      metric: busy
+      per: unit
+      targetValue: 6
+      setting: replicas
+      min: 2
+      max: 30
+      window: 30 seconds
+      period: 15 seconds
+      scaleOutCooldown: 0
+      scaleInCooldown: 2 minutes

@@ -12,7 +12,7 @@ const runnable = examples.filter((e) => e.id !== "blank").map((e): [string, Exam
 
 describe("the example designs", () => {
   it("are read from the files in examples/, in filename order", () => {
-    expect(examples.map((e) => e.id)).toEqual(["orders", "retry-storm", "multi-region", "fan-out", "poshub", "blank"])
+    expect(examples.map((e) => e.id)).toEqual(["orders", "retry-storm", "multi-region", "fan-out", "poshub", "cluster", "blank"])
   })
 
   it.each(examples.map((e): [string, Example] => [e.id, e]))("%s: is a valid design with no errors, a title and a blurb", (_id, e) => {
@@ -43,6 +43,32 @@ describe("the example designs", () => {
     expect(() => parseDesign("version: 2\nnodes: {}\nedges: {}")).toThrow()
     expect(() => parseDesign("just some text")).toThrow()
   })
+})
+
+describe("the autoscaled cluster", () => {
+  it("is built without any cloud: only provider-neutral components and a core controller", () => {
+    const doc = example("cluster").design()
+    expect(Object.values(doc.nodes).every((n) => n.type.startsWith("common."))).toBe(true)
+    expect(Object.values(doc.controllers ?? {}).map((c) => c.type)).toEqual(["core.target-tracking"])
+  })
+
+  it("refuses requests while the spike outruns replicas that are still starting, catches up, and scales back in", () =>
+    sim(example("cluster").design(), (s) =>
+      Effect.gen(function*() {
+        const all = yield* s.advanceTo(420_000)
+        const refused = (from: number, to: number) => mean(all, "nodes", "api", "rates", "fail.Unavailable", from, to)
+        const ready = (from: number, to: number) => mean(all, "nodes", "api", "gauges", "ready", from, to)
+        expect(refused(10_000, 60_000)).toBe(0) // before the spike
+        const early = refused(60_000, 90_000)
+        expect(early).toBeGreaterThan(20) // the spike, while the new replicas start
+        expect(refused(105_000, 120_000)).toBeLessThan(early / 4) // later in it, with most of the replicas it needs
+        expect(refused(125_000, 420_000)).toBe(0) // after it
+        expect(ready(100_000, 120_000)).toBeGreaterThan(1.4 * ready(30_000, 60_000))
+        // Two minutes after its last change the autoscaler takes the extra replicas away again.
+        expect(ready(400_000, 420_000)).toBeLessThan(ready(140_000, 160_000))
+        const scaler = yield* s.probeController("api-autoscaler")
+        expect((scaler.state as { decisions: ReadonlyArray<unknown> }).decisions.length).toBeGreaterThan(2)
+      })))
 })
 
 describe("the POS Hub design", () => {

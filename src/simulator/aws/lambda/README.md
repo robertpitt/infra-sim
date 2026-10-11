@@ -73,8 +73,8 @@ The code is split by mechanism:
 | Destination delivery failures | ✅ | Counted (`destinationFailures`). |
 | Duplicate delivery of an event with no error | ❌ | AWS says the queue is eventually consistent; no duplicates are produced. |
 | **Event source mappings** | | |
-| SQS batches | ✅ | The SQS component polls and calls the function with a batch (`count` records, up to 6 MB). `batchCalls` and `batch.*` decide how the function treats it. |
-| Partial batch response (`ReportBatchItemFailures`) | ❌ | Needs engine support: the call outcome cannot say "these records failed". See [Not yet simulated](#not-yet-simulated). |
+| SQS batches | ✅ | The event source mapping (a connector on the queue's consumer edge) calls the function with a batch (`count` records, up to 6 MB). `batchCalls` and `batch.*` decide how the function treats it. |
+| Partial batch response (`ReportBatchItemFailures`) | ✅ | `batch.errors: report`: the function returns the records that failed (rolled per record, and any record whose downstream call fails) and the invocation succeeds. The mapping acts on it only with `reportBatchItemFailures` on its edge; without, the whole batch is deleted. |
 | Kinesis, DynamoDB streams, MSK, MQ mappings | ❌ | No such components. |
 | **Regions and accounts** | | |
 | Regional differences | ✅ | AWS publishes one default (1,000) for every Region, so there is none to model. New accounts start lower; set it in the account quotas. |
@@ -105,7 +105,7 @@ behaviour.
 | `fanOut` | sequential | sequential, parallel, weighted, none | | How downstream edges are called. |
 | `batchCalls` | each | each, once | | Downstream calls per record or per batch. |
 | `batch.duration` | invocation | invocation, record | assumed | Handler duration once or per record in a batch. New. |
-| `batch.errors` | invocation | invocation, record | assumed | Error rate rolled once or per record in a batch. New. |
+| `batch.errors` | invocation | invocation, record, report | assumed | Error rate rolled once or per record in a batch; `report` returns the failed records as batch item failures instead of failing the invocation. |
 | `async.maxRetries` | 2 | 0–2 | hard | Retries after function errors. |
 | `async.firstRetryDelay` | 1 min | 0–6 h | hard (AWS value) | Wait before the first retry. |
 | `async.secondRetryDelay` | 2 min | 0–6 h | hard (AWS value) | Wait before the second retry. |
@@ -188,6 +188,14 @@ the function calls what is wired to `out` (`fanOut`; a batch a record at a time,
 any bad record fails the batch). A synchronous caller sees `Failed` ("function error: ..." with the cause). `errors` counts
 every function error, timeouts included, as CloudWatch's `Errors` does.
 
+**Partial batch responses.** With `batch.errors` set to `report`, a batch from a poller (a message marked `batched`, even a
+batch of one) is handled like a handler that catches each record's error: each record fails with `errorRate`, the others
+go downstream (a record whose downstream call fails joins the failed ones), and the invocation **succeeds**, returning the
+failed records' positions (`ItemFailures`, the engine's `batchItemFailures`). It is not an error, so `errors` doesn't count
+it; `itemFailures` counts the records. What happens next is the mapping's: with `reportBatchItemFailures` only those
+records come back; without it the reply is ignored and they are deleted with the rest, which is the real-world way to lose
+messages by configuring one side and not the other.
+
 **Timeout.** When it fires the work is cancelled (downstream calls abandoned), the environment is discarded, the invocation
 is a function error ("task timed out"), and concurrency is given back.
 
@@ -240,8 +248,9 @@ distribution fronts the URL. `VpcConfig.SubnetIds` draws the function inside the
 Triggers: `AWS::Lambda::EventSourceMapping` and the SAM events draw SQS queues and DynamoDB streams (see those
 components for the edge settings); SNS, S3, `Api`/`HttpApi` and schedule events become edges or an assumed
 traffic source. A mapping that is disabled is left out, a mapping to anything else (Kinesis, MSK, ...) or any other
-trigger type is reported and not connected, and `ReportBatchItemFailures`, `FilterCriteria` and `TumblingWindowInSeconds`
-are reported as not simulated (see below). What a function uses (queues, tables, buckets, SES) is inferred from its
+trigger type is reported and not connected. `ReportBatchItemFailures` on a queue's mapping sets `reportBatchItemFailures` on
+the edge and `batch.errors: report` on the function (one configured for it is taken to return them); on a DynamoDB stream,
+and `FilterCriteria` and `TumblingWindowInSeconds` anywhere, are reported as not simulated (see below). What a function uses (queues, tables, buckets, SES) is inferred from its
 environment variables and its own policies, with reads and writes told apart; a role shared by several functions is not
 read as any one's use. A function that nothing triggers and that calls nothing is reported as idle.
 
@@ -257,6 +266,7 @@ Frames (per second unless noted; names as in the node's frame):
 | `throttles` | rate | Attempts refused with 429 (any reason). |
 | `timeouts` | rate | Invocations killed at the timeout. |
 | `errors` | rate | Function errors, timeouts included. |
+| `itemFailures` | rate | Records successful invocations returned as batch item failures (`batch.errors: report`). |
 | `asyncRetries`, `asyncSucceeded`, `asyncFailed`, `destinationFailures` | rate | Asynchronous outcomes. |
 | `duration` | sampler (ms) | Handler time to return or timeout. |
 | `initDuration` | sampler (ms) | Init (or Restore) time per cold start. |
@@ -266,18 +276,15 @@ Frames (per second unless noted; names as in the node's frame):
 | `asyncPending` | gauge | Asynchronous events not yet finished. |
 
 Probe state: `concurrent`, `environments`, `provisioned`, `limit` (the most it may run now), `invocations`, `coldStarts`,
-`throttles`, `timeouts`, `errors`, `asyncPending`, `asyncRetries`, `asyncSucceeded`, `asyncFailed`, `destinationFailures`
-(running totals).
+`throttles`, `timeouts`, `errors`, `itemFailures`, `asyncPending`, `asyncRetries`, `asyncSucceeded`, `asyncFailed`,
+`destinationFailures` (running totals).
 
 ## Not yet simulated
 
 In order of how much a design's behaviour depends on it:
 
-1. **Partial batch response (`ReportBatchItemFailures`).** With it AWS re-delivers only the failed records and doesn't scale
-   the mapping down on errors; without it one bad record fails the whole batch (modelled, via `batch.errors`). It needs the
-   engine: `Call` can only succeed or fail, so there is no way for the function to say "3 of 10 failed" and for the SQS
-   component to delete the other 7. It wants either a call outcome that carries the failed record count (or ids), or a
-   `Message` convention the function can write the result into. Not hacked in here.
+1. **Partial batch response for DynamoDB streams.** Queues have it (see above). The stream's polling still lives in the
+   table's `stream` port rather than in a connector, and doesn't act on a partial reply.
 2. **Account-wide request-rate limit** (10 × the account quota across all functions) and the provisioned spillover at 10
    requests per second per environment. Needs a shared bucket per placement; doable inside this folder, left out to keep
    the first switch simple.

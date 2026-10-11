@@ -3,10 +3,10 @@ import { Cause, Console, Data, Effect, Option } from "effect"
 import { Argument, CliConfig, CliError, CliOutput, Command, Flag, GlobalFlag } from "effect/cli"
 import * as NodeServices from "@effect/platform-node/NodeServices"
 import YAML from "yaml"
-import { builtinLayer, Design, Diagnostics, Fault, importers, type Importer, Scenario } from "#simulator"
+import { builtinLayer, Connector, Design, Diagnostics, Fault, importers, type Importer, Scenario } from "#simulator"
 import { registry } from "#simulator/components"
 import { exampleFiles, encodeDesign, load, type Loaded, resolveReference, stem, UsageError } from "./load.ts"
-import { makeStyle, renderComponent, renderDiagnostics, renderFrames, renderImportReport, renderResult, table } from "./format.ts"
+import { makeStyle, renderComponent, renderConnector, renderController, renderDiagnostics, renderFrames, renderImportReport, renderResult, table } from "./format.ts"
 import { type IO, Io } from "./io.ts"
 
 /**
@@ -407,23 +407,43 @@ const describe = Command.make(
     const io = yield* Io
     const type = o.type
     const manifest = registry.manifests.find((m) => m.type === type) ?? registry.manifests.find((m) => m.type === `aws.${type}` || m.type === `common.${type}`)
-    if (manifest === undefined) {
-      const near = registry.manifests.filter((m) => m.type.includes(type.toLowerCase())).map((m) => m.type)
-      return yield* new UsageError(`no component called "${type}"`, [near.length > 0 ? `did you mean: ${near.join(", ")}` : `components: ${registry.manifests.map((m) => m.type).join(", ")}`])
-    }
     const format = formatOf(o.json, o.format)
+    // A connector is described the same way: what it fits between, and its settings.
+    const connector = manifest === undefined ? registry.connectorManifests.find((c) => c.type === type || c.type === `core.${type}` || c.type === `aws.${type}`) : undefined
+    if (connector !== undefined) {
+      io.stdout(format !== "text" ? dump(connector, format) : renderConnector(connector, Connector.transportFields(), styleOf(io, o.noColor)))
+      return
+    }
+    const controller = manifest === undefined ? registry.controllerManifests.find((c) => c.type === type || c.type === `core.${type}`) : undefined
+    if (controller !== undefined) {
+      io.stdout(format !== "text" ? dump(controller, format) : renderController(controller, styleOf(io, o.noColor)))
+      return
+    }
+    if (manifest === undefined) {
+      const all = [...registry.manifests, ...registry.connectorManifests, ...registry.controllerManifests].map((m) => m.type)
+      const near = all.filter((t) => t.includes(type.toLowerCase()))
+      const list = (label: string, types: ReadonlyArray<{ readonly type: string }>) => `${label}: ${types.map((m) => m.type).join(", ")}`
+      return yield* new UsageError(`no component, connector or controller called "${type}"`, [
+        near.length > 0
+          ? `did you mean: ${near.join(", ")}`
+          : [list("components", registry.manifests), list("connectors", registry.connectorManifests), list("controllers", registry.controllerManifests)].join("; ")
+      ])
+    }
     if (format !== "text") io.stdout(dump(manifest, format))
     else io.stdout(renderComponent(manifest, styleOf(io, o.noColor)))
   })
 ).pipe(
-  Command.withShortDescription("Show one component\'s settings, ranges, limits and ports (describe aws.lambda)"),
+  Command.withShortDescription("Show one component\'s or connector's settings, ranges, limits and ports (describe aws.lambda)"),
   Command.withDescription(block(
     "Everything needed to configure a component: every setting with its default and range, whether a limit is hard or an",
-    "adjustable quota, the ports edges leave from, and the service's published limits. Use it before writing a design."
+    "adjustable quota, the ports edges leave from, and the service's published limits. Use it before writing a design.",
+    "A connector (what sits on an edge, such as aws.sqs.event-source-mapping) and a controller (what changes a node while it",
+    "runs, such as core.target-tracking) are described the same way."
   )),
   Command.withExamples([
     { command: "infra-sim describe aws.lambda", description: "Settings, ranges, limits and ports of a Lambda function" },
-    { command: "infra-sim describe sqs --json", description: "The same for SQS, as the full manifest" }
+    { command: "infra-sim describe sqs --json", description: "The same for SQS, as the full manifest" },
+    { command: "infra-sim describe aws.sqs.event-source-mapping", description: "The connector between a queue and its consumer" }
   ])
 )
 

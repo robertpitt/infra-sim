@@ -52,6 +52,7 @@ export type Form =
   }
   | { readonly kind: "boolean"; readonly label?: string; readonly help?: string }
   | { readonly kind: "choice"; readonly label?: string; readonly help?: string; readonly labels?: Readonly<Record<string, string>> }
+  | { readonly kind: "text"; readonly label?: string; readonly help?: string; readonly placeholder?: string }
   | { readonly kind: "group"; readonly label?: string; readonly help?: string }
 
 export const FORM = "form"
@@ -128,6 +129,14 @@ export const choice = <const L extends ReadonlyArray<string>>(
     kind: "choice",
     ...common(o),
     ...(o.labels === undefined ? {} : { labels: o.labels as Readonly<Record<string, string>> })
+  })
+
+/** A short piece of text: a name, a path to another setting. Leading and trailing spaces are dropped. */
+export const text = (o: Common & { readonly default: string; readonly placeholder?: string }): Schema.withDecodingDefault<Schema.String> =>
+  annotated(Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(o.default))), {
+    kind: "text",
+    ...common(o),
+    ...(o.placeholder === undefined ? {} : { placeholder: o.placeholder })
   })
 
 // ---------------------------------------------------------------------------------------------------------

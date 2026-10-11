@@ -42,10 +42,13 @@ export interface Builder {
     from: NodeRef | PortRef,
     to: NodeRef,
     settings?: Readonly<Record<string, unknown>>,
-    options?: { readonly id?: string; readonly name?: string; readonly origin?: Design.Origin }
+    /** `connector` names what sits on the edge; left out, the most specific one that fits is used. */
+    options?: { readonly id?: string; readonly name?: string; readonly origin?: Design.Origin; readonly connector?: string }
   ) => void
   /** Override account-level quotas for a placement such as `aws:us-east-1`. */
   readonly account: (placement: string, settings: Readonly<Record<string, unknown>>) => void
+  /** Attach a controller (`core.target-tracking`...) to a node. Returns its id. */
+  readonly control: (type: string, target: NodeRef, settings?: Readonly<Record<string, unknown>>, options?: { readonly id?: string; readonly name?: string }) => string
   readonly build: () => Design.Doc
 }
 
@@ -73,6 +76,7 @@ export const make = (name?: string, options: { readonly seed?: number } = {}): B
         from: "node" in from ? { node: from.node, port: from.port } : { node: from.id },
         to: to.id,
         ...(settings === undefined ? {} : { settings }),
+        ...(o.connector === undefined ? {} : { connector: o.connector }),
         ...(o.id === undefined ? {} : { id: o.id }),
         ...(o.name === undefined ? {} : { name: o.name }),
         ...(o.origin === undefined ? {} : { origin: o.origin })
@@ -80,6 +84,17 @@ export const make = (name?: string, options: { readonly seed?: number } = {}): B
     },
     account: (placement, settings) => {
       design = { ...design, accounts: { ...design.accounts, [placement]: settings } }
+    },
+    control: (type, target, settings, o = {}) => {
+      const added = Design.addController(design, {
+        type,
+        target: target.id,
+        ...(settings === undefined ? {} : { settings }),
+        ...(o.id === undefined ? {} : { id: o.id }),
+        ...(o.name === undefined ? {} : { name: o.name })
+      })
+      design = added.doc
+      return added.id
     },
     build: () => design
   }

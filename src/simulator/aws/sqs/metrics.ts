@@ -28,8 +28,6 @@ export const makeTallies = (meter: Meter) => {
     deduplicated: t("deduplicated"),
     /** Messages a redrive moved out of this queue. */
     redriven: t("redriven"),
-    /** Deliveries the consumer failed. */
-    nacks: t("nacks"),
     /** Sends refused by the FIFO rate limit. */
     throttled: t("throttled"),
     /** NumberOfEmptyReceives: an estimate (see the README): idle long-poll waits of the mapping's pollers. */

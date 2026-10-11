@@ -33,7 +33,7 @@ const lastStatus = (events: ReadonlyArray<Event>) => tagged(events, "status").at
 const framesOf = (events: ReadonlyArray<Event>) => tagged(events, "frames").flatMap((e) => e.frames)
 
 describe("Engine", () => {
-  it("tells you what components exist, how to configure edges, and which faults it can inject", () =>
+  it("tells you what components and connectors exist, how to configure edges, and which faults it can inject", () =>
     withEngine((engine) =>
       Effect.sync(() => {
         expect(engine.catalog.providers.map((p) => p.id)).toEqual(["internet", "aws"])
@@ -42,7 +42,12 @@ describe("Engine", () => {
         expect(types).toEqual(expect.arrayContaining(["common.client", "common.http-endpoint", "aws.region", "aws.vpc", "aws.apigateway", "aws.lambda", "aws.sqs", "aws.sns", "aws.dynamodb", "aws.s3"]))
         expect(types.every((t) => /^(common|aws)\.[a-z0-9-]+$/.test(t))).toBe(true)
         expect(new Set(types).size).toBe(types.length)
-        expect(engine.catalog.edge.map((f) => f.key)).toEqual(["weight", "latency", "request", "timeout", "cancelOnTimeout", "retry"])
+        // The core connectors come first, then each provider's.
+        const connectors = engine.catalog.connectors.map((c) => c.type)
+        expect(connectors.slice(0, 2)).toEqual(["core.link", "core.poller"])
+        expect(connectors).toContain("aws.sqs.event-source-mapping")
+        expect(engine.catalog.connectors[0]!.settings.map((f) => f.key)).toEqual(["weight", "request", "timeout", "cancelOnTimeout", "retry"])
+        expect(engine.catalog.transport.map((f) => f.key)).toEqual(["latency"])
         expect(engine.catalog.faults.map((f) => f.tag)).toEqual(["Outage", "Errors", "Slow", "Blackhole", "Loss"])
         // Forms are derived from the schemas, durations in milliseconds.
         const queue = engine.catalog.components.find((c) => c.type === "aws.sqs")!

@@ -7,19 +7,21 @@ import {
   Fiber,
   Graph,
   Layer,
-  Option,
   Random,
   Schema,
   Scope,
-  type Stream,
+  Stream,
   SubscriptionRef
 } from "effect"
-import { type AnyComponent, edgeConfigFor, type Node as NodeContext, type PortDefs } from "./Component.ts"
+import type { Instance as ComponentInstance, Node as NodeContext, PortDefs } from "./Component.ts"
+import type * as Connector from "./Connector.ts"
+import type * as Controller from "./Controller.ts"
 import type * as Design from "./Design.ts"
 import * as Edge from "./Edge.ts"
 import * as Limiter from "./Limiter.ts"
 import { ActiveFault, type Fault, Faults, make as makeFaults, NoSuchTarget, type Target } from "./Fault.ts"
-import { Failed, type Call, type CallFailure, failureCounter, type Message, Unavailable } from "./Message.ts"
+import { Failed, type Call, type CallFailure, failureCounter, type ItemFailures, type Message, Unavailable } from "./Message.ts"
+import type { Pull } from "./Protocol.ts"
 import { keyOf } from "./Provider.ts"
 import * as SeededRandom from "./SeededRandom.ts"
 import { type Frame, make as makeTelemetry, Telemetry } from "./Telemetry.ts"
@@ -70,6 +72,29 @@ export const NodeProbe = Schema.Struct({
 })
 export type NodeProbe = typeof NodeProbe.Type
 
+export const ControllerProbe = Schema.Struct({
+  type: Schema.String,
+  /** The node it controls. */
+  target: Schema.String,
+  /** The controller's own report, described by its `state` schema. */
+  state: Schema.Unknown,
+  /** What it said it decided, newest last. */
+  log: Schema.Array(Schema.Struct({ t: Schema.Number, text: Schema.String }))
+})
+export type ControllerProbe = typeof ControllerProbe.Type
+
+export class NoSuchController extends Schema.TaggedError<NoSuchController>()("NoSuchController", { id: Schema.String }) {}
+
+export const EdgeProbe = Schema.Struct({
+  /** What sits on the edge. */
+  connector: Schema.String,
+  /** Tries in flight across the edge's transport right now. */
+  inflight: Schema.Number,
+  /** The connector's own report, described by its `state` schema. */
+  state: Schema.Unknown
+})
+export type EdgeProbe = typeof EdgeProbe.Type
+
 export const Inspection = Schema.Struct({
   /** Virtual time in milliseconds. */
   t: Schema.Number,
@@ -84,9 +109,13 @@ export const Inspection = Schema.Struct({
       probe: NodeProbe
     })
   ),
-  edges: Schema.Record(Schema.String, Schema.Struct({ from: Schema.String, to: Schema.String, port: Schema.String, config: Schema.Unknown })),
+  edges: Schema.Record(
+    Schema.String,
+    Schema.Struct({ from: Schema.String, to: Schema.String, port: Schema.String, connector: Schema.String, config: Schema.Unknown, probe: EdgeProbe })
+  ),
   /** Account-level quotas by placement, as the simulation is running them right now. */
   accounts: Schema.Record(Schema.String, Schema.Unknown),
+  controllers: Schema.Record(Schema.String, Schema.Struct({ config: Schema.Unknown, probe: ControllerProbe })),
   faults: Schema.Array(ActiveFault)
 })
 export type Inspection = typeof Inspection.Type
@@ -105,6 +134,12 @@ export interface Service {
   readonly frames: Stream.Stream<Frame>
   /** A node's internal state, right now. */
   readonly probe: (node: string) => Effect.Effect<NodeProbe, NoSuchNode>
+  /** An edge's connector and its internal state, right now: an event source mapping's pollers, say. */
+  readonly probeEdge: (edge: string) => Effect.Effect<EdgeProbe, NoSuchEdge>
+  /** A controller's state and what it has decided. */
+  readonly probeController: (id: string) => Effect.Effect<ControllerProbe, NoSuchController>
+  /** Replace a controller's settings with a new set of overrides, live. */
+  readonly configureController: (id: string, overrides: Readonly<Record<string, unknown>>) => Effect.Effect<void, NoSuchController | InvalidConfig>
   /** Everything at once: time, every node's configuration and state, every edge, every active fault. */
   readonly inspect: Effect.Effect<Inspection>
   readonly faults: {
@@ -148,6 +183,38 @@ interface Runtime {
   readonly context: Context.Context<never>
   /** Start the node's handler for a message (see `Edge.Target`). Undefined for nodes with no `call`. */
   start: Edge.Target["start"] | undefined
+  /** What the node offers on its `pull` ports. */
+  offers: Readonly<Record<string, Pull>> | undefined
+  probe: Effect.Effect<unknown> | undefined
+}
+
+/** One controller, running. */
+interface ControllerRuntime {
+  readonly controller: Design.Controller
+  readonly config: SubscriptionRef.SubscriptionRef<unknown>
+  /** What it said it decided, newest last. */
+  readonly log: Array<{ readonly t: number; readonly text: string }>
+  probe: Effect.Effect<unknown> | undefined
+}
+
+/** How many of a controller's log lines are kept. */
+const LOG_KEEP = 50
+
+/** `settings` with `value` at `path`, as a new object. */
+const setAt = (settings: Readonly<Record<string, unknown>>, path: ReadonlyArray<string>, value: unknown): Record<string, unknown> => {
+  const [head, ...rest] = path
+  if (head === undefined) return { ...settings }
+  const inner = (settings[head] ?? {}) as Record<string, unknown>
+  return { ...settings, [head]: rest.length === 0 ? value : setAt(inner, rest, value) }
+}
+
+/** One edge, running: its transport and the connector on it. */
+interface EdgeRuntime {
+  readonly edge: Design.Edge
+  readonly config: SubscriptionRef.SubscriptionRef<unknown>
+  readonly wire: Edge.Wire
+  /** What the connector does with a message a source sends; set once the connector is built. */
+  send: ((message: Message, done?: Edge.Done) => Edge.Cancel) | undefined
   probe: Effect.Effect<unknown> | undefined
 }
 
@@ -177,7 +244,39 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
     // A callback that throws inside a timer is a component defect, reported like any other.
     world.onError = (error) => void defects.push({ t: world.nowUnsafe(), node: "(timer)", message: error instanceof Error ? error.message : String(error) })
     const nodes = new Map<string, Runtime>()
+    const edges = new Map<string, EdgeRuntime>()
+    const controllers = new Map<string, ControllerRuntime>()
     let messages = 0
+
+    /** A fresh message from `origin`, its key drawn from the caller's own stream. */
+    const mint = (origin: string, random: SeededRandom.SeededRandom, init: Partial<Message>): Message => ({
+      id: ++messages,
+      bornAt: world.nowUnsafe(),
+      origin,
+      attempt: 1,
+      bytes: 1024,
+      count: 1,
+      invocation: "sync",
+      operation: "write",
+      key: random.nextDoubleUnsafe(),
+      ...init
+    })
+
+    /** Run a background loop for the life of the simulation, reporting a defect in it against `owner`. */
+    const spawnFor = (owner: string) => <A, E>(effect: Effect.Effect<A, E>): Effect.Effect<void, never, Scope.Scope> =>
+      Effect.asVoid(
+        Effect.forkScoped(
+          effect.pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.void
+                : Effect.gen(function*() {
+                  defects.push({ t: yield* world.now, node: owner, message: Cause.pretty(cause).split("\n")[0] ?? "crashed" })
+                })
+            )
+          )
+        )
+      )
 
     const built = yield* inWorld(
       Effect.gen(function*() {
@@ -217,22 +316,24 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
             inflight: 0,
             context: Context.add(world.context, Random.Random, random),
             start: undefined,
+            offers: undefined,
             probe: undefined
           })
         }
 
-        // --- Edges ---------------------------------------------------------------------------------------
-        const edgeConfigs = new Map<string, SubscriptionRef.SubscriptionRef<unknown>>()
+        // --- Edges: transport now, the connector on each once the nodes exist ----------------------------
+        // A source's links must exist before its component is made (it may hold on to them), but a connector that
+        // takes needs what the source offers, which only the made component has. So a link sends through whatever
+        // its connector turns out to be.
         for (const [, edge] of Graph.edges(design.graph)) {
           const e = edge.data
           const source = nodes.get(e.from)!
           const config = yield* SubscriptionRef.make(e.config)
-          edgeConfigs.set(e.id, config)
-          const link = yield* Edge.make({
+          const wire = yield* Edge.wire({
             id: e.id,
             from: e.from,
             to: e.to,
-            config: config as SubscriptionRef.SubscriptionRef<Edge.Config>,
+            config: config as SubscriptionRef.SubscriptionRef<Edge.Transport>,
             target: {
               start: (message, done) => {
                 const start = nodes.get(e.to)!.start
@@ -245,7 +346,23 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
             },
             random: root.fork(`edge:${e.id}`)
           }).pipe(Effect.provideContext(services))
-          source.links.get(e.port)!.push(link as unknown as Edge.Link<never>)
+          const rt: EdgeRuntime = { edge: e, config, wire, send: undefined, probe: undefined }
+          edges.set(e.id, rt)
+          const port = (source.node.component.ports as PortDefs)[e.port]
+          if (port?.protocol === "invoke") {
+            const link = Edge.link({
+              id: e.id,
+              from: e.from,
+              to: e.to,
+              config: config as SubscriptionRef.SubscriptionRef<Edge.Config>,
+              send: (message, done) => {
+                if (rt.send !== undefined) return rt.send(message, done)
+                done?.(Unavailable({ node: e.to, reason: "not connected yet" }))
+                return noop
+              }
+            })
+            source.links.get(e.port)!.push(link as unknown as Edge.Link<never>)
+          }
         }
 
         // --- Universal node behaviour: faults, metrics, defect containment ------------------------------
@@ -256,6 +373,7 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
           const meter = telemetry.node(rt.node.id)
           const received = meter.counter("in")
           const succeeded = meter.counter("ok")
+          const partial = meter.counter("partial")
           const failed = meter.counter("fail")
           const latency = meter.sampler("latency")
           const age = meter.sampler("age")
@@ -285,10 +403,11 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
             const body: Call = f.extraMs > 0 || f.errorRate > 0
               ? Effect.gen(function*() {
                 if (f.extraMs > 0) yield* Effect.sleep(f.extraMs)
-                yield* call(message)
+                const reply = yield* call(message)
                 if (f.errorRate > 0 && (yield* Random.next) < f.errorRate) {
                   return yield* Effect.fail(Failed({ node: rt.node.id, reason: "injected error" }))
                 }
+                return reply
               })
               : call(message)
             const fiber = spawn(body, rt.context)
@@ -300,7 +419,10 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
                 succeeded.n++
                 latency.add(t - started)
                 age.add(t - message.bornAt)
-                return done(undefined)
+                // A success may name records of its batch that failed: the caller decides what to do about them.
+                const items = exit.value as ItemFailures | undefined
+                if (items !== undefined) partial.n++
+                return done(undefined, items)
               }
               // A typed failure is the component saying no; a defect is the component breaking, which is contained.
               let failure: CallFailure | undefined
@@ -342,18 +464,7 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
               random: rt.random,
               after: world.after,
               account: () => SubscriptionRef.getUnsafe(accountRefs.get(keyOf(rt.node.placement))!),
-              mint: (init = {}) => ({
-                id: ++messages,
-                bornAt: world.nowUnsafe(),
-                origin: rt.node.id,
-                attempt: 1,
-                bytes: 1024,
-                count: 1,
-                invocation: "sync",
-                operation: "write",
-                key: rt.random.nextDoubleUnsafe(),
-                ...init
-              })
+              mint: (init = {}) => mint(rt.node.id, rt.random, init)
             },
             out: (port) => (rt.links.get(port) ?? []) as never,
             meter,
@@ -367,35 +478,8 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
                 // Built once, in the world's scope, on behalf of whoever asked first.
                 return build.pipe(Scope.provide(scope), Effect.tap((value) => Effect.sync(() => void shared.set(key, value))))
               }),
-            mint: (init = {}) =>
-              Effect.gen(function*() {
-                return {
-                  id: ++messages,
-                  bornAt: yield* world.now,
-                  origin: rt.node.id,
-                  attempt: 1,
-                  bytes: 1024,
-                  count: 1,
-                  invocation: "sync",
-                  operation: "write",
-                  key: yield* Random.next,
-                  ...init
-                } satisfies Message
-              }),
-            spawn: (effect) =>
-              Effect.asVoid(
-                Effect.forkScoped(
-                  effect.pipe(
-                    Effect.catchCause((cause) =>
-                      Cause.hasInterruptsOnly(cause)
-                        ? Effect.void
-                        : Effect.gen(function*() {
-                          defects.push({ t: yield* world.now, node: rt.node.id, message: Cause.pretty(cause).split("\n")[0] ?? "crashed" })
-                        })
-                    )
-                  )
-                )
-              )
+            mint: (init = {}) => Effect.sync(() => mint(rt.node.id, rt.random, init)),
+            spawn: spawnFor(rt.node.id)
           }
           const made = yield* rt.node.component.make(context).pipe(
             Effect.provideService(Random.Random, rt.random),
@@ -406,11 +490,97 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
             crashes.push(new ComponentCrashed({ node: rt.node.id, message: Cause.pretty(made.cause).split("\n")[0] ?? "crashed" }))
             continue
           }
-          const instance = made.value as { call?: (m: Message) => Call; probe?: Effect.Effect<unknown> }
+          const instance = made.value as ComponentInstance
           if (instance.call !== undefined) rt.start = guard(rt, instance.call)
+          rt.offers = instance.pull
           rt.probe = instance.probe
         }
-        return { scope, telemetry, faults, edgeConfigs, accountRefs, crash: crashes[0] }
+
+        // --- Connectors, now that every node exists and has said what it offers ----------------------
+        for (const rt of edges.values()) {
+          if (crashes.length > 0) break
+          const e = rt.edge
+          const source = nodes.get(e.from)!
+          const protocol = (source.node.component.ports as PortDefs)[e.port]?.protocol
+          const offered = protocol === "pull" ? source.offers?.[e.port] : undefined
+          if (protocol === "pull" && offered === undefined) {
+            crashes.push(new ComponentCrashed({ node: e.from, message: `offers nothing on its "${e.port}" port` }))
+            break
+          }
+          const random = root.fork(`connector:${e.id}`)
+          const context: Connector.Context<unknown> = {
+            id: e.id,
+            from: e.from,
+            port: e.port,
+            to: e.to,
+            config: rt.config,
+            fast: {
+              settings: () => SubscriptionRef.getUnsafe(rt.config),
+              now: world.nowUnsafe,
+              random,
+              after: world.after,
+              mint: (init = {}) => mint(e.from, random, init)
+            },
+            meter: telemetry.edge(e.id),
+            limiter,
+            spawn: spawnFor(e.id),
+            sink: rt.wire,
+            source: offered
+          }
+          const made = yield* e.connector.make(context).pipe(Effect.provideService(Random.Random, random), Scope.provide(scope), Effect.exit)
+          if (Exit.isFailure(made)) {
+            crashes.push(new ComponentCrashed({ node: e.id, message: Cause.pretty(made.cause).split("\n")[0] ?? "crashed" }))
+            break
+          }
+          const instance = made.value as Connector.Instance
+          if (protocol === "invoke" && instance.send === undefined) {
+            crashes.push(new ComponentCrashed({ node: e.id, message: `the ${e.connector.type} connector can't be sent to` }))
+            break
+          }
+          rt.send = instance.send
+          rt.probe = instance.probe
+        }
+
+        // --- Controllers, last: they watch and change what everything above built ------------------
+        for (const c of design.controllers.values()) {
+          if (crashes.length > 0) break
+          const target = nodes.get(c.target)!
+          const schema = target.node.component.config
+          const config = yield* SubscriptionRef.make(c.config)
+          const random = root.fork(`controller:${c.id}`)
+          const rt: ControllerRuntime = { controller: c, config, log: [], probe: undefined }
+          controllers.set(c.id, rt)
+          const settings = () => encodeWith(schema, SubscriptionRef.getUnsafe(target.config)) as Record<string, unknown>
+          const context: Controller.Context<unknown> = {
+            id: c.id,
+            target: c.target,
+            config,
+            fast: { settings: () => SubscriptionRef.getUnsafe(config), now: world.nowUnsafe, random, after: world.after },
+            watch: (listener) => spawnFor(c.id)(Stream.runForEach(telemetry.frames, (frame) => listener(frame.nodes[c.target], frame.t))),
+            settings,
+            // The same door an edit uses: the whole settings, decoded and validated, then swapped in.
+            set: (path, value) =>
+              Effect.suspend(() => decodeOverrides(c.target, schema, setAt(settings(), path, value))).pipe(
+                Effect.mapError((e) => e.issues),
+                Effect.flatMap((decoded) => SubscriptionRef.set(target.config, decoded))
+              ),
+            inject: (fault, ms) => faults.inject({ kind: "node", id: c.target }, fault, ms).pipe(Effect.orDie),
+            clear: (id) => faults.clear(id),
+            meter: telemetry.controller(c.id),
+            log: (text) => {
+              rt.log.push({ t: world.nowUnsafe(), text })
+              if (rt.log.length > LOG_KEEP) rt.log.shift()
+            },
+            spawn: spawnFor(c.id)
+          }
+          const made = yield* c.def.make(context).pipe(Effect.provideService(Random.Random, random), Scope.provide(scope), Effect.exit)
+          if (Exit.isFailure(made)) {
+            crashes.push(new ComponentCrashed({ node: c.id, message: Cause.pretty(made.cause).split("\n")[0] ?? "crashed" }))
+            break
+          }
+          rt.probe = (made.value as Controller.Instance).probe
+        }
+        return { scope, telemetry, faults, accountRefs, crash: crashes[0] }
       })
     )
 
@@ -431,6 +601,28 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
       return rt === undefined ? Effect.fail(new NoSuchNode({ id })) : Effect.succeed(rt)
     }
 
+    const edgeProbeOf = (rt: EdgeRuntime): Effect.Effect<EdgeProbe> =>
+      Effect.gen(function*() {
+        const state = rt.probe === undefined ? {} : encodeWith(rt.edge.connector.state, yield* rt.probe)
+        return { connector: rt.edge.connector.type, inflight: rt.wire.inflight(), state }
+      })
+
+    const lookupEdge = (id: string) => {
+      const rt = edges.get(id)
+      return rt === undefined ? Effect.fail(new NoSuchEdge({ id })) : Effect.succeed(rt)
+    }
+
+    const controllerProbeOf = (rt: ControllerRuntime): Effect.Effect<ControllerProbe> =>
+      Effect.gen(function*() {
+        const state = rt.probe === undefined ? {} : encodeWith(rt.controller.def.state, yield* rt.probe)
+        return { type: rt.controller.type, target: rt.controller.target, state, log: [...rt.log] }
+      })
+
+    const lookupController = (id: string) => {
+      const rt = controllers.get(id)
+      return rt === undefined ? Effect.fail(new NoSuchController({ id })) : Effect.succeed(rt)
+    }
+
     const advanceTo = (to: Duration.Input) =>
       Effect.flatMap(world.advanceTo(Duration.toMillis(Duration.fromInputUnsafe(to))), () => built.telemetry.drain)
 
@@ -443,6 +635,14 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
       advance: (by) => Effect.flatMap(world.now, (now) => advanceTo(now + Duration.toMillis(Duration.fromInputUnsafe(by)))),
       frames: built.telemetry.frames,
       probe: (id) => Effect.flatMap(lookup(id), (rt) => inWorld(probeOf(rt))),
+      probeEdge: (id) => Effect.flatMap(lookupEdge(id), (rt) => inWorld(edgeProbeOf(rt))),
+      probeController: (id) => Effect.flatMap(lookupController(id), (rt) => inWorld(controllerProbeOf(rt))),
+      configureController: (id, overrides) =>
+        Effect.gen(function*() {
+          const rt = yield* lookupController(id)
+          const decoded = yield* decodeOverrides(id, rt.controller.def.config, overrides)
+          yield* inWorld(SubscriptionRef.set(rt.config, decoded))
+        }),
       inspect: inWorld(
         Effect.gen(function*() {
           const inspectedNodes: Record<string, Inspection["nodes"][string]> = {}
@@ -455,21 +655,34 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
             }
           }
           const inspectedEdges: Record<string, Inspection["edges"][string]> = {}
-          for (const [, edge] of Graph.edges(design.graph)) {
-            const e = edge.data
-            const source = nodes.get(e.from)!
+          for (const rt of edges.values()) {
+            const e = rt.edge
             inspectedEdges[e.id] = {
               from: e.from,
               to: e.to,
               port: e.port,
-              config: encodeWith(edgeConfigFor(source.node.component as AnyComponent, e.port), yield* SubscriptionRef.get(built.edgeConfigs.get(e.id)!))
+              connector: e.connector.type,
+              config: encodeWith(e.schema, yield* SubscriptionRef.get(rt.config)),
+              probe: yield* edgeProbeOf(rt)
             }
           }
           const inspectedAccounts: Record<string, unknown> = {}
           for (const [key, account] of design.accounts) {
             inspectedAccounts[key] = encodeWith(registry.provider(account.placement.provider)!.account(account.placement.region), yield* SubscriptionRef.get(built.accountRefs.get(key)!))
           }
-          return { t: yield* world.now, seed, nodes: inspectedNodes, edges: inspectedEdges, accounts: inspectedAccounts, faults: yield* built.faults.active }
+          const inspectedControllers: Record<string, Inspection["controllers"][string]> = {}
+          for (const [id, rt] of controllers) {
+            inspectedControllers[id] = { config: encodeWith(rt.controller.def.config, yield* SubscriptionRef.get(rt.config)), probe: yield* controllerProbeOf(rt) }
+          }
+          return {
+            t: yield* world.now,
+            seed,
+            nodes: inspectedNodes,
+            edges: inspectedEdges,
+            accounts: inspectedAccounts,
+            controllers: inspectedControllers,
+            faults: yield* built.faults.active
+          }
         })
       ),
       faults: {
@@ -487,12 +700,9 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
         }),
       configureEdge: (id, overrides) =>
         Effect.gen(function*() {
-          const config = built.edgeConfigs.get(id)
-          const edge = edgeOf(design, id)
-          if (config === undefined || edge === undefined) return yield* Effect.fail(new NoSuchEdge({ id }))
-          const source = nodes.get(edge.from)!
-          const decoded = yield* decodeOverrides(id, edgeConfigFor(source.node.component as AnyComponent, edge.port), overrides)
-          yield* inWorld(SubscriptionRef.set(config, decoded))
+          const rt = yield* lookupEdge(id)
+          const decoded = yield* decodeOverrides(id, rt.edge.schema, overrides)
+          yield* inWorld(SubscriptionRef.set(rt.config, decoded))
         }),
       configureAccount: (placement, overrides) =>
         Effect.gen(function*() {
@@ -505,8 +715,3 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
       defects: Effect.sync(() => [...defects])
     }
   })
-
-const edgeOf = (design: Design.Design, id: string): Design.Edge | undefined => {
-  const index = design.edgeIndex.get(id)
-  return index === undefined ? undefined : Option.getOrUndefined(Graph.getEdge(design.graph, index))?.data
-}

@@ -2,6 +2,7 @@ import type { Provider } from "../Provider.ts"
 import { account } from "./account.ts"
 import { audit as apigateway } from "./apigateway/audit.ts"
 import { audit as cloudfront } from "./cloudfront/audit.ts"
+import { connectors } from "./connectors.ts"
 import { audit as dynamodb } from "./dynamodb/audit.ts"
 import { audit as lambda } from "./lambda/audit.ts"
 import { regions } from "./regions.ts"
@@ -28,7 +29,8 @@ export const provider: Provider = {
   regions,
   defaultRegion: "us-east-1",
   account,
-  audit: (region, members, quotas) => audits.flatMap((check) => check(region, members, quotas))
+  audit: (region, members, quotas) => audits.flatMap((check) => check(region, members, quotas)),
+  connectors
 }
 
 // What components import, so they have one place to get the AWS building blocks from.

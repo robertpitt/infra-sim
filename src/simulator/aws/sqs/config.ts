@@ -94,6 +94,11 @@ export const Consumer = Schema.Struct({
     help: "Invocations added each minute while messages are waiting, up to 1,250. AWS publishes this for standard queues only; the same ramp is used for FIFO.",
     limit: Setting.hard(`${L}services-sqs-scaling.html`)
   }),
+  reportBatchItemFailures: Setting.bool({
+    default: false,
+    label: "Report batch item failures",
+    help: "FunctionResponseTypes: ReportBatchItemFailures. A function that returns the records that failed has only those come back after the visibility timeout; the rest are deleted. Off, such a reply is ignored: the invocation succeeded, so the whole batch is deleted, the failed records with it. A FIFO batch keeps a failed record's later messages of the same group too, as a correct FIFO handler reports them."
+  }),
   throttleRetry: Setting.duration({
     default: "1 second",
     min: "100 millis",

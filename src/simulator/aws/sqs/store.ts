@@ -12,7 +12,7 @@ const COMPACT_GROUP_AT = 64
  * The messages in one queue and where each one is: waiting to be received, delayed, in flight.
  *
  * This is the data structure only. It knows nothing of timers, consumers or dead-letter queues; whoever drives it
- * (see `delivery.ts`, `mapping.ts`) decides when a message is received, comes back or is deleted, and the store keeps the
+ * (see `delivery.ts`, `pull.ts`) decides when a message is received, comes back or is deleted, and the store keeps the
  * books (the counts behind the visible / not-visible / delayed gauges, which FIFO groups are blocked) and makes each
  * step cheap, so a queue holding hundreds of thousands of messages costs the same per message as one holding ten:
  *

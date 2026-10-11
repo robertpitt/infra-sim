@@ -36,11 +36,16 @@ export interface ChoiceField extends Base {
   readonly default: string
   readonly options: ReadonlyArray<{ readonly value: string; readonly label: string }>
 }
+export interface TextField extends Base {
+  readonly kind: "text"
+  readonly default: string
+  readonly placeholder?: string
+}
 export interface GroupField extends Base {
   readonly kind: "group"
   readonly fields: ReadonlyArray<FieldSpec>
 }
-export type FieldSpec = NumberField | BooleanField | ChoiceField | GroupField
+export type FieldSpec = NumberField | BooleanField | ChoiceField | TextField | GroupField
 
 export const humanize = (key: string): string => {
   const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim().toLowerCase()
@@ -80,6 +85,9 @@ const describe = (key: string, ast: SchemaAST.AST, value: unknown): FieldSpec | 
     return { ...base, kind: "group", fields: describeObject(ast, (value ?? {}) as Record<string, unknown>) }
   }
   if (SchemaAST.isBoolean(ast)) return { ...base, kind: "boolean", default: value === true }
+  if (SchemaAST.isString(ast) && form?.kind === "text") {
+    return { ...base, kind: "text", default: typeof value === "string" ? value : "", ...(form.placeholder === undefined ? {} : { placeholder: form.placeholder }) }
+  }
   if (SchemaAST.isUnion(ast) && ast.types.every(SchemaAST.isLiteral)) {
     const labels = form?.kind === "choice" ? form.labels : undefined
     return {

@@ -4,7 +4,6 @@ import { Rejected, Throttled } from "../../Message.ts"
 import * as Aws from "../provider.ts"
 import {
   API_BATCH,
-  Consumer,
   MAX_MESSAGE_BYTES,
   DEDUP_WINDOW_MS,
   Queue,
@@ -12,8 +11,8 @@ import {
 } from "./config.ts"
 import { DedupWindow } from "../../kit/Dedup.ts"
 import { Deliveries } from "./delivery.ts"
-import { type ConsumerLink, Pollers } from "./mapping.ts"
 import { makeTallies } from "./metrics.ts"
+import { QueuePull } from "./pull.ts"
 import { Redrive } from "./redrive.ts"
 import { QueueStore } from "./store.ts"
 import { FifoRate, fifoRate, takePartition } from "./throughput.ts"
@@ -52,7 +51,8 @@ export const Sqs = Aws.component({
   ],
   config: Queue,
   ports: {
-    deliver: Component.port.many("Consumers", Consumer),
+    // Consumers take from the queue: what sits on each edge (Lambda's event source mapping, by default) does the polling.
+    deliver: Component.port.pull("Consumers"),
     dlq: Component.port.one("Dead letter"),
     redrive: Component.port.one("Redrive")
   },
@@ -76,8 +76,6 @@ export const Sqs = Aws.component({
     }),
     /** FIFO: message groups with waiting messages, how many are blocked behind a message in flight, and how many have one in flight. */
     groups: Schema.Struct({ waiting: Schema.Number, blocked: Schema.Number, inflight: Schema.Number }),
-    /** One per consumer: the concurrency its event source mapping is running at now, and how much of it is in use. */
-    consumers: Schema.Array(Schema.Struct({ concurrency: Schema.Number, busy: Schema.Number })),
     /** Messages whose move to the dead-letter queue was refused and is being retried. */
     parked: Schema.Number,
     sample: Schema.Array(Schema.Struct({ id: Schema.Number, group: Schema.String, receives: Schema.Number, age: Schema.Number, status: Schema.String }))
@@ -106,9 +104,9 @@ export const Sqs = Aws.component({
         tallies,
         dlq: () => node.out("dlq")[0],
         transit,
-        wake: () => pollers.pump()
+        wake: () => consumers.wake()
       })
-      const pollers = new Pollers({ store, fast, receiveRate, tallies, deliveries, links: node.out("deliver") as ReadonlyArray<ConsumerLink> })
+      const consumers = new QueuePull({ store, fast, deliveries, receiveRate, tallies })
       const redrive = new Redrive({ store, fast, tallies, deliveries, destination: () => node.out("redrive")[0], transit })
 
       // The gauges, named after the CloudWatch metric each stands in for.
@@ -127,22 +125,22 @@ export const Sqs = Aws.component({
         })
         if (expired > 0) {
           tallies.expired.add(expired)
-          pollers.pump() // a FIFO group whose in-flight message just expired can be received from again
+          consumers.wake() // a FIFO group whose in-flight message just expired can be received from again
         }
         fast.after(SWEEP_MS, sweep, undefined)
       }
       fast.after(SWEEP_MS, sweep, undefined)
 
-      pollers.start()
       redrive.start()
 
       /** The delay is over for these messages. */
       const activate = (entries: ReadonlyArray<Entry>): void => {
         for (const entry of entries) store.activate(entry)
-        pollers.pump()
+        consumers.wake()
       }
 
       return {
+        pull: { deliver: consumers },
         call: (message) => {
           const c = fast.settings()
           const internal = transit.size > 0 && transit.delete(message.id)
@@ -186,7 +184,7 @@ export const Sqs = Aws.component({
             fast.after(delay, activate, waiting)
           } else {
             for (let i = 0; i < records; i++) store.admit(message, bytes, enqueuedAt, false)
-            pollers.pump()
+            consumers.wake()
           }
           tallies.enqueued.add(records)
           if (!internal) tallies.sent.add(records)
@@ -213,7 +211,6 @@ export const Sqs = Aws.component({
             oldestAge: store.oldestAgeMs(now),
             totals,
             groups: { waiting, blocked, inflight: store.inflightGroups },
-            consumers: pollers.status(),
             parked: deliveries.parkedCount,
             sample: store.index.first(SAMPLE).map((e) => ({ id: e.id, group: e.group?.id ?? e.message.group ?? "default", receives: e.receives, age: now - e.enqueuedAt, status: e.status }))
           }

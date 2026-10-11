@@ -2,6 +2,7 @@ import type { ComponentManifest, Highlight, NodeDoc, Stats } from "../state/type
 import { memo } from "react"
 import { fmtCount, fmtMs, fmtPct, fmtRate } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
+import { doc } from "../state/document.ts"
 import { run } from "../state/run.ts"
 import { Icon } from "../ui/Icon.tsx"
 import { HEAD_H, NODE_W, PORT_H, STATS_H, nodeHeight } from "./geometry.ts"
@@ -29,6 +30,7 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, l
   const stats = useStats("nodes", id)
   const faults = useStore(run, (s) => s.faults.filter((f) => f.target.kind === "node" && f.target.id === id).length)
   const down = useStore(run, (s) => s.faults.some((f) => f.target.kind === "node" && f.target.id === id && f.fault._tag === "Outage"))
+  const controlled = useStore(doc, (s) => Object.values(s.design.controllers ?? {}).filter((c) => c.target === id).length)
   const at = spec.position ?? { x: 0, y: 0 }
   const height = nodeHeight(manifest)
   const source = manifest !== undefined && !manifest.inputs
@@ -62,6 +64,11 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, l
           <span className="node-name">{spec.name ?? id}</span>
           <span className="node-type">{manifest?.title ?? `Unknown: ${spec.type}`}</span>
         </span>
+        {controlled > 0 && (
+          <span className="node-badge controlled" title={`${controlled} controller${controlled > 1 ? "s" : ""} change${controlled > 1 ? "" : "s"} this while it runs`}>
+            <Icon name="charts" size={12} />
+          </span>
+        )}
         {faults > 0 && (
           <span className="node-badge fault" title={`${faults} fault${faults > 1 ? "s" : ""} injected`}>
             <Icon name="bolt" size={12} />

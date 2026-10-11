@@ -703,11 +703,12 @@ describe("aws.cloudfront: definition", () => {
 
   it("is registered as aws.cloudfront with the cdn icon, one output port and a read default on its origins", async () => {
     const { CloudFront } = await import("./index.ts")
-    const { edgeConfigFor } = await import("../../Component.ts")
+    const { edgeSchema } = await import("../../Connector.ts")
+    const { Link } = await import("../../connectors/index.ts")
     expect(CloudFront.type).toBe("aws.cloudfront")
     expect(CloudFront.icon).toBe("cdn")
     expect(Object.keys(CloudFront.ports)).toEqual(["out"])
-    const origin = edgeConfigFor(CloudFront, "out").fields as Record<string, unknown>
+    const origin = edgeSchema(Link, CloudFront.ports.out).fields as Record<string, unknown>
     expect(Object.keys(origin)).toEqual(expect.arrayContaining(["originType", "role", "shield", "connectionAttempts", "responseTimeout", "weight", "latency", "retry"]))
   })
 

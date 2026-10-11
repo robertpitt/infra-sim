@@ -10,7 +10,8 @@ export const Diagnostic = Schema.Struct({
   code: Schema.String,
   message: Schema.String,
   node: Schema.optionalKey(Schema.String),
-  edge: Schema.optionalKey(Schema.String)
+  edge: Schema.optionalKey(Schema.String),
+  controller: Schema.optionalKey(Schema.String)
 })
 export type Diagnostic = typeof Diagnostic.Type
 

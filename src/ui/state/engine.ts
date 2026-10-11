@@ -1,7 +1,7 @@
-import { Describe, Edge, Fault, Registry } from "#simulator"
+import { Connector, Describe, Fault, Registry } from "#simulator"
 import { registry as builtin } from "#simulator/components"
 import { createStore } from "../lib/store.ts"
-import type { Command, ComponentManifest, Event, FaultKind, FieldSpec } from "./types.ts"
+import type { Command, ComponentManifest, ConnectorManifest, ControllerManifest, Event, FaultKind, FieldSpec } from "./types.ts"
 
 /**
  * The engine, wired up. The UI never imports simulation logic beyond this file: it sends commands and listens
@@ -22,6 +22,21 @@ export const registry: Registry.Components = {
   provider: (id) => current.provider(id),
   get providers() {
     return current.providers
+  },
+  connector: (type) => current.connector(type),
+  get connectors() {
+    return current.connectors
+  },
+  get connectorManifests() {
+    return current.connectorManifests
+  },
+  connectorFor: (from, to, explicit) => current.connectorFor(from, to, explicit),
+  controller: (type) => current.controller(type),
+  get controllers() {
+    return current.controllers
+  },
+  get controllerManifests() {
+    return current.controllerManifests
   }
 }
 
@@ -36,8 +51,13 @@ export interface Catalog {
   readonly providers: ReadonlyArray<ProviderInfo>
   readonly list: ReadonlyArray<ComponentManifest>
   readonly byType: Readonly<Record<string, ComponentManifest>>
-  /** The universal edge form, shown for every connection. */
-  readonly edge: ReadonlyArray<FieldSpec>
+  /** What can sit on an edge, in registration order (the core ones first). */
+  readonly connectors: ReadonlyArray<ConnectorManifest>
+  readonly connectorsByType: Readonly<Record<string, ConnectorManifest>>
+  /** Transport's form, the last part of every connection's settings. */
+  readonly transport: ReadonlyArray<FieldSpec>
+  /** What can be attached to a node to change it while it runs. */
+  readonly controllers: ReadonlyArray<ControllerManifest>
   readonly faults: ReadonlyArray<FaultKind>
 }
 
@@ -50,9 +70,30 @@ const catalogOf = (components: Registry.Components): Catalog => ({
   })),
   list: components.manifests,
   byType: Object.fromEntries(components.manifests.map((m) => [m.type, m])),
-  edge: Describe.fields(Edge.Config),
+  connectors: components.connectorManifests,
+  connectorsByType: Object.fromEntries(components.connectorManifests.map((m) => [m.type, m])),
+  transport: Connector.transportFields(),
+  controllers: components.controllerManifests,
   faults: Fault.catalog
 })
+
+/**
+ * What sits on a wire from `from`'s port to a node of type `to`: the connector the document names or the one that fits
+ * best, and every connector that would fit (most specific first), for a picker. `undefined` if nothing fits.
+ */
+export const connectorOf = (
+  from: { readonly type: string; readonly port: string },
+  to: string,
+  explicit?: string
+): { readonly connector: ConnectorManifest; readonly choices: ReadonlyArray<ConnectorManifest> } | undefined => {
+  const picked = current.connectorFor(from, to, explicit)
+  if (!picked.ok) return undefined
+  const q = Registry.queryOf(current.get(from.type), from.port, current.get(to))
+  const { connectorsByType } = catalog.get()
+  const manifest = connectorsByType[picked.connector.type]
+  if (manifest === undefined || q === undefined) return undefined
+  return { connector: manifest, choices: Connector.candidates(catalog.get().connectors, q) }
+}
 
 /** The account-level quota form for one region of a provider (published defaults differ by region). */
 export const accountFields = (provider: string, region: string): ReadonlyArray<FieldSpec> => {

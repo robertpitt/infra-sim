@@ -336,9 +336,9 @@ describe("the serverless data pipeline", () => {
     expect(settings(doc, "readings-queue")).toEqual({ kind: "fifo", visibilityTimeout: "60 seconds", highThroughput: true, deduplication: true, maxReceives: 4 })
   })
 
-  it("maps provisioned pollers on a queue's consumer edge, and reports partial batch responses as not simulated", () => {
-    expect(edgeSettings(doc, "readings-queue", "deliver", "ingest-function")).toEqual({ batchSize: 10, provisionedMinPollers: 4, provisionedMaxPollers: 20 })
-    expect(warned(report, "IngestFunction: ReportBatchItemFailures isn't simulated")).toBe(true)
+  it("maps provisioned pollers and partial batch responses on a queue's consumer edge", () => {
+    expect(edgeSettings(doc, "readings-queue", "deliver", "ingest-function")).toEqual({ batchSize: 10, provisionedMinPollers: 4, provisionedMaxPollers: 20, reportBatchItemFailures: true })
+    expect(warned(report, "IngestFunction: ReportBatchItemFailures isn't simulated")).toBe(false)
   })
 
   it("maps a FIFO topic's throughput scope, deduplication and size (bytes to KB)", () => {
@@ -364,7 +364,8 @@ describe("the serverless data pipeline", () => {
   })
 
   it("maps SnapStart, and the success and failure destinations of a function", () => {
-    expect(settings(doc, "ingest-function")).toEqual({ memory: 1024, timeout: "20 seconds", coldStart: { snapStart: true }, async: { maxRetries: 1 } })
+    // The function reads its queue with partial batch responses, so it is taken to report the records that fail.
+    expect(settings(doc, "ingest-function")).toEqual({ memory: 1024, timeout: "20 seconds", coldStart: { snapStart: true }, async: { maxRetries: 1 }, batch: { errors: "report" } })
     expect(edge(doc, "ingest-function", "onSuccess", "ingest-audit")).toBeDefined()
     expect(edge(doc, "ingest-function", "onFailure", "ingest-failures")).toBeDefined()
   })
@@ -549,8 +550,8 @@ describe("SQS", () => {
     expect(report.settings.adjusted).toEqual([expect.stringContaining("provisionedMinPollers 500")])
   })
 
-  it("reports ReportBatchItemFailures, filter criteria and tumbling windows as not simulated, once per function", () => {
-    const { report } = resources(`  Q:
+  it("maps ReportBatchItemFailures onto the mapping and the function, and reports filter criteria as not simulated", () => {
+    const { doc, report } = resources(`  Q:
     Type: AWS::SQS::Queue
   F:
     Type: AWS::Lambda::Function
@@ -563,8 +564,28 @@ describe("SQS", () => {
       FunctionResponseTypes: [ReportBatchItemFailures]
       FilterCriteria: {Filters: [{Pattern: "{}"}]}
 `)
-    expect(report.warnings.filter((w) => w.includes("ReportBatchItemFailures"))).toHaveLength(1)
+    expect(edgeSettings(doc, "q", "deliver", "f")).toMatchObject({ reportBatchItemFailures: true })
+    expect(settings(doc, "f")).toMatchObject({ batch: { errors: "report" } })
+    expect(report.warnings.filter((w) => w.includes("ReportBatchItemFailures"))).toHaveLength(0)
     expect(warned(report, "F: FilterCriteria")).toBe(true)
+  })
+
+  it("still reports ReportBatchItemFailures as not simulated on a DynamoDB stream", () => {
+    const { report } = resources(`  T:
+    Type: AWS::DynamoDB::Table
+    Properties: {StreamSpecification: {StreamViewType: NEW_IMAGE}}
+  F:
+    Type: AWS::Lambda::Function
+    Properties: {Runtime: x}
+  M:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt T.StreamArn
+      FunctionName: !Ref F
+      StartingPosition: LATEST
+      FunctionResponseTypes: [ReportBatchItemFailures]
+`)
+    expect(report.warnings.filter((w) => w.includes("ReportBatchItemFailures"))).toHaveLength(1)
   })
 })
 

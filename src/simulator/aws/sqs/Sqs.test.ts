@@ -21,7 +21,6 @@ interface QueueState {
   readonly oldestAge: number
   readonly totals: Record<"enqueued" | "sent" | "received" | "deleted" | "redelivered" | "deadLettered" | "expired" | "duplicates" | "deduplicated" | "redriven" | "throttled", number>
   readonly groups: { waiting: number; blocked: number; inflight: number }
-  readonly consumers: ReadonlyArray<{ concurrency: number; busy: number }>
   readonly parked: number
   readonly sample: ReadonlyArray<{ id: number; group: string; receives: number; age: number; status: string }>
 }
@@ -457,4 +456,61 @@ describe("aws.sqs: deep queues and hardening", () => {
         expect(q.ready + q.hidden + q.delayed + t.deleted + t.expired + t.deadLettered).toBe(t.enqueued)
         expect(t.redelivered).toBeGreaterThan(0)
       })))
+})
+
+describe("aws.sqs: partial batch responses (ReportBatchItemFailures)", () => {
+  /** clients -> queue -> a Lambda that fails a fifth of its records, in batches of ten. */
+  const reporting = (o: { readonly errors: string; readonly report: boolean; readonly connector?: string; readonly queue?: Record<string, unknown> }) => {
+    const b = Builder.make("partial", { seed: 5 })
+    const web = b.add("common.client", { id: "web", settings: { arrival: "constant", rps: 100, ...(o.queue?.kind === "fifo" ? { messageGroups: 1 } : {}) } })
+    const q = b.add("aws.sqs", { id: "q", settings: { visibilityTimeout: "2 seconds", ...o.queue } })
+    const fn = b.add("aws.lambda", { id: "fn", settings: { errorRate: 0.2, fanOut: "none", duration: { mean: 50, cv: 0 }, batch: { errors: o.errors } } })
+    b.connect(web, q)
+    const consumer = o.connector === undefined ? { batchSize: 10, batchWindow: "1 second", reportBatchItemFailures: o.report } : { batchSize: 10, workers: 20 }
+    b.connect(q.port("deliver"), fn, consumer, o.connector === undefined ? {} : { connector: o.connector })
+    return b.build()
+  }
+  const run = (design: ReturnType<typeof reporting>) =>
+    sim(design, (s) =>
+      Effect.gen(function*() {
+        const all = yield* s.advanceTo(40_000)
+        return { all, q: yield* stateOf(s), fn: (yield* s.probe("fn")).state as { errors: number; itemFailures: number }, edge: yield* s.probeEdge("q.deliver->fn") }
+      }))
+
+  it("only the records that failed come back; the rest of the batch is deleted", async () => {
+    const reported = await run(reporting({ errors: "report", report: true }))
+    const whole = await run(reporting({ errors: "record", report: false }))
+    // Reported: a fifth of the records fail and come back; the invocations themselves succeed.
+    expect(reported.fn.errors).toBe(0)
+    expect(reported.fn.itemFailures).toBeGreaterThan(500)
+    const back = mean(reported.all, "nodes", "q", "rates", "redelivered", 10_000)
+    expect(back).toBeGreaterThan(15)
+    expect(back).toBeLessThan(35)
+    expect(mean(reported.all, "edges", "q.deliver->fn", "rates", "itemFailures", 10_000)).toBeCloseTo(back, -1)
+    // Whole batches: one bad record in ten fails nine good ones with it (1 - 0.8^10 of batches), so far more comes back.
+    expect(whole.fn.errors).toBeGreaterThan(500)
+    expect(mean(whole.all, "nodes", "q", "rates", "redelivered", 10_000)).toBeGreaterThan(3 * back)
+  })
+
+  it("a function's report is ignored by a mapping that isn't set to act on it: the failed records are deleted too", async () => {
+    const ignored = await run(reporting({ errors: "report", report: false }))
+    expect(ignored.fn.itemFailures).toBeGreaterThan(500)
+    expect(ignored.q.totals.redelivered).toBe(0)
+    expect(mean(ignored.all, "edges", "q.deliver->fn", "rates", "itemFailuresIgnored", 10_000)).toBeGreaterThan(15)
+  })
+
+  it("from a FIFO queue, a failed record keeps the rest of its group behind it", async () => {
+    const fifo = await run(reporting({ errors: "report", report: true, queue: { kind: "fifo" } }))
+    const kept = fifo.all.reduce((sum, f) => sum + (f.edges["q.deliver->fn"]?.rates.itemFailures ?? 0), 0)
+    const reported = fifo.all.reduce((sum, f) => sum + (f.nodes.fn?.rates.itemFailures ?? 0), 0)
+    expect(reported).toBeGreaterThan(0)
+    expect(kept).toBeGreaterThan(reported)
+  })
+
+  it("the generic poller honours a partial reply the same way", async () => {
+    const pooled = await run(reporting({ errors: "report", report: true, connector: "core.poller" }))
+    expect(pooled.fn.errors).toBe(0)
+    expect(pooled.q.totals.redelivered).toBeGreaterThan(0)
+    expect((pooled.edge.state as { recordsFailed: number }).recordsFailed).toBeGreaterThan(500)
+  })
 })

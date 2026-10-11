@@ -43,14 +43,20 @@ export const queueConsumer = (run: Run, source: Draft, fn: Draft, p: Bag, origin
   if (min !== undefined) settings.provisionedMinPollers = min
   const max = asNumber(p.ProvisionedPollerConfig?.MaximumPollers)
   if (max !== undefined) settings.provisionedMaxPollers = max
+  // Partial batch responses: the mapping acts on them, and a function configured for them is taken to return them.
+  const partial = listOf(p.FunctionResponseTypes).includes("ReportBatchItemFailures")
+  if (partial) {
+    settings.reportBatchItemFailures = true
+    run.set(fn, ["batch", "errors"], "report", "FunctionResponseTypes: ReportBatchItemFailures")
+  }
   run.wire(source, "deliver", fn, { settings, origin })
-  unsimulatedMappingFeatures(run, fn, p)
+  unsimulatedMappingFeatures(run, fn, p, { partial: true })
 }
 
 /** What an event source mapping can say that the simulator can't do: said so, once per function. */
-export const unsimulatedMappingFeatures = (run: Run, fn: Draft, p: Bag): void => {
-  if (listOf(p.FunctionResponseTypes).includes("ReportBatchItemFailures")) {
-    run.warn(`${fn.name}: ReportBatchItemFailures isn't simulated: a failed batch is retried whole, not just the records that failed (partial batch responses are a known gap in the engine).`)
+export const unsimulatedMappingFeatures = (run: Run, fn: Draft, p: Bag, handled: { readonly partial?: boolean } = {}): void => {
+  if (!handled.partial && listOf(p.FunctionResponseTypes).includes("ReportBatchItemFailures")) {
+    run.warn(`${fn.name}: ReportBatchItemFailures isn't simulated for this source: a failed batch is retried whole, not just the records that failed.`)
   }
   if (p.FilterCriteria !== undefined) run.warn(`${fn.name}: FilterCriteria on its event source isn't simulated: every record is delivered.`)
   if (asNumber(p.TumblingWindowInSeconds) !== undefined) run.warn(`${fn.name}: TumblingWindowInSeconds isn't simulated: records are delivered in ordinary batches.`)

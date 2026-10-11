@@ -220,6 +220,17 @@ export const setNodeSetting = (id: string, path: ReadonlyArray<string>, value: u
 export const setEdgeSetting = (id: string, path: ReadonlyArray<string>, value: unknown): void =>
   commit((d) => Design.setEdgeSetting(d, id, path, value), `edge:${id}:${path.join(".")}`)
 
+/** Choose what sits on an edge, or with `undefined` go back to the one that fits best. */
+export const setEdgeConnector = (id: string, connector: string | undefined): void => commit((d) => Design.setConnector(d, id, connector))
+
+/** Attach a controller of `type` to a node. */
+export const addController = (type: string, target: string): void => commit((d) => Design.addController(d, { type, target }).doc)
+
+export const removeController = (id: string): void => commit((d) => Design.removeController(d, id))
+
+export const setControllerSetting = (id: string, path: ReadonlyArray<string>, value: unknown): void =>
+  commit((d) => Design.setControllerSetting(d, id, path, value), `controller:${id}:${path.join(".")}`)
+
 export const resetNodeSettings = (id: string): void => commit((d) => Design.patchNode(d, id, { settings: {} }))
 
 export const connect = (from: string, port: string, to: string): void => {

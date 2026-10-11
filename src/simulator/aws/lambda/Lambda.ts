@@ -1,6 +1,6 @@
 import { Duration, Effect, Schema, Stream, SubscriptionRef } from "effect"
 import * as Component from "../../Component.ts"
-import { type CallFailure, Failed, Rejected } from "../../Message.ts"
+import { type CallFailure, Failed, Rejected, type Reply } from "../../Message.ts"
 import * as Aws from "../provider.ts"
 import { runAsync } from "./async.ts"
 import { Concurrency, makeRegion } from "./concurrency.ts"
@@ -65,6 +65,8 @@ export const Lambda = Aws.component({
     throttles: Schema.Number,
     timeouts: Schema.Number,
     errors: Schema.Number,
+    /** Records successful invocations returned as batch item failures. */
+    itemFailures: Schema.Number,
     /** Asynchronous events accepted but not yet finished. */
     asyncPending: Schema.Number,
     asyncRetries: Schema.Number,
@@ -123,8 +125,9 @@ export const Lambda = Aws.component({
             runAsync(fn, destinations, message, fast.now())
             return Effect.void
           }
-          return Effect.callback<void, CallFailure>((resume) => {
-            const cancel = begin(fn, message, (attempt) => resume(attempt === undefined ? Effect.void : Effect.fail(syncFailure(node.id, attempt))))
+          return Effect.callback<Reply, CallFailure>((resume) => {
+            const cancel = begin(fn, message, (attempt, items) =>
+              resume(attempt !== undefined ? Effect.fail(syncFailure(node.id, attempt)) : items === undefined ? Effect.void : Effect.succeed(items)))
             return Effect.sync(cancel)
           })
         },
@@ -138,6 +141,7 @@ export const Lambda = Aws.component({
           throttles: stats.throttles.total,
           timeouts: stats.timeouts.total,
           errors: stats.errors.total,
+          itemFailures: stats.itemFailures.total,
           asyncPending: fn.asyncPending,
           asyncRetries: stats.asyncRetries.total,
           asyncSucceeded: stats.asyncSucceeded.total,

@@ -4,7 +4,7 @@ import { useStore } from "../lib/store.ts"
 import { run, smoothed } from "../state/run.ts"
 
 /** Live, smoothed stats for a node or edge. Re-renders as new frames arrive. */
-export const useStats = (scope: "nodes" | "edges", id: string): Stats | undefined => {
+export const useStats = (scope: "nodes" | "edges" | "controllers", id: string): Stats | undefined => {
   const version = useStore(run, (s) => s.version)
   // biome-ignore lint/correctness/useExhaustiveDependencies: `version` is the signal that history changed.
   return useMemo(() => smoothed(scope, id), [scope, id, version])

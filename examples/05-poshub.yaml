@@ -1116,7 +1116,6 @@ edges:
   incoming-events.deliver->webhook-router:
     to: webhook-router
     settings:
-      timeout: 10 seconds
       batchSize: 10
     origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: webhook-router/SqsEventSource, type: lambda.EventSourceMapping}
     from: {node: incoming-events, port: deliver}
@@ -1148,7 +1147,6 @@ edges:
   webhook-requests.deliver->webhook-dispatcher:
     to: webhook-dispatcher
     settings:
-      timeout: 30 seconds
       batchSize: 10
     origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: webhook-dispatcher/SqsEventSource, type: lambda.EventSourceMapping}
     from: {node: webhook-requests, port: deliver}
@@ -1169,7 +1167,6 @@ edges:
   opensearch-events.deliver->opensearch-ingress:
     to: opensearch-ingress
     settings:
-      timeout: 1 minute
       batchSize: 100
       batchWindow: 5 seconds
       maxConcurrency: 3
@@ -1187,7 +1184,6 @@ edges:
   menu-change-queue.deliver->menu-change-handler:
     to: menu-change-handler
     settings:
-      timeout: 1 minute
       batchSize: 10000
       batchWindow: 5 seconds
       maxConcurrency: 2
@@ -1337,7 +1333,6 @@ edges:
   scheduler-queue.deliver->scheduler-queue-handler:
     to: scheduler-queue-handler
     settings:
-      timeout: 6 minutes
       batchSize: 10
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-queue-handler/SqsEventSource, type: lambda.EventSourceMapping}
     from: {node: scheduler-queue, port: deliver}
@@ -1409,7 +1404,6 @@ edges:
   invoice-queue.deliver->process-invoice-queue:
     to: process-invoice-queue
     settings:
-      timeout: 10 minutes
       batchSize: 3
       maxConcurrency: 5
     origin: {source: falcon/cdk/services/pos-hub/BillingAutomation.ts, ref: process-invoice-queue/SqsEventSource, type: lambda.EventSourceMapping}
@@ -1467,7 +1461,6 @@ edges:
   reports-queue.deliver->report-worker-handler:
     to: report-worker-handler
     settings:
-      timeout: 10 minutes
       batchSize: 1
     origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: report-worker-handler/SqsEventSource, type: lambda.EventSourceMapping}
     from: {node: reports-queue, port: deliver}

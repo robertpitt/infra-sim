@@ -122,11 +122,11 @@ export const Config = Schema.Struct({
         labels: { invocation: "Per invocation", record: "Per record" },
         help: "With a batch of records, take the handler duration once, or once for every record in the batch."
       }),
-      errors: Setting.choice(["invocation", "record"], {
+      errors: Setting.choice(["invocation", "record", "report"], {
         default: "invocation",
         label: "Error rate is",
-        labels: { invocation: "Per invocation", record: "Per record" },
-        help: "With a batch of records, roll the error rate once, or once per record: any failing record fails the whole batch, as it does in AWS unless the mapping reports partial batch failures (not simulated)."
+        labels: { invocation: "Per invocation", record: "Per record", report: "Reported" },
+        help: "With a batch of records, roll the error rate once, or once per record. Per record, any failing record fails the whole batch. Reported: the handler catches each record's error (and each record's failed downstream call) and returns the failed records as batch item failures, so the invocation succeeds; only an event source mapping with 'Report batch item failures' on acts on them, otherwise they are deleted with the rest."
       })
     },
     { label: "Batches (event source mapping)" }

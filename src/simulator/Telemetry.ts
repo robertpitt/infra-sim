@@ -34,7 +34,9 @@ export const Frame = Schema.Struct({
   /** Window length in ms. */
   dt: Schema.Number,
   nodes: Schema.Record(Schema.String, Stats),
-  edges: Schema.Record(Schema.String, Stats)
+  edges: Schema.Record(Schema.String, Stats),
+  /** What controllers recorded: the value they track, what they set. */
+  controllers: Schema.Record(Schema.String, Stats)
 })
 export type Frame = typeof Frame.Type
 
@@ -71,6 +73,7 @@ export interface Meter {
 export class Telemetry extends Context.Service<Telemetry, {
   readonly node: (id: string) => Meter
   readonly edge: (id: string) => Meter
+  readonly controller: (id: string) => Meter
   /** Every frame as it is produced. New subscribers see frames from the moment they subscribe. */
   readonly frames: Stream.Stream<Frame>
   /** Frames produced since the last call. Handy for stepping a simulation and then looking at what happened. */
@@ -177,6 +180,7 @@ export const make = (
   Effect.gen(function*() {
     const nodes = new Map<string, Bucket>()
     const edges = new Map<string, Bucket>()
+    const controllers = new Map<string, Bucket>()
     const bucket = (map: Map<string, Bucket>, id: string) => {
       let b = map.get(id)
       if (b === undefined) {
@@ -194,13 +198,16 @@ export const make = (
       for (const [id, b] of nodes) nodeStats[id] = yield* b.flush(frameMs)
       const edgeStats: Record<string, Stats> = {}
       for (const [id, b] of edges) edgeStats[id] = yield* b.flush(frameMs)
-      yield* PubSub.publish(pubsub, { t, dt: frameMs, nodes: nodeStats, edges: edgeStats })
+      const controllerStats: Record<string, Stats> = {}
+      for (const [id, b] of controllers) controllerStats[id] = yield* b.flush(frameMs)
+      yield* PubSub.publish(pubsub, { t, dt: frameMs, nodes: nodeStats, edges: edgeStats, controllers: controllerStats })
     })
     yield* Effect.forkScoped(Effect.forever(Effect.sleep(frameMs).pipe(Effect.andThen(flush))))
 
     return {
       node: (id) => bucket(nodes, id).meter(),
       edge: (id) => bucket(edges, id).meter(),
+      controller: (id) => bucket(controllers, id).meter(),
       frames: Stream.fromPubSub(pubsub),
       // `takeUpTo` returns what is there at once; `takeAll` would wait for a frame.
       drain: PubSub.takeUpTo(collector, Number.MAX_SAFE_INTEGER)

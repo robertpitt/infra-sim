@@ -32,7 +32,7 @@ infra-sim --completions zsh         # a shell completion script: bash, zsh, fish
 | `import <file>` | CloudFormation / SAM / CDK template → design (YAML), with a report of what became of everything. |
 | `convert <file>` | Design YAML ⇄ JSON. |
 | `components` | List the components a design can use. |
-| `describe <type>` | One component's settings (default, range, hard limit or adjustable quota), ports, service limits. |
+| `describe <type>` | One component's settings (default, range, hard limit or adjustable quota), ports, service limits; or one connector's. |
 | `examples` | The bundled example designs. `examples show <id>` prints one; `examples path <id>` says where it lives. |
 | `docs [topic]` | This guide (`cli`), the assertion syntax (`assertions`), the faults (`faults`). |
 
@@ -63,10 +63,33 @@ Find what you can put in one:
 infra-sim components --provider aws          # what exists
 infra-sim describe aws.lambda                # every setting: default, range, hard/quota, plus ports and limits
 infra-sim describe aws.sqs --json            # the same as data
+infra-sim describe aws.sqs.event-source-mapping   # a connector: what sits on an edge, and its settings
 ```
 
 `describe` shows which limits are **hard** (AWS enforces them: the range is the limit) and which are adjustable **quotas**
 (the default is AWS's number; yours may differ). Durations are written as `"30 seconds"` or a number of milliseconds.
+
+An edge's settings come from its port, its **connector** and transport. The connector is picked for you (a queue's
+consumers get Lambda's event source mapping; every other call a plain link), or named on the edge:
+
+```yaml
+edges:
+  orders.deliver->workers:
+    from: {node: orders, port: deliver}
+    to: workers
+    connector: core.poller      # a fixed pool instead of Lambda's scaling poller
+    settings: {workers: 20, batchSize: 10}
+```
+
+A **controller** changes a node while the design runs, the way an autoscaler does (`infra-sim describe core.target-tracking`):
+
+```yaml
+controllers:
+  workers-autoscaler:
+    type: core.target-tracking
+    target: workers
+    settings: {metric: inflight, targetValue: 0.7, setting: maxConcurrency, min: 2, max: 50}
+```
 
 ## Running
 

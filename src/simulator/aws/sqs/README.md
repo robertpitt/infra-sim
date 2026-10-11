@@ -22,7 +22,7 @@ Everything runs on virtual time with seeded randomness, and the hot path is plai
 | FIFO batches span groups | ✅ | A receive of up to 10 is filled from one group, then the next. |
 | FIFO deduplication (5 minutes) | 🟡 | Off by default (`deduplication`). The sender's message id is the deduplication id, so a producer retrying a send is deduplicated. Content-based deduplication and `DeduplicationScope` are not modelled: messages have no body. |
 | Per-message timers (`DelaySeconds` on a send) | ❌ | The message has no delay field. |
-| Receive: short polling, false empties, `WaitTimeSeconds` | ❌ | The only consumer is the event source mapping, which long-polls. |
+| Receive: short polling, false empties, `WaitTimeSeconds` | ❌ | Consumers take through the `deliver` port's `pull` protocol: Lambda's event source mapping (long polls) or a fixed pool of workers (`core.poller`). Neither short-polls. |
 | `ChangeMessageVisibility`, 12 hour cap | ❌ | Consumers can't call back into the queue. |
 | **Throttling** | | |
 | FIFO 300 calls/s per action, 3,000 messages/s batched | ✅ | Sends are refused with `Throttled`; receives wait for a token. Deletes are not limited. |
@@ -38,14 +38,15 @@ Everything runs on virtual time with seeded randomness, and the hot path is plai
 | Poison pill leaves ApproximateAgeOfOldestMessage | ✅ | Standard queues stop counting a message received three or more times. |
 | DLQ redrive (move back) | 🟡 | `redrive` plus an edge on the `redrive` port: moves oldest first at the chosen velocity (up to 500/s), as new messages. There is no "task" that finishes, no 36 hour limit, no redrive allow policy, and the destination must be wired (AWS defaults to the source). |
 | Fair queues (standard queue with `MessageGroupId`) | ❌ | See *Not yet simulated*. |
-| **Lambda event source mapping** | | |
+| **Lambda event source mapping** (the `aws.sqs.event-source-mapping` connector) | | |
 | Start at 5, +300/minute while messages wait, to 1,250 | ✅ | Per consumer edge. Scales back down when the backlog clears. |
+| Waits for the function, however long it runs | ✅ | The function's own timeout ends a slow batch; the mapping has no caller timeout of its own (only the 15 minute Invoke ceiling). |
 | Maximum concurrency, batch size, batching window, 6 MB cut | ✅ | |
 | Gathered messages are in flight | ✅ | The visibility timeout starts at the receive, not at the invocation. |
 | Throttled: keep the batch, retry until the visibility timeout ends | ✅ | Retry interval is an assumption (`throttleRetry`). |
 | Function error: messages stay hidden, mapping backs off | ✅ | The back-off speed is an assumption. |
 | Provisioned mode | 🟡 | `provisionedMinPollers`/`provisionedMaxPollers`: 10 invocations per poller, +1,000 a minute, to 100,000. Poller throughput (1 MB/s, 10 polls/s) is not modelled. |
-| Partial batch responses (`ReportBatchItemFailures`) | ❌ | A call carries success or failure, not a list of failed records. One bad record fails the batch. |
+| Partial batch responses (`ReportBatchItemFailures`) | ✅ | `reportBatchItemFailures` on the edge: a success naming failed records deletes the rest and leaves those to come back, without backing off. Off, the reply is ignored and the failed records are deleted too (`itemFailuresIgnored`). FIFO keeps a failed record's later messages of the same group. |
 | Event filtering | ❌ | |
 | **Metrics** | | |
 | Visible, not visible, delayed, oldest age, groups in flight | ✅ | Gauges. |
@@ -70,7 +71,8 @@ Queue (`aws.sqs`):
 | `redrive` | off | | | Run a DLQ redrive to the `redrive` port while on. |
 | `redriveVelocity` | 0 | 0 to 500 | hard | Messages per second. 0 is "system optimised": 1,000/s assumed. |
 
-Consumer edge on the `deliver` port (an event source mapping), besides the universal edge settings:
+An edge on the `deliver` port carries the `aws.sqs.event-source-mapping` connector unless it names another (see
+[PRIMITIVES.md](../../../../PRIMITIVES.md)). Its settings, besides transport's latency:
 
 | Setting | Default | Range | Kind | What it models |
 | --- | --- | --- | --- | --- |
@@ -79,6 +81,7 @@ Consumer edge on the `deliver` port (an event source mapping), besides the unive
 | `maxConcurrency` | 0 (none) | 0 to 1,000 | hard | `ScalingConfig.MaximumConcurrency`. AWS accepts 2 to 1,000; 1 is allowed here. |
 | `initialConcurrency` | 5 | 1 to 1,250 | hard | AWS starts a standard mapping at 5. Fixed in AWS, editable here. |
 | `scaleUpPerMinute` | 300 | 0 to 10,000 | hard | AWS adds up to 300 a minute. |
+| `reportBatchItemFailures` | off | | | `FunctionResponseTypes: [ReportBatchItemFailures]`: act on a reply that names the records that failed. |
 | `throttleRetry` | 1 second | 100 ms to 1 minute | assumed | Wait before a throttled batch is retried. |
 | `provisionedMinPollers` | 0 (off) | 0 to 200 | hard | `ProvisionedPollerConfig.MinimumPollers` (AWS: 2 to 200). Ignores `maxConcurrency`, as AWS does not allow both. |
 | `provisionedMaxPollers` | 200 | 2 to 10,000 | hard | `MaximumPollers`. See the discrepancy below. |
@@ -155,8 +158,11 @@ at the chosen velocity (credit builds with time, at most a quarter second of it)
 message (new id, no carried enqueue time, receive count 0) and deletes it once the destination accepts it. A refused message
 returns after the visibility timeout. A message that keeps failing in the source goes round again: that is the redrive loop.
 
-**Event source mapping.** Each consumer edge has pollers (no fibers). `pump` hands receivable messages to idle pollers when
-messages arrive or free up. With a batching window a poller holds what it has received (its visibility timers already
+**Event source mapping.** The mapping is the connector on a consumer edge (`EventSourceMapping.ts`), not part of the queue:
+the queue offers ReceiveMessage on its `pull` port (`pull.ts`: at most ten a receive, the in-flight limit, FIFO's receive
+rate and groups, the visibility timer each receive starts) and says when something becomes receivable; the mapping takes.
+Each mapping has pollers (no fibers). `pump` hands receivable messages to idle pollers when the queue says so. It invokes
+synchronously and waits for the function however long it runs (the function's timeout ends a slow batch). With a batching window a poller holds what it has received (its visibility timers already
 running) until the batch is full, 6 MB is reached or the window ends. If some of its messages lapse meanwhile they are dropped
 from the batch. Once a second the mapping works out its target concurrency: while messages wait and no poller is idle,
 `ramp += scaleUpPerMinute / 60`; otherwise `ramp` decays by 10% of its distance to the starting concurrency (at least 1) per second;
@@ -165,18 +171,20 @@ below the start). On a throttle (`Throttled`) the poller keeps the batch and ret
 visibility timeout lapses; on any other failure it lets go and the messages come back after the timeout. FIFO uses the same
 ramp (AWS publishes it for standard queues only), with concurrency in practice capped by the number of groups with work.
 
-**Where the model departs from AWS.** Partial batch responses, `ChangeMessageVisibility` and short polling cannot be done
-(no consumer API); everything a producer sends is accepted or refused atomically; a late delete with a stale receipt never
+**Where the model departs from AWS.** `ChangeMessageVisibility` and short polling cannot be done (a consumer can only take
+and acknowledge); everything a producer sends is accepted or refused atomically; a late delete with a stale receipt never
 removes a message (AWS may, for a standard queue that has not been received again); in-flight messages are deleted at retention.
 
 ## Connections
 
 - **In:** any component calls the queue with a message (producers, SNS, S3, Lambda); the queue also receives the internal
   moves of other queues.
-- `deliver` (many): consumers. Each edge is an event source mapping with the consumer settings above. A consumer is anything
-  that handles a call with a batch (`count` records, `bytes` total, `attempt` = highest receive count, invocation `sync`);
-  Lambda's `batchCalls` handles the fan-out. Failure types: `Throttled` is retried within the visibility timeout; every
-  other failure (including the edge timing out) leaves the messages hidden.
+- `deliver` (many, `pull`): consumers. Each edge carries a connector that takes from the queue: by default
+  `aws.sqs.event-source-mapping` with the settings above, or `core.poller` (a fixed pool of workers) when the edge names it.
+  A consumer is anything that handles a call with a batch (`count` records, `bytes` total, `attempt` = highest receive count,
+  invocation `sync`); Lambda's `batchCalls` handles the fan-out. Failure types: `Throttled` is retried within the visibility
+  timeout; every other failure leaves the messages hidden. The mapping's state (`concurrency`, `busy`) is the edge's probe
+  (`Simulation.probeEdge`) and gauges of the same names in the edge's frames.
 - `dlq` (one): the dead-letter queue; must be a queue of the same kind (not checked).
 - `redrive` (one): where a redrive sends messages. Wiring a DLQ back to its source forms a loop (the engine's loop warning
   applies, and is correct).
@@ -192,7 +200,8 @@ CloudFormation import (`importers/cloudformation/sqs.ts`):
 | `ContentBasedDeduplication: true` (FIFO only) | `deduplication: true` (approximation: dedup by sender id) |
 | `AWS::Lambda::EventSourceMapping` and SAM `SQS` events: `BatchSize`, `MaximumBatchingWindowInSeconds`, `ScalingConfig.MaximumConcurrency` | `batchSize`, `batchWindow`, `maxConcurrency` on the `deliver` edge |
 | `ProvisionedPollerConfig.MinimumPollers` / `MaximumPollers` | `provisionedMinPollers` / `provisionedMaxPollers` on the same edge; values outside the component's ranges are clamped and listed in the report |
-| `FunctionResponseTypes: [ReportBatchItemFailures]`, `FilterCriteria`, `TumblingWindowInSeconds` | not simulated: reported once per function (a failed batch is retried whole, every record is delivered) |
+| `FunctionResponseTypes: [ReportBatchItemFailures]` | `reportBatchItemFailures: true` on the `deliver` edge, and `batch.errors: report` on the function |
+| `FilterCriteria`, `TumblingWindowInSeconds` | not simulated: reported once per function (every record is delivered) |
 | a disabled mapping (`Enabled: false`) | left out, quietly |
 | `ReceiveMessageWaitTimeSeconds`, `MaximumMessageSize`, `KmsMasterKeyId`, `RedriveAllowPolicy` | not read: no effect on load |
 
@@ -214,31 +223,31 @@ Counters (per second in frames), after the CloudWatch metric they stand in for. 
 | `deadLettered`, `dlqFailed` | | Moved to the DLQ; moves the DLQ refused (retried). |
 | `expired` | | Deleted by retention. |
 | `redriven` | | Moved out by a redrive. |
-| `nacks` | | Failed deliveries (a throttled batch counts each time it fails). |
 | `throttled` | | FIFO sends refused. |
+
+Failed deliveries are counted on the consumer edge, where they happen: its `fail` and `fail.<Tag>` (a throttled batch counts
+each time it is tried).
 
 Plus the framework's `in`, `ok`, `fail`, `fail.<Tag>`, `latency`, `inflight`. Gauges: `depth` (ApproximateNumberOfMessagesVisible),
 `hidden` (NotVisible), `delayed`, `oldestAgeMs` (ApproximateAgeOfOldestMessage), `groupsInflight` (FIFO,
 ApproximateNumberOfGroupsWithInflightMessages).
 
 Probe state: `ready`, `hidden`, `delayed`, `oldestAge`, `totals` (running totals of the counters above plus `enqueued`, which
-includes internal moves), `groups` (FIFO: `waiting`, `blocked` behind an in-flight message, `inflight`), `consumers` (per
-mapping: current `concurrency` and how many pollers are `busy`), `parked` (DLQ moves being retried) and `sample` (the 20 oldest messages).
+includes internal moves), `groups` (FIFO: `waiting`, `blocked` behind an in-flight message, `inflight`), `parked` (DLQ moves
+being retried) and `sample` (the 20 oldest messages). Each consumer's mapping is probed on its edge.
 
 ## Not yet simulated
 
-1. **Partial batch responses** (`ReportBatchItemFailures`): the most common real-world way to stop one poison record failing a
-   batch. Needs a call outcome that carries "these records failed" and Lambda to report it; then the mapping would also stop backing off.
-2. **Fair queues**: standard queues give priority to quiet message groups when one group has over 10% of in-flight messages
+1. **Fair queues**: standard queues give priority to quiet message groups when one group has over 10% of in-flight messages
    and at least 30 in flight (or over 10% of processing time), until it is quiet for 5 minutes. Needs per-group in-flight accounting on standard queues.
-3. **`ChangeMessageVisibility`** and heartbeats, **per-message timers**, **content-based deduplication**,
-   **`DeduplicationScope: messageGroup`**: need fields on the message (delay, body hash) and consumer calls into the queue.
-4. **Short polling and false empty receives**, `ReceiveMessageWaitTimeSeconds`, OverLimit errors.
-5. **Redrive tasks** (completion, cancellation, 36 hour limit, redrive allow policy, redrive to source by default), and an
+2. **`ChangeMessageVisibility`** and heartbeats, **per-message timers**, **content-based deduplication**,
+   **`DeduplicationScope: messageGroup`**: need fields on the message (delay, body hash) and a lease the taker can extend.
+3. **Short polling and false empty receives**, `ReceiveMessageWaitTimeSeconds`, OverLimit errors.
+4. **Redrive tasks** (completion, cancellation, 36 hour limit, redrive allow policy, redrive to source by default), and an
    action instead of an on/off setting.
-6. **FIFO retroactive delay**, delete and ChangeMessageVisibility rate limits, partition splitting and hash placement of groups.
-7. Event filtering, mapping scale-down to 2 pollers, provisioned poller throughput limits, FIFO ramp rules.
-8. CloudWatch's one-minute reporting and approximation; `SentMessageSize`; metadata counted in the 6 MB payload.
+5. **FIFO retroactive delay**, delete and ChangeMessageVisibility rate limits, partition splitting and hash placement of groups.
+6. Event filtering, mapping scale-down to 2 pollers, provisioned poller throughput limits, FIFO ramp rules.
+7. CloudWatch's one-minute reporting and approximation; `SentMessageSize`; metadata counted in the 6 MB payload.
 
 ## Assumptions
 

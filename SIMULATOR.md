@@ -33,8 +33,12 @@ A **design** is a YAML or JSON file (see `examples/`). A Schema **codec** turns 
 | `Setting`, `Describe` | Schema constructors for config (`int`, `ratio`, `duration`, `choice`, `latency`, `group`…) and the derivation of a UI form from a schema. |
 | `Message`, `Distribution` | The unit of work (`Message`), typed call failures, and sampling (lognormal latency, exponential gaps, weighted choice). |
 | `Telemetry`, `Fault` | Windowed metrics published as a `Stream` of frames; fault kinds as a Schema union plus the service that tracks them. |
-| `Edge` | Edge policy: latency, timeout, retry/backoff, weight. |
-| `Component`, `Registry` | The component definition API and the set of components a design may use. |
+| `Protocol` | How work crosses a port: `invoke` (push a call) or `pull` (the owner holds work, a taker takes leases). |
+| `Edge` | Transport (latency and edge faults, one try per call, the edge's metrics) and call policy (timeout, retry/backoff). |
+| `Connector`, `connectors/*` | What sits on an edge: the definition API, the inference rule, and the core ones (`core.link`, `core.poller`). |
+| `Controller`, `controllers/*` | Loops that watch a node and change it while it runs: the definition API and the core ones (`core.target-tracking`). |
+| `Family`, `kit/Slots` | A keyed family: instances by key, made on first use, evicted when idle, with cold starts counted; and slots with a line waiting for them. |
+| `Component`, `Registry` | The component definition API, and the set of components and connectors a design may use. |
 | `Design`, `Topology`, `Diagnostics`, `Layout`, `Builder` | The document, its codec to a `Graph`, graph analysis, validation, auto-layout, and a code-level builder. |
 | `Simulation` | The running instance: advance, probe, inspect, configure, faults, frames. |
 | `Engine` | The UI-facing actor: Schema'd commands in, events out, and pacing. |
@@ -92,9 +96,15 @@ export const Echo = Component.make({
 })
 ```
 
-The framework supplies everything around it: edge policy, faults, metrics, per-node seeded `Random`, virtual time. Every node is wrapped so it automatically records `in`, `ok`, `fail`, `fail.<Tag>`, `latency`, message `age` and an `inflight` gauge, applies faults, and contains defects (a throwing component fails the call with `Failed` and is logged, instead of killing the run).
+The framework supplies everything around it: edge policy, faults, metrics, per-node seeded `Random`, virtual time. Every node is wrapped so it automatically records `in`, `ok`, `partial`, `fail`, `fail.<Tag>`, `latency`, message `age` and an `inflight` gauge, applies faults, and contains defects (a throwing component fails the call with `Failed` and is logged, instead of killing the run).
 
-All interaction is call semantics: `Effect<void, CallFailure>`. Async decoupling comes from components that buffer (queue, topic).
+A handler answers with a `Reply`: nothing (it all worked), or `ItemFailures`, a success that names by position the records of its batch that failed (how a Lambda function returns `batchItemFailures`). It travels back across the edge to whoever called, which decides what to do about those records; `partial` counts such replies.
+
+A port speaks a protocol. Most are `invoke`: the component calls through `node.out(port)`, and each call is an
+`Effect<void, CallFailure>` (or `link.send(message, done)`). A `pull` port (`port.pull`) is the other way round: the
+component holds the work and offers it (`Instance.pull`, a `Protocol.Pull` with `take` returning leases), and whatever sits
+on each edge takes from it. That is how a queue and its consumers work: the queue keeps visibility timeouts and redelivery,
+and Lambda's event source mapping, a connector, does the polling (see **Edges** below).
 
 ### Providers, regions and placement
 
@@ -127,10 +137,14 @@ quotas (`quotas.ts`), its design checks (`audit.ts`), tests, and a README that s
 table), what isn't yet, every limit with its source, the settings, the metrics and the assumptions. `src/simulator/aws/README.md`
 is the guide to writing one. The READMEs are the reference; this is the overview.
 
-**Common** (`common/`)
+**Common** (`common/`): nothing in these belongs to a provider, so they model systems with no cloud in them too.
 
 - `common.client`: a traffic source. Poisson or constant arrivals, a spike, payload size, hot keys, message groups, sync or async. A chain of timers, no fiber per request.
 - `common.http-endpoint`: something outside your system. Latency, error rate, rate limit (429), concurrency limit (503), payload limit.
+- `common.service`: identical replicas behind a load balancer (a Kubernetes Deployment, an ECS service, a team taking tickets): `replicas × concurrency` workers, a queue with a limit (503 past it), a service time, downstream calls, and a start-up time for added replicas. Gauges `ready`, `starting`, `busy`, `queued`, `utilization`; an autoscaler tracks `busy` per replica.
+- `common.actor`: a family of single-threaded objects addressed by key (Durable Objects, actors, per-user sessions), made on first use (a cold start) and evicted when idle. Different keys run side by side; one key runs one request at a time, so a hot key is capped at one object's pace and only its queue grows (503 past a per-object limit). It can be held busy while it calls its store downstream, as a Durable Object's input gate holds it.
+
+The **Autoscaled cluster** example is built from these alone, with an autoscaling controller.
 
 **AWS** (`aws/`)
 
@@ -193,16 +207,64 @@ window are a sample-weighted estimate from per-frame summaries; maxima are exact
 be a template an importer reads) and templates, and exits 0/1/2/3 (held / assertion failed or component crashed / bad input /
 internal). `main(argv, io)` takes an `IO` object (framework output included), so the commands are tested in-process. The guide is `docs/CLI.md`.
 
-## Edges: the policy layer
+## Edges: connectors and transport
 
-Every edge, whatever it connects, has the same settings (`Edge.Config`), plus any extra the source port declares:
+([PRIMITIVES.md](PRIMITIVES.md) is the design this follows.)
 
-- `weight`: share of traffic when the source routes by weight.
-- `latency`: one-way network latency, paid both ways.
-- `timeout` and `cancelOnTimeout`: by default the callee **keeps working** after the caller gives up (wasted work, like most real clients); turn the option on to cancel it instead.
-- `retry`: max attempts, initial backoff, factor, cap and jitter: exponential, capped, optionally fully jittered, with the draw taken from the edge's own seeded random stream.
+An edge is a **connector** running over **transport**.
+
+**Transport** (`Edge.Wire`) is what every hop costs, whatever the connector: `latency` (one-way, paid both ways, estimated
+from the two placements unless set) and the edge's faults (outage, black hole, loss, added latency). A connector asks its wire
+for calls and never sees latency; the wire records the edge's metrics (`calls`, `ok`, `fail`, `fail.<Tag>`, `retries`,
+`latency`, `inflight`).
+
+**A connector** (`Connector.make`) is what sits between two ports, with its own settings, probe state and behaviour. The
+registry picks one for each edge: the one the document names (`connector:` on the edge), or else the most specific that fits
+the two ends (one naming the source component and port beats one naming the component, which beats one naming only the
+protocols). Providers bring their own (`Provider.connectors`). The ones there are:
+
+| Connector | Fits | What it does |
+| --- | --- | --- |
+| `core.link` | `invoke` → `invoke` | The plain call: `weight` (share of traffic when the source routes by weight), `request` (what the call does and carries), `timeout` and `cancelOnTimeout` (by default the callee **keeps working** after the caller gives up, like most real clients), `retry` (max attempts, backoff, factor, cap and jitter, drawn from the edge's own seeded stream). |
+| `core.poller` | `pull` → `invoke` | A fixed pool of `workers` that take batches, call with each and acknowledge on success; a failed batch is left to the source's lease. |
+| `aws.sqs.event-source-mapping` | `aws.sqs:deliver` → `invoke` | Lambda's poller between a queue and its consumer: batching, scaling with the backlog, throttle back-off; it waits for the function rather than timing out. |
+
+An edge's settings are flat: the source port's own fields (an SNS subscription's filter, a CloudFront origin's timeouts),
+then the connector's, then transport's (`Connector.edgeSchema`). `Simulation.probeEdge(id)` returns the connector's state, and
+`inspect` lists each edge's connector. In the editor a connector that isn't a plain link is drawn as a badge on the line.
 
 Retries and orphaned work are what make retry storms and metastable failures emerge. The **Retry storm** example shows a dependency that never recovers after its trigger has gone.
+
+## Controllers
+
+A **controller** (`Controller.make`) is a loop attached to a node that watches it, decides and acts on the virtual clock:
+an autoscaler, an operator's runbook, a chaos schedule. It observes only what anyone can see (the node's metrics each frame,
+its settings) and acts only through the channels a person editing the live design has: changing one of the node's settings,
+validated exactly as an edit is, and starting or ending a fault on it. So its decisions are deterministic and visible: its
+own metrics arrive in frames under `controllers`, `Simulation.probeController(id)` returns its state and what it said it
+decided, and `configureController` edits it live.
+
+A document attaches controllers by id:
+
+```yaml
+controllers:
+  worker-autoscaler:
+    type: core.target-tracking
+    target: worker
+    settings: {metric: concurrent, targetValue: 0.7, setting: provisioned, min: 1, max: 100}
+```
+
+The design checks each attachment: the type exists, the target exists and is something it can control, and its settings
+make sense on that target (`check`: a target-tracking controller naming a setting the target doesn't have, or one that isn't
+a number, is an error; one not told what to change yet is a warning, and does nothing). Removing a node removes its controllers.
+
+| Controller | What it does |
+| --- | --- |
+| `core.target-tracking` | Keeps a metric (a gauge, a rate, or a percentile like `latency.p95`) near a target by scaling one numeric setting, the way Kubernetes' horizontal autoscaler and Application Auto Scaling do: averaged over a window, decided every period, within a minimum and maximum, a tolerance band, and separate scale-out and scale-in cooldowns. Per unit (`ceil(total / target)`) or in total (in proportion). |
+
+In the editor a node's panel lists its controllers with their settings and live metrics, and offers the ones that fit; a
+controlled node carries a badge on the canvas. Live edits are checked again as they are made (the engine keeps its copy of
+the document in step), so a controller pointed at a setting the node lacks is flagged at once.
 
 ## Faults
 
@@ -255,9 +317,9 @@ const program = Effect.gen(function*() {
 
 `Engine` is an actor for hosts. `send(command)` queues a command; handled strictly in order. `events` is a `Stream`. Both are Schemas, and commands are accepted in encoded JSON form and decoded at the door, so the same protocol works over a function call, `postMessage` or a socket.
 
-- **Commands:** `load`, `play`, `pause`, `reset`, `setSpeed`, `step`, `updateNode`, `updateEdge`, `inject`, `clearFault`, `clearFaults`.
+- **Commands:** `load`, `play`, `pause`, `reset`, `setSpeed`, `step`, `updateNode`, `updateEdge`, `updateAccount`, `updateController`, `inject`, `clearFault`, `clearFaults`. A live edit is also applied to the engine's copy of the document and the design is checked again; `diagnostics` is sent when what the checks find changes.
 - **Events:** `status` (phase, virtual time, speed, achieved speed, seed), `frames`, `faults`, `diagnostics`, `reset`, `rejected` (a refused command, with the reasons).
-- **Catalog:** component manifests (with derived forms), the universal edge form, and the fault kinds.
+- **Catalog:** component manifests (with derived forms, and each port's protocol), connector manifests, transport's form, and the fault kinds.
 - **Pacing:** a loop on the *real* clock sleeps about 16 ms, then advances virtual time by `elapsed × speed` within a wall-time budget, reporting the speed actually achieved when it can't keep up. A long stall (a hidden tab) is clamped rather than simulated in one burst.
 
 ## Performance
@@ -298,9 +360,9 @@ to the engine itself, and several services asked for the same thing, so they are
 
 **The call and the message**
 
-- **Partial results.** A call succeeds or fails whole. SQS and DynamoDB Streams → Lambda partial batch responses
-  (`ReportBatchItemFailures`), DynamoDB `UnprocessedItems`, and S3/SES per-recipient outcomes all need an outcome that carries
-  *which part* failed.
+- **Partial results.** A success can now name the records of its batch that failed (`ItemFailures`), and SQS → Lambda uses it
+  for `ReportBatchItemFailures`. Still to use it: DynamoDB Streams → Lambda (its polling isn't a connector yet), DynamoDB
+  `UnprocessedItems`, and S3/SES per-recipient outcomes.
 - **What a message says.** `Message` has `operation: read | write` and nothing about the item or the event. Services want: a request
   kind (S3's get/head/list/put/copy/delete, today four bucket-wide share settings), an event kind (SES bounce vs delivery),
   an item identity (DynamoDB transaction conflicts, per-key stream ordering), a deduplication id and a per-message delay (SQS).

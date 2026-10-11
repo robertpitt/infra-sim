@@ -1,4 +1,4 @@
-import type { Component, Describe, ImportReport, Scenario, Telemetry } from "#simulator"
+import type { Component, Connector, Controller, Describe, ImportReport, Scenario, Telemetry } from "#simulator"
 
 /** Plain-text output. Colour only when asked for, and never required to read it. */
 
@@ -213,40 +213,47 @@ const flatten = (fields: ReadonlyArray<Field>, prefix = ""): ReadonlyArray<{ rea
 const range = (spec: Exclude<Field, { kind: "group" }>): string => {
   if (spec.kind === "choice") return spec.options.map((o) => o.value).join(" | ")
   if (spec.kind === "boolean") return "true | false"
+  if (spec.kind === "text") return "text"
   const unit = spec.kind === "duration" ? "ms" : (spec.unit ?? "")
   return spec.min === undefined && spec.max === undefined ? "" : `${spec.min ?? ""}..${spec.max ?? ""}${unit === "" ? "" : ` ${unit}`}`
 }
 
-const limitKind = (spec: Exclude<Field, { kind: "group" }>): string => (spec.kind === "choice" || spec.kind === "boolean" ? "" : (spec.limit?.kind ?? ""))
+const limitKind = (spec: Exclude<Field, { kind: "group" }>): string =>
+  spec.kind === "choice" || spec.kind === "boolean" || spec.kind === "text" ? "" : (spec.limit?.kind ?? "")
+
+/** A settings table, indented, under a heading. Nothing at all for no settings. */
+const settingsBlock = (fields: ReadonlyArray<Field>, style: Style, heading = "Settings"): Array<string> => {
+  const settings = flatten(fields)
+  if (settings.length === 0) return []
+  return [
+    "",
+    style.bold(heading) + style.dim("  (durations are milliseconds in ranges; write them as \"30 seconds\" or a number of ms)"),
+    table(
+      [
+        ["setting", "default", "range", "limit"].map((h) => style.dim(h)),
+        ...settings.map(({ path, spec }) => [path, String(spec.default), range(spec), limitKind(spec)])
+      ],
+      ["l", "l", "l", "l"]
+    )
+      .split("\n")
+      .map((l) => `  ${l}`)
+      .join("\n")
+  ]
+}
 
 export const renderComponent = (m: Component.Manifest, style: Style): string => {
   const out: Array<string> = []
   out.push(`${style.bold(m.type)}  ${m.title}`)
   out.push(m.description)
   if (m.docs !== undefined) out.push(style.dim(m.docs))
-  const settings = flatten(m.settings)
-  if (settings.length > 0) {
-    out.push("")
-    out.push(style.bold("Settings") + style.dim("  (durations are milliseconds in ranges; write them as \"30 seconds\" or a number of ms)"))
-    out.push(
-      table(
-        [
-          ["setting", "default", "range", "limit"].map((h) => style.dim(h)),
-          ...settings.map(({ path, spec }) => [path, String(spec.default), range(spec), limitKind(spec)])
-        ],
-        ["l", "l", "l", "l"]
-      )
-        .split("\n")
-        .map((l) => `  ${l}`)
-        .join("\n")
-    )
-  }
+  out.push(...settingsBlock(m.settings, style))
   if (m.outputs.length > 0) {
     out.push("")
     out.push(style.bold("Ports") + style.dim("  (an edge leaves from a port)"))
     for (const o of m.outputs) {
       const own = flatten(o.settings).map((f) => f.path)
-      out.push(`  ${o.port}  ${o.label}${o.many ? "" : " (one connection)"}${own.length > 0 ? `  edge settings: ${own.join(", ")}` : ""}`)
+      const how = o.protocol === "pull" ? " (pull: whatever is wired here takes from it)" : o.many ? "" : " (one connection)"
+      out.push(`  ${o.port}  ${o.label}${how}${own.length > 0 ? `  edge settings: ${own.join(", ")}` : ""}`)
     }
   }
   if (m.limits.length > 0) {
@@ -255,5 +262,30 @@ export const renderComponent = (m: Component.Manifest, style: Style): string => 
     for (const l of m.limits) out.push(`  ${l.label}: ${l.value} ${style.dim(l.adjustable ? "(quota)" : "(hard)")}`)
   }
   if (m.container !== undefined) out.push(`\nA container: draws a box round ${m.container.accepts.join(", ")}${m.container.decidesRegion ? "; its region decides where they run" : ""}.`)
+  return `${out.join("\n")}\n`
+}
+
+/** One controller: what it can be attached to, and its settings. */
+export const renderController = (m: Controller.Manifest, style: Style): string => {
+  const out: Array<string> = []
+  out.push(`${style.bold(m.type)}  ${m.title}  ${style.dim("(a controller: attach it to a node under controllers:)")}`)
+  if (m.description !== "") out.push(m.description)
+  if (m.docs !== undefined) out.push(style.dim(m.docs))
+  out.push(`Controls: ${m.targets === undefined ? "any component" : m.targets.join(", ")}`)
+  out.push(...settingsBlock(m.settings, style))
+  return `${out.join("\n")}\n`
+}
+
+/** One connector: what it fits between, and its own settings (an edge adds its port's before them and transport's after). */
+export const renderConnector = (m: Connector.Manifest, transport: ReadonlyArray<Field>, style: Style): string => {
+  const end = (component: string | undefined, port: string | undefined, protocol: string) =>
+    `${component ?? `any ${protocol} port`}${port === undefined ? "" : `:${port}`}`
+  const out: Array<string> = []
+  out.push(`${style.bold(m.type)}  ${m.title}  ${style.dim("(a connector: it sits on an edge)")}`)
+  if (m.description !== "") out.push(m.description)
+  if (m.docs !== undefined) out.push(style.dim(m.docs))
+  out.push(`Fits: ${end(m.from.component, m.from.port, m.from.protocol)} → ${m.to.component ?? `anything that accepts ${m.to.protocol}`}`)
+  out.push(...settingsBlock(m.settings, style))
+  out.push(...settingsBlock(transport, style, "Transport"))
   return `${out.join("\n")}\n`
 }

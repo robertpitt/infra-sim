@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import type { Fast } from "./Component.ts"
 import type { Source } from "./Distribution.ts"
-import { type Link, pickUnsafe } from "./Edge.ts"
+import { type Done as EdgeDone, type Link, pickUnsafe } from "./Edge.ts"
 import type { Call, CallFailure, Message } from "./Message.ts"
 
 /**
@@ -47,8 +47,8 @@ export const delayed = (fast: Timers, ms: number, finish: () => CallFailure | un
 // Calling several things: callbacks all the way, so a fan-out costs one `send` per target and nothing else.
 // ---------------------------------------------------------------------------------------------------------
 
-/** Hears how a piece of work ended: `undefined` for success. Called once. */
-export type Done = (failure: CallFailure | undefined) => void
+/** Hears how a piece of work ended: `undefined` for success, with the records of its batch that failed if some did. Called once. */
+export type Done = EdgeDone
 /** Abandons work in flight. Safe to call after it has finished. */
 export type Cancel = () => void
 export const noCancel: Cancel = () => {}
@@ -167,6 +167,54 @@ export const forEach = (count: number, concurrency: number, task: (index: number
   }
   if (count === 0) {
     done(undefined)
+    return noCancel
+  }
+  launch()
+  return () => {
+    if (open) {
+      open = false
+      for (const cancel of cancels) cancel()
+    }
+  }
+}
+
+/**
+ * Run a task for each of `indices`, at most `concurrency` at a time, to the end: a failure doesn't stop the others.
+ * `done` hears which indices failed, ascending (empty if none did). This is a batch handled record by record by code
+ * that catches each record's error, the way a function reporting batch item failures does.
+ */
+export const forEachSettled = (
+  indices: ReadonlyArray<number>,
+  concurrency: number,
+  task: (index: number, done: Done) => Cancel,
+  done: (failed: ReadonlyArray<number>) => void
+): Cancel => {
+  const cancels: Array<Cancel> = []
+  const failed: Array<number> = []
+  let started = 0
+  let running = 0
+  let finished = 0
+  let open = true
+  const launch = (): void => {
+    while (open && started < indices.length && running < concurrency) {
+      const index = indices[started++]!
+      running++
+      cancels.push(
+        task(index, (failure) => {
+          if (!open) return
+          running--
+          if (failure !== undefined) failed.push(index)
+          if (++finished === indices.length) {
+            open = false
+            return done(failed.sort((a, b) => a - b))
+          }
+          launch()
+        })
+      )
+    }
+  }
+  if (indices.length === 0) {
+    done(failed)
     return noCancel
   }
   launch()

@@ -4,6 +4,7 @@ import type { Placement } from "./Provider.ts"
 import * as Describe from "./Describe.ts"
 import * as Edge from "./Edge.ts"
 import type { Call, Message } from "./Message.ts"
+import type { Protocol, Pull } from "./Protocol.ts"
 import type { SeededRandom } from "./SeededRandom.ts"
 import type { Meter } from "./Telemetry.ts"
 import type { TimerHandle } from "./VirtualTime.ts"
@@ -37,24 +38,39 @@ export type Category = "traffic" | "compute" | "messaging" | "storage" | "networ
 // Ports
 // ---------------------------------------------------------------------------------------------------------
 
-/** A named exit on a component. Edges leave from a port; the port can add its own per-edge settings. */
+/**
+ * A named exit on a component. Edges leave from a port, and the port says how work crosses it (its `protocol`):
+ *
+ *  - `invoke` (`port.many`, `port.one`): the component pushes calls through `node.out(port)`;
+ *  - `pull` (`port.pull`): the component holds the work and offers it (`Instance.pull`), and the connector on each edge
+ *    takes it, the way Lambda's event source mapping polls a queue.
+ *
+ * The port can add its own per-edge settings, which the component reads from the link.
+ */
 export interface PortDef<C extends Schema.Struct<Schema.Struct.Fields> | undefined = Schema.Struct<Schema.Struct.Fields> | undefined> {
   readonly label: string
   /** Whether more than one edge may leave this port. */
   readonly many: boolean
+  readonly protocol: Protocol
   readonly config: C
 }
 export type PortDefs = Readonly<Record<string, PortDef>>
 
+type PortMaker = {
+  (label: string): PortDef<undefined>
+  <C extends Schema.Struct<Schema.Struct.Fields>>(label: string, config: C): PortDef<C>
+}
+
+const portOf = (protocol: Protocol, many: boolean): PortMaker =>
+  ((label: string, config?: Schema.Struct<Schema.Struct.Fields>) => ({ label, many, protocol, config })) as PortMaker
+
 export const port = {
-  many: ((label: string, config?: Schema.Struct<Schema.Struct.Fields>) => ({ label, many: true, config })) as {
-    (label: string): PortDef<undefined>
-    <C extends Schema.Struct<Schema.Struct.Fields>>(label: string, config: C): PortDef<C>
-  },
-  one: ((label: string, config?: Schema.Struct<Schema.Struct.Fields>) => ({ label, many: false, config })) as {
-    (label: string): PortDef<undefined>
-    <C extends Schema.Struct<Schema.Struct.Fields>>(label: string, config: C): PortDef<C>
-  }
+  /** Calls to any number of edges. */
+  many: portOf("invoke", true),
+  /** Calls to at most one edge. */
+  one: portOf("invoke", false),
+  /** Work offered to be taken by whatever is wired here; each edge's connector takes from the same source. */
+  pull: portOf("pull", true)
 }
 
 /** The settings an edge leaving this port carries: the universal edge policy plus the port's own. */
@@ -89,7 +105,7 @@ export interface Node<Config, Ports extends PortDefs> {
    * step and only reach for an `Effect` (a callback that waits) when it genuinely has to wait.
    */
   readonly fast: Fast<Config>
-  /** The edges currently wired to an output port. */
+  /** The edges wired to an `invoke` port, to call through. A `pull` port has none: its connectors take instead. */
   readonly out: <K extends keyof Ports & string>(port: K) => ReadonlyArray<Edge.Link<PortConfig<Ports[K]>>>
   /** Token-bucket rate limits, keyed by name. Shared across the simulation: namespace keys with your node id or placement. */
   readonly limiter: Limiter
@@ -119,6 +135,8 @@ export interface Fast<Config> {
 export interface Instance<State = unknown> {
   /** Handle an inbound call. Leave out for pure sources such as clients. */
   readonly call?: (message: Message) => Call
+  /** What the component offers on each of its `pull` ports, for the connectors wired there to take from. */
+  readonly pull?: Readonly<Record<string, Pull>>
   /** Report internal state. This is what makes a running component inspectable. */
   readonly probe?: Effect.Effect<State>
 }
@@ -242,15 +260,8 @@ export type AnyComponent = ComponentDef<any, any, any>
 // Derived pieces
 // ---------------------------------------------------------------------------------------------------------
 
-/** The schema for edges leaving `portName` of `def`: the port's own settings first, then the universal policy. */
-export const edgeConfigFor = (def: AnyComponent, portName: string): Schema.Struct<Schema.Struct.Fields> => {
-  const extra = (def.ports as PortDefs)[portName]?.config
-  if (extra === undefined) return Edge.Config
-  // The port's own fields come first in the form. A port can also redeclare a universal field to change its
-  // default (SNS gives its subscriptions a far longer retry policy than a plain call has).
-  const universal = Object.fromEntries(Object.entries(Edge.Config.fields).filter(([k]) => !(k in extra.fields)))
-  return Schema.Struct({ ...extra.fields, ...universal })
-}
+/** What a component accepts on its input: invocations, or nothing at all for a pure source. */
+export const accepts = (def: AnyComponent): Protocol | undefined => (def.inputs ? "invoke" : undefined)
 
 /** The serialisable description of a component, for UIs and tools that never run it. */
 export interface Manifest {
@@ -274,7 +285,8 @@ export interface Manifest {
     readonly port: string
     readonly label: string
     readonly many: boolean
-    /** The port's own per-edge settings, before the universal edge policy. */
+    readonly protocol: Protocol
+    /** The port's own per-edge settings, before the connector's and transport's. */
     readonly settings: ReadonlyArray<Describe.FieldSpec>
   }>
 }
@@ -301,6 +313,7 @@ export const manifestOf = (def: AnyComponent, all: ReadonlyArray<AnyComponent> =
     port: name,
     label: p.label,
     many: p.many,
+    protocol: p.protocol,
     settings: p.config === undefined ? [] : Describe.fields(p.config)
   }))
 })

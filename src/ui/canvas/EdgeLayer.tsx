@@ -2,6 +2,8 @@ import { memo } from "react"
 import { fmtPct, fmtRate, clamp } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
 import { run } from "../state/run.ts"
+import type { ConnectorManifest } from "../state/types.ts"
+import { Icon } from "../ui/Icon.tsx"
 import type { Point } from "./geometry.ts"
 import { edgePath, midpoint } from "./geometry.ts"
 import { failRatio, useStats } from "./stats.ts"
@@ -12,9 +14,11 @@ interface EdgeProps {
   readonly b: Point
   readonly selected: boolean
   readonly label: string | undefined
+  /** What sits between the two nodes, when it is more than a plain link: drawn as a badge on the line. */
+  readonly connector: ConnectorManifest | undefined
 }
 
-export const EdgeView = memo(function EdgeView({ id, a, b, selected, label }: EdgeProps) {
+export const EdgeView = memo(function EdgeView({ id, a, b, selected, label, connector }: EdgeProps) {
   const stats = useStats("edges", id)
   const faults = useStore(run, (s) => s.faults.filter((f) => f.target.kind === "edge" && f.target.id === id).length)
   const calls = stats?.rates.calls ?? 0
@@ -38,12 +42,21 @@ export const EdgeView = memo(function EdgeView({ id, a, b, selected, label }: Ed
       <path className="edge-line" d={d} markerEnd={`url(#arrow-${tone})`} style={{ strokeWidth: width }} />
       {tone !== "idle" && <path className="edge-flow" d={d} style={{ strokeWidth: Math.max(1.2, width - 0.6), ["--flow" as string]: `${flow}s` }} />}
       {(text.length > 0 || label !== undefined) && (
-        <text className="edge-label" x={mid.x} y={mid.y - 9} textAnchor="middle">
+        <text className="edge-label" x={mid.x} y={mid.y - (connector === undefined ? 9 : 16)} textAnchor="middle">
           {label !== undefined && text.length === 0 ? label : text.join("  ")}
         </text>
       )}
+      {connector !== undefined && (
+        <g transform={`translate(${mid.x}, ${mid.y})`} className="edge-connector" data-edge-id={id}>
+          <title>{connector.title}</title>
+          <circle r="10" />
+          <g transform="translate(-6.5, -6.5)">
+            <Icon name={connector.icon} size={13} />
+          </g>
+        </g>
+      )}
       {faults > 0 && (
-        <g transform={`translate(${mid.x}, ${mid.y + 8})`} className="edge-fault">
+        <g transform={`translate(${mid.x}, ${mid.y + (connector === undefined ? 8 : 22)})`} className="edge-fault">
           <circle r="9" />
           <path d="M1.5 -6 L-4 1 H0 L-1.5 6 L4 -1 H0 Z" />
         </g>

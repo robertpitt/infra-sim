@@ -1,5 +1,8 @@
 import { Effect, Graph, Option, Result, Schema, SchemaAST, SchemaIssue, SchemaTransformation } from "effect"
-import { type AnyComponent, edgeConfigFor, type PortDefs } from "./Component.ts"
+import type { AnyComponent, PortDefs } from "./Component.ts"
+import * as Connector from "./Connector.ts"
+import type { AnyConnector } from "./Connector.ts"
+import { type AnyController, fits as controllerFits } from "./Controller.ts"
 import type { Diagnostic } from "./Diagnostic.ts"
 import { keyOf, oneWayLatencyMs, type Placement } from "./Provider.ts"
 import type { Components } from "./Registry.ts"
@@ -48,9 +51,20 @@ export const NodeDoc = Schema.Struct({
 export const EdgeDoc = Schema.Struct({
   from: Schema.Struct({ node: Schema.String, port: Schema.optionalKey(Schema.String) }),
   to: Schema.String,
+  /** What sits on the edge (`core.poller`, `aws.sqs.event-source-mapping`...). Absent means the most specific one that fits. */
+  connector: Schema.optionalKey(Schema.String),
   name: Schema.optionalKey(Schema.String),
   settings: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   origin: Schema.optionalKey(Origin)
+})
+
+/** A controller attached to a node: an autoscaler, say. Its settings hold only the overrides someone chose. */
+export const ControllerDoc = Schema.Struct({
+  type: Schema.String,
+  /** The node it controls. */
+  target: Schema.String,
+  name: Schema.optionalKey(Schema.String),
+  settings: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown))
 })
 
 export const Doc = Schema.Struct({
@@ -66,13 +80,16 @@ export const Doc = Schema.Struct({
    */
   accounts: Schema.optionalKey(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown))),
   nodes: Schema.Record(Schema.String, NodeDoc),
-  edges: Schema.Record(Schema.String, EdgeDoc)
+  edges: Schema.Record(Schema.String, EdgeDoc),
+  /** Loops that watch nodes and change them while the design runs, by id. */
+  controllers: Schema.optionalKey(Schema.Record(Schema.String, ControllerDoc))
 })
 
 export type Position = typeof Position.Type
 export type Origin = typeof Origin.Type
 export type NodeDoc = typeof NodeDoc.Type
 export type EdgeDoc = typeof EdgeDoc.Type
+export type ControllerDoc = typeof ControllerDoc.Type
 export type Doc = typeof Doc.Type
 export type NodeId = string
 export type EdgeId = string
@@ -181,7 +198,45 @@ export const removeNode = (doc: Doc, id: NodeId): Doc => {
       return [k, free]
     })
   )
-  return { ...doc, nodes, edges: Object.fromEntries(Object.entries(doc.edges).filter(([, e]) => e.from.node !== id && e.to !== id)) }
+  const removed = { ...doc, nodes, edges: Object.fromEntries(Object.entries(doc.edges).filter(([, e]) => e.from.node !== id && e.to !== id)) }
+  // A controller of a node that is gone has nothing to control.
+  if (doc.controllers === undefined) return removed
+  const controllers = Object.fromEntries(Object.entries(doc.controllers).filter(([, c]) => c.target !== id))
+  return withControllers(removed, controllers)
+}
+
+const withControllers = (doc: Doc, controllers: Readonly<Record<string, ControllerDoc>>): Doc => {
+  const { controllers: _old, ...rest } = doc
+  return Object.keys(controllers).length === 0 ? rest : { ...rest, controllers }
+}
+
+export interface NewController {
+  readonly id?: string
+  readonly type: string
+  readonly target: NodeId
+  readonly name?: string
+  readonly settings?: Readonly<Record<string, unknown>>
+}
+
+/** Attach a controller to a node. Its id is `<target>.<kind>` unless given, made unique among controllers. */
+export const addController = (doc: Doc, controller: NewController): { readonly doc: Doc; readonly id: string } => {
+  const taken = doc.controllers ?? {}
+  const kind = controller.type.slice(controller.type.lastIndexOf(".") + 1)
+  const id = uniqueId((candidate) => candidate in taken, controller.id ?? `${controller.target}.${kind}`)
+  const { id: _, ...spec } = controller
+  return { id, doc: withControllers(doc, { ...taken, [id]: spec }) }
+}
+
+export const removeController = (doc: Doc, id: string): Doc => {
+  if (doc.controllers?.[id] === undefined) return doc
+  const { [id]: _removed, ...rest } = doc.controllers
+  return withControllers(doc, rest)
+}
+
+/** Set one setting override on a controller. Pass `undefined` to drop it and fall back to the default. */
+export const setControllerSetting = (doc: Doc, id: string, path: ReadonlyArray<string>, value: unknown): Doc => {
+  const controller = doc.controllers?.[id]
+  return controller === undefined ? doc : withControllers(doc, { ...doc.controllers, [id]: { ...controller, settings: setIn(controller.settings ?? {}, path, value) } })
 }
 
 /** Put a node inside a container, or take it out with `undefined`. Placement is checked when the document is resolved. */
@@ -203,6 +258,7 @@ export interface NewEdge {
   readonly id?: EdgeId
   readonly from: { readonly node: NodeId; readonly port?: string }
   readonly to: NodeId
+  readonly connector?: string
   readonly name?: string
   readonly settings?: Readonly<Record<string, unknown>>
   readonly origin?: Origin
@@ -216,6 +272,14 @@ export const connect = (doc: Doc, edge: NewEdge): { readonly doc: Doc; readonly 
   const { id: _, from, ...rest } = edge
   const spec: EdgeDoc = { ...rest, from: { node: from.node, ...(from.port === undefined ? {} : { port: from.port }) } }
   return { id, doc: { ...doc, edges: { ...doc.edges, [id]: spec } } }
+}
+
+/** Name the connector an edge uses, or with `undefined` go back to the one that fits best. Its settings are kept. */
+export const setConnector = (doc: Doc, id: EdgeId, connector: string | undefined): Doc => {
+  const edge = doc.edges[id]
+  if (edge === undefined || edge.connector === connector) return doc
+  const { connector: _old, ...rest } = edge
+  return { ...doc, edges: { ...doc.edges, [id]: connector === undefined ? rest : { ...rest, connector } } }
 }
 
 export const removeEdge = (doc: Doc, id: EdgeId): Doc => {
@@ -251,7 +315,13 @@ export interface Edge {
   readonly to: NodeId
   readonly name?: string
   readonly origin?: Origin
-  /** Universal edge policy plus the port's own settings, decoded. */
+  /** What sits on the edge. */
+  readonly connector: AnyConnector
+  /** Whether the document named the connector, rather than leaving it to inference. */
+  readonly explicit: boolean
+  /** The edge's settings schema: the port's own fields, the connector's, transport's. */
+  readonly schema: Connector.Settings
+  /** Decoded against `schema`. */
   readonly config: unknown
 }
 
@@ -261,12 +331,24 @@ export interface Account {
   readonly config: unknown
 }
 
+/** A controller attached to a node, with its settings decoded. */
+export interface Controller {
+  readonly id: string
+  readonly type: string
+  readonly name: string
+  readonly target: NodeId
+  readonly def: AnyController
+  readonly config: unknown
+}
+
 export interface Design extends Topology<Node, Edge> {
   readonly name?: string
   readonly description?: string
   readonly seed: number
   /** Account quotas for every placement the design uses, by placement key. */
   readonly accounts: ReadonlyMap<string, Account>
+  /** The controllers, by id. */
+  readonly controllers: ReadonlyMap<string, Controller>
 }
 
 const issuesOf = (error: unknown): ReadonlyArray<string> => {
@@ -295,7 +377,7 @@ export interface Resolution {
 export const resolve = (doc: Doc, registry: Components): Resolution => {
   const diagnostics: Array<Diagnostic> = []
   const label = (id: NodeId) => doc.nodes[id]?.name ?? id
-  const error = (code: string, message: string, where: { node?: string; edge?: string }) =>
+  const error = (code: string, message: string, where: { node?: string; edge?: string; controller?: string }) =>
     void diagnostics.push({ level: "error", code, message, ...where })
 
   // Pass 1: every node's component and decoded settings.
@@ -391,33 +473,42 @@ export const resolve = (doc: Doc, registry: Components): Resolution => {
     const source = registry.get(fromSpec.type)
     const target = registry.get(toSpec.type)
     const port = portOf(spec)
-    let config: unknown = {}
-    if (source !== undefined) {
-      const def = (source.ports as PortDefs)[port]
-      if (def === undefined) {
-        error("unknown-port", `${label(spec.from.node)} has no "${port}" output`, { edge: id })
-        continue
-      }
+    const def = source === undefined ? undefined : (source.ports as PortDefs)[port]
+    if (source !== undefined && def === undefined) {
+      error("unknown-port", `${label(spec.from.node)} has no "${port}" output`, { edge: id })
+      continue
+    }
+    if (def !== undefined) {
       const key = `${spec.from.node}:${port}`
       const count = (perPort.get(key) ?? 0) + 1
       perPort.set(key, count)
       if (!def.many && count > 1) error("port-single", `${label(spec.from.node)}'s "${port}" output takes a single connection`, { edge: id })
-      // Unless someone set it, the latency between two nodes is what their placements imply.
-      const placed = nodes.get(spec.from.node)
-      const there = nodes.get(spec.to)
-      const regionOf = (p: Placement) => registry.provider(p.provider)?.regions.find((r) => r.id === p.region)
-      const estimate = placed !== undefined && there !== undefined ? oneWayLatencyMs(placed.placement, there.placement, regionOf) : undefined
-      const given = (spec.settings as { latency?: { mean?: unknown } } | undefined)?.latency
-      const settings = estimate === undefined || given?.mean !== undefined
-        ? spec.settings
-        : { ...spec.settings, latency: { ...given, mean: Math.round(estimate * 10) / 10 } }
-      const decoded = decodeSettings(edgeConfigFor(source, port), settings)
-      if (Result.isFailure(decoded)) {
-        error("bad-edge-settings", `${label(spec.from.node)} → ${label(spec.to)}: ${issuesOf(decoded.failure).join("; ")}`, { edge: id })
-      } else config = decoded.success
     }
     if (target !== undefined && !target.inputs) {
       error("no-input", `${label(spec.to)} is a traffic source and can't receive connections`, { edge: id })
+      continue
+    }
+    // An unknown component is already reported; there is nothing to check the wire against.
+    if (source === undefined || target === undefined || def === undefined) continue
+    const picked = registry.connectorFor({ type: source.type, port }, target.type, spec.connector)
+    if (!picked.ok) {
+      error("bad-connector", `${label(spec.from.node)} → ${label(spec.to)}: ${picked.reason}`, { edge: id })
+      continue
+    }
+    // Unless someone set it, the latency between two nodes is what their placements imply.
+    const placed = nodes.get(spec.from.node)
+    const there = nodes.get(spec.to)
+    const regionOf = (p: Placement) => registry.provider(p.provider)?.regions.find((r) => r.id === p.region)
+    const estimate = placed !== undefined && there !== undefined ? oneWayLatencyMs(placed.placement, there.placement, regionOf) : undefined
+    const given = (spec.settings as { latency?: { mean?: unknown } } | undefined)?.latency
+    const settings = estimate === undefined || given?.mean !== undefined
+      ? spec.settings
+      : { ...spec.settings, latency: { ...given, mean: Math.round(estimate * 10) / 10 } }
+    const schema = Connector.edgeSchema(picked.connector, def)
+    const decoded = decodeSettings(schema, settings)
+    if (Result.isFailure(decoded)) {
+      error("bad-edge-settings", `${label(spec.from.node)} → ${label(spec.to)}: ${issuesOf(decoded.failure).join("; ")}`, { edge: id })
+      continue
     }
     edges.push({
       id,
@@ -426,8 +517,46 @@ export const resolve = (doc: Doc, registry: Components): Resolution => {
       to: spec.to,
       ...(spec.name === undefined ? {} : { name: spec.name }),
       ...(spec.origin === undefined ? {} : { origin: spec.origin }),
-      config
+      connector: picked.connector,
+      explicit: picked.explicit,
+      schema,
+      config: decoded.success
     })
+  }
+
+  // Controllers: a known type, a node it can control, settings it accepts and that make sense on that node.
+  const controllers = new Map<string, Controller>()
+  for (const [id, spec] of Object.entries(doc.controllers ?? {})) {
+    const where = { controller: id, node: spec.target }
+    const def = registry.controller(spec.type)
+    if (def === undefined) {
+      error("unknown-controller", `Controller ${id}: unknown controller type "${spec.type}"`, where)
+      continue
+    }
+    const target = nodes.get(spec.target)
+    if (target === undefined) {
+      if (doc.nodes[spec.target] === undefined) error("controller-target", `Controller ${id} controls ${spec.target}, which doesn't exist`, where)
+      continue
+    }
+    if (!controllerFits(def, target.type)) {
+      error("controller-target", `${def.title} can't control ${label(spec.target)} (${target.component.title})`, where)
+      continue
+    }
+    const decoded = decodeSettings(def.config, spec.settings)
+    if (Result.isFailure(decoded)) {
+      error("bad-controller-settings", `${def.title} on ${label(spec.target)}: ${issuesOf(decoded.failure).join("; ")}`, where)
+      continue
+    }
+    const issues = def.check(target.component, decoded.success)
+    for (const w of issues.filter((i) => i.level === "warning")) {
+      diagnostics.push({ level: "warning", code: "controller-incomplete", message: `${def.title} on ${label(spec.target)} ${w.message}`, ...where })
+    }
+    const errors = issues.filter((i) => i.level === "error")
+    if (errors.length > 0) {
+      error("bad-controller-settings", `${def.title} on ${label(spec.target)}: ${errors.map((i) => i.message).join("; ")}`, where)
+      continue
+    }
+    controllers.set(id, { id, type: spec.type, name: spec.name ?? `${def.title} of ${label(spec.target)}`, target: spec.target, def, config: decoded.success })
   }
 
   // Account quotas, for every placement in use.
@@ -451,7 +580,7 @@ export const resolve = (doc: Doc, registry: Components): Resolution => {
     for (const edge of edges) edgeIndex.set(edge.id, Graph.addEdge(g, nodeIndex.get(edge.from)!, nodeIndex.get(edge.to)!, edge))
   })
   return {
-    design: { ...(doc.name === undefined ? {} : { name: doc.name }), ...(doc.description === undefined ? {} : { description: doc.description }), seed: doc.seed ?? 1, graph, nodeIndex, edgeIndex, accounts },
+    design: { ...(doc.name === undefined ? {} : { name: doc.name }), ...(doc.description === undefined ? {} : { description: doc.description }), seed: doc.seed ?? 1, graph, nodeIndex, edgeIndex, accounts, controllers },
     diagnostics
   }
 }
@@ -476,13 +605,12 @@ export const encode = (design: Design, registry: Components): Doc => {
   const edges: Record<EdgeId, EdgeDoc> = {}
   for (const [, edge] of Graph.edges(design.graph)) {
     const e = edge.data
-    const source = Graph.getNode(design.graph, edge.source)
-    if (Option.isNone(source)) continue
     edges[e.id] = {
       from: { node: e.from, port: e.port },
       to: e.to,
+      ...(e.explicit ? { connector: e.connector.type } : {}),
       ...(e.name === undefined ? {} : { name: e.name }),
-      settings: encodeConfig(edgeConfigFor(source.value.component, e.port), e.config),
+      settings: encodeConfig(e.schema, e.config),
       ...(e.origin === undefined ? {} : { origin: e.origin })
     }
   }
@@ -491,6 +619,10 @@ export const encode = (design: Design, registry: Components): Doc => {
     const settings = account.config as Record<string, unknown>
     if (Object.keys(settings).length > 0) accounts[key] = encodeConfig(registry.provider(account.placement.provider)!.account(account.placement.region), settings)
   }
+  const controllers: Record<string, ControllerDoc> = {}
+  for (const [id, c] of design.controllers) {
+    controllers[id] = { type: c.type, target: c.target, name: c.name, settings: encodeConfig(c.def.config, c.config) }
+  }
   return {
     version: 1,
     ...(design.name === undefined ? {} : { name: design.name }),
@@ -498,7 +630,8 @@ export const encode = (design: Design, registry: Components): Doc => {
     seed: design.seed,
     ...(Object.keys(accounts).length === 0 ? {} : { accounts }),
     nodes,
-    edges
+    edges,
+    ...(Object.keys(controllers).length === 0 ? {} : { controllers })
   }
 }
 
@@ -526,7 +659,7 @@ export const codec = (registry: Components): Schema.Codec<Design, typeof Doc.Enc
           if (design !== undefined) return Effect.succeed(design)
           const issues = diagnostics.map((d) =>
             new SchemaIssue.Pointer(
-              d.node !== undefined ? ["nodes", d.node] : d.edge !== undefined ? ["edges", d.edge] : [],
+              d.controller !== undefined ? ["controllers", d.controller] : d.node !== undefined ? ["nodes", d.node] : d.edge !== undefined ? ["edges", d.edge] : [],
               new SchemaIssue.InvalidValue({ message: d.message })
             )
           )

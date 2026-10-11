@@ -17,7 +17,9 @@ const structure = (d: Doc): string => {
     d.seed,
     // Where a node runs decides which quotas it shares and which regional faults reach it, so it is structure.
     Object.entries(d.nodes).map(([id, n]) => [id, n.type, n.region, n.parent, manifests[n.type]?.container?.decidesRegion ? n.settings : undefined]),
-    Object.entries(d.edges).map(([id, e]) => [id, e.from.node, e.from.port, e.to])
+    // What sits on an edge decides what runs there, so choosing another connector rebuilds too.
+    Object.entries(d.edges).map(([id, e]) => [id, e.from.node, e.from.port, e.to, e.connector]),
+    Object.entries(d.controllers ?? {}).map(([id, c]) => [id, c.type, c.target])
   ])
 }
 
@@ -56,6 +58,9 @@ export const startSync = (): (() => void) => {
     }
     for (const [id, edge] of Object.entries(next.edges)) {
       if (prev.edges[id]?.settings !== edge.settings) client.send({ _tag: "updateEdge", id, settings: edge.settings ?? {} })
+    }
+    for (const [id, controller] of Object.entries(next.controllers ?? {})) {
+      if (prev.controllers?.[id]?.settings !== controller.settings) client.send({ _tag: "updateController", id, settings: controller.settings ?? {} })
     }
   })
 

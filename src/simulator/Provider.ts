@@ -1,4 +1,6 @@
 import type { Schema } from "effect"
+import type { AnyConnector } from "./Connector.ts"
+import type { AnyController } from "./Controller.ts"
 import type { Diagnostic } from "./Diagnostic.ts"
 
 /**
@@ -33,6 +35,13 @@ export interface Provider {
    * more than the account has, provisioned capacity over the account total. `account` is the decoded quota settings.
    */
   readonly audit?: (region: string, members: ReadonlyArray<Member>, account: unknown) => ReadonlyArray<Diagnostic>
+  /**
+   * What the provider puts between its components: Lambda's event source mapping between a queue and a function, say.
+   * A registry built with the provider offers them, and picks them for wires they fit (see `Connector.ts`).
+   */
+  readonly connectors?: ReadonlyArray<AnyConnector>
+  /** Controllers the provider offers besides the core ones (a provider's own autoscaling policies, say). */
+  readonly controllers?: ReadonlyArray<AnyController>
 }
 
 /** A node in a placement, as an audit sees it: its decoded settings. */

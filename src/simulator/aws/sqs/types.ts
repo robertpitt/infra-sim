@@ -1,5 +1,4 @@
 import type { Message } from "../../Message.ts"
-import type { TimerHandle } from "../../VirtualTime.ts"
 import type { Deque } from "./Deque.ts"
 
 /**
@@ -70,12 +69,4 @@ export interface Bucket {
   minAt: number
   prev: Bucket | undefined
   next: Bucket | undefined
-}
-
-/** One ReceiveMessage call's worth of messages (at most ten) and the timer that returns them if nobody deletes them. */
-export interface Delivery {
-  readonly entries: ReadonlyArray<Entry>
-  readonly receipt: number
-  readonly bytes: number
-  timer: TimerHandle | undefined
 }

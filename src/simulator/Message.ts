@@ -13,6 +13,11 @@ export const Message = Schema.Struct({
   bytes: Schema.Number,
   /** Records carried. A batch is one message with `count` above 1. */
   count: Schema.Int,
+  /**
+   * Set on a batch a taker handed over (a poller's batch from a queue), even a batch of one: its records can fail on
+   * their own, and the reply may name them (`ItemFailures`). A plain call with one record isn't a batch.
+   */
+  batched: Schema.optionalKey(Schema.Boolean),
   /** How the caller invoked the receiver. Lambda, for one, treats the two very differently. */
   invocation: Schema.Literals(["sync", "async"]),
   /** What the call does to the receiver: reads or writes. DynamoDB and S3 price and limit them differently. */
@@ -47,8 +52,28 @@ export type CallFailure = Data.TaggedEnum<{
 
 export const { Throttled, Unavailable, Timeout, Failed, Rejected, $is: isFailure, $match: matchFailure } = Data.taggedEnum<CallFailure>()
 
-/** What every component boundary speaks: an effect that may fail with a `CallFailure`. */
-export type Call = Effect.Effect<void, CallFailure>
+/**
+ * A call that succeeded except for some records of its batch, named by position (0-based, in the order the batch was
+ * sent). It is a success, not a failure: a Lambda function that returns `batchItemFailures` ran and returned normally, as
+ * does a DynamoDB `BatchWriteItem` with `UnprocessedItems` or an SQS `SendMessageBatch` with failed entries. What the
+ * caller does about the failed records (redeliver them, retry them, or ignore the report) is the caller's business.
+ *
+ * Records are identified by position rather than by objects of their own so that a batch stays one message with a count:
+ * the common case allocates nothing per record.
+ */
+export interface ItemFailures {
+  readonly _tag: "ItemFailures"
+  /** Positions of the records that failed, ascending. */
+  readonly failed: ReadonlyArray<number>
+}
+
+export const itemFailures = (failed: ReadonlyArray<number>): ItemFailures => ({ _tag: "ItemFailures", failed })
+
+/** What a successful call answers: nothing (all of it worked), or which records of its batch didn't. */
+export type Reply = void | ItemFailures
+
+/** What every component boundary speaks: an effect that may fail with a `CallFailure`, or succeed with a `Reply`. */
+export type Call = Effect.Effect<Reply, CallFailure>
 
 /** Counter name for a failure, e.g. `fail.Throttled`. */
 export const failureCounter = (failure: CallFailure): string => `fail.${failure._tag}`

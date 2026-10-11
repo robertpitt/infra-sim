@@ -4,7 +4,7 @@ import * as Distribution from "../../Distribution.ts"
 import type { Link } from "../../Edge.ts"
 import * as Flow from "../../Flow.ts"
 import type { Limiter } from "../../Limiter.ts"
-import { type CallFailure, Failed, type Message, Throttled } from "../../Message.ts"
+import { type CallFailure, Failed, type ItemFailures, itemFailures, type Message, Throttled } from "../../Message.ts"
 import type { TimerHandle } from "../../VirtualTime.ts"
 import type { Concurrency, Region } from "./concurrency.ts"
 import type { Settings } from "./config.ts"
@@ -20,7 +20,8 @@ import { bump, type Stats } from "./stats.ts"
  * retried a limited number of times).
  */
 export type Attempt = { readonly kind: "throttled"; readonly failure: CallFailure } | { readonly kind: "function"; readonly failure: CallFailure }
-export type Outcome = (attempt: Attempt | undefined) => void
+/** How an attempt ended: `undefined` for success, with `items` when the function returned batch item failures. */
+export type Outcome = (attempt: Attempt | undefined, items?: ItemFailures) => void
 
 /** Everything one function's invocations share. */
 export interface FunctionRuntime {
@@ -43,17 +44,54 @@ export interface FunctionRuntime {
 /** Why a function failed, in words a caller can read. */
 export const describe = (failure: CallFailure): string => ("reason" in failure ? `${failure._tag}: ${failure.reason}` : failure._tag)
 
+/** What the function sends on is its own call, not the batch it was handed: a plain message again. */
+const unbatched = (m: Message): Message => {
+  if (m.batched === undefined) return m
+  const { batched: _, ...plain } = m
+  return plain
+}
+
 /**
  * After its own work, the handler calls whatever is wired downstream. A batch is handled a record at a time, ten at
  * once, unless the function is set to make one call for the whole batch.
  */
 const downstream = (fn: FunctionRuntime, message: Message, c: Settings, done: Flow.Done): Flow.Cancel => {
   const { out, fast } = fn
-  if (message.count > 1 && c.batchCalls === "each") {
-    const each = { ...message, count: 1, bytes: Math.max(1, Math.round(message.bytes / message.count)) }
-    return Flow.forEach(message.count, 10, (_, d) => Flow.fanOut(c.fanOut, out, fast.random, each, d), done)
+  const m = unbatched(message)
+  if (m.count > 1 && c.batchCalls === "each") {
+    const each = { ...m, count: 1, bytes: Math.max(1, Math.round(m.bytes / m.count)) }
+    return Flow.forEach(m.count, 10, (_, d) => Flow.fanOut(c.fanOut, out, fast.random, each, d), done)
   }
-  return Flow.fanOut(c.fanOut, out, fast.random, message, done)
+  return Flow.fanOut(c.fanOut, out, fast.random, m, done)
+}
+
+/**
+ * The same for a handler that reports batch item failures: the records in `failed` already failed in the handler, and a
+ * record whose downstream call fails joins them instead of failing the invocation. `done` always hears success, with the
+ * failed records if there are any.
+ */
+const downstreamReporting = (fn: FunctionRuntime, message: Message, c: Settings, failed: ReadonlyArray<number>, done: Flow.Done): Flow.Cancel => {
+  const { out, fast } = fn
+  const finish = (all: ReadonlyArray<number>): void => done(undefined, all.length === 0 ? undefined : itemFailures(all))
+  const rest: Array<number> = []
+  for (let i = 0, f = 0; i < message.count; i++) {
+    if (failed[f] === i) f++
+    else rest.push(i)
+  }
+  if (rest.length === 0 || c.fanOut === "none") {
+    finish(failed)
+    return Flow.noCancel
+  }
+  const plain = unbatched(message)
+  const each = Math.max(1, Math.round(plain.bytes / plain.count))
+  if (c.batchCalls === "each") {
+    const record = { ...plain, count: 1, bytes: each }
+    return Flow.forEachSettled(rest, 10, (_, d) => Flow.fanOut(c.fanOut, out, fast.random, record, d), (bad) =>
+      finish(bad.length === 0 ? failed : [...failed, ...bad].sort((a, b) => a - b)))
+  }
+  // One call for what is left of the batch: if it fails, every record in it failed.
+  return Flow.fanOut(c.fanOut, out, fast.random, { ...plain, count: rest.length, bytes: each * rest.length }, (failure) =>
+    finish(failure === undefined ? failed : Array.from({ length: message.count }, (_, i) => i)))
 }
 
 /**
@@ -125,13 +163,16 @@ export const begin = (fn: FunctionRuntime, message: Message, done: Outcome): Flo
     if (reset) environments.discard()
     else environments.release(fast.now(), born, lifetime)
   }
-  const complete = (failure: CallFailure | undefined): void => {
+  const complete = (failure: CallFailure | undefined, items?: ItemFailures): void => {
     if (finished) return
     finished = true
     timeout?.cancel()
     if (haveEnvironment) stats.duration.add(fast.now() - startedAt)
     settle(false)
-    if (failure === undefined) return done(undefined)
+    if (failure === undefined) {
+      if (items !== undefined) bump(stats.itemFailures, items.failed.length)
+      return done(undefined, items)
+    }
     bump(stats.errors)
     done({ kind: "function", failure })
   }
@@ -151,6 +192,13 @@ export const begin = (fn: FunctionRuntime, message: Message, done: Outcome): Flo
   const afterWork = (): void => {
     if (finished) return
     const p = handler.errorRate
+    if (handler.batch.errors === "report" && message.batched === true) {
+      // The handler catches each record's error and returns the ones that failed: the invocation itself succeeds.
+      const failed: Array<number> = []
+      if (p > 0) for (let i = 0; i < message.count; i++) if (fast.random.nextDoubleUnsafe() < p) failed.push(i)
+      cancelWork = downstreamReporting(fn, message, fast.settings(), failed, complete)
+      return
+    }
     if (p > 0) {
       // Rolled per record when asked to: any failing record fails the whole batch.
       const records = handler.batch.errors === "record" ? Math.max(1, message.count) : 1

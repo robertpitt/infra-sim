@@ -6,9 +6,9 @@ export interface Metric {
   readonly rate: Counter
 }
 
-export const bump = (m: Metric): void => {
-  m.total++
-  m.rate.n++
+export const bump = (m: Metric, n = 1): void => {
+  m.total += n
+  m.rate.n += n
 }
 
 /**
@@ -26,6 +26,8 @@ export interface Stats {
   readonly timeouts: Metric
   /** Invocations that ended in a function error, timeouts included (CloudWatch's `Errors`). */
   readonly errors: Metric
+  /** Records a successful invocation returned as batch item failures (the invocation isn't an error). */
+  readonly itemFailures: Metric
   /** Asynchronous retries scheduled, after a function error or a throttle. */
   readonly asyncRetries: Metric
   /** Asynchronous events that finished without error. */
@@ -48,6 +50,7 @@ export const makeStats = (meter: Meter): Stats => {
     throttles: metric("throttles"),
     timeouts: metric("timeouts"),
     errors: metric("errors"),
+    itemFailures: metric("itemFailures"),
     asyncRetries: metric("asyncRetries"),
     asyncSucceeded: metric("asyncSucceeded"),
     asyncFailed: metric("asyncFailed"),

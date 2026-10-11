@@ -117,9 +117,12 @@ const SMOOTHING_FRAMES = 4
 const EMPTY: Stats = { rates: {}, gauges: {}, dist: {} }
 
 /** Rates averaged over the last second, gauges from the latest frame, distributions weighted by sample count. */
-export const smoothed = (scope: "nodes" | "edges", id: string): Stats | undefined => {
+export const smoothed = (scope: "nodes" | "edges" | "controllers", id: string): Stats | undefined => {
   const frames = history.tail(SMOOTHING_FRAMES)
-  const stats = frames.flatMap((f) => (f[scope][id] === undefined ? [] : [f[scope][id]!]))
+  const stats = frames.flatMap((f) => {
+    const s = f[scope]?.[id]
+    return s === undefined ? [] : [s]
+  })
   const latest = stats[stats.length - 1]
   if (latest === undefined) return undefined
   const rates: Record<string, number> = {}

@@ -2,10 +2,10 @@ import type { Fast } from "../../Component.ts"
 import type { Link } from "../../Edge.ts"
 import type { Message } from "../../Message.ts"
 import { API_BATCH, MAX_BATCH_BYTES, type QueueConfig, REDRIVE_SYSTEM_VELOCITY } from "./config.ts"
-import type { Deliveries } from "./delivery.ts"
+import type { Deliveries, Delivery } from "./delivery.ts"
 import type { Tallies } from "./metrics.ts"
 import type { QueueStore } from "./store.ts"
-import type { Delivery, Entry } from "./types.ts"
+import type { Entry } from "./types.ts"
 
 /** While a redrive is running it moves messages in steps this long. */
 const STEP_MS = 100

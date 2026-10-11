@@ -1,10 +1,11 @@
 import { Cause, Clock, Context, Effect, Exit, Fiber, Layer, PubSub, Queue, Ref, Schema, Scope, Stream } from "effect"
 import { type Manifest } from "./Component.ts"
+import * as Connector from "./Connector.ts"
+import type * as Controller from "./Controller.ts"
 import * as Describe from "./Describe.ts"
 import { Diagnostic, hasErrors } from "./Diagnostic.ts"
 import * as Design from "./Design.ts"
 import { diagnose } from "./Diagnostics.ts"
-import * as Edge from "./Edge.ts"
 import * as Fault from "./Fault.ts"
 import { Registry } from "./Registry.ts"
 import * as Simulation from "./Simulation.ts"
@@ -42,6 +43,8 @@ export const Command = Schema.Union([
   Schema.TaggedStruct("updateEdge", { id: Schema.String, settings: Schema.Record(Schema.String, Schema.Unknown) }),
   /** Replace the account-level quotas of a placement such as `aws:us-east-1`, live. */
   Schema.TaggedStruct("updateAccount", { placement: Schema.String, settings: Schema.Record(Schema.String, Schema.Unknown) }),
+  /** Replace a controller's settings with a full set of overrides, live. */
+  Schema.TaggedStruct("updateController", { id: Schema.String, settings: Schema.Record(Schema.String, Schema.Unknown) }),
   Schema.TaggedStruct("inject", { target: Fault.Target, fault: Fault.Fault, durationMs: Schema.optionalKey(Schema.Number) }),
   Schema.TaggedStruct("clearFault", { id: Schema.String }),
   Schema.TaggedStruct("clearFaults", {})
@@ -79,7 +82,7 @@ export const Event = Schema.Union([
 ])
 export type Event = typeof Event.Type
 
-/** Static facts a UI needs once: what components exist, the universal edge form, the fault kinds. */
+/** Static facts a UI needs once: what components and connectors exist, the transport form, the fault kinds. */
 export interface ProviderInfo {
   readonly id: string
   readonly title: string
@@ -92,7 +95,12 @@ export interface ProviderInfo {
 export interface Catalog {
   readonly providers: ReadonlyArray<ProviderInfo>
   readonly components: ReadonlyArray<Manifest>
-  readonly edge: ReadonlyArray<Describe.FieldSpec>
+  /** What can sit on an edge. An edge's form is its port's settings, its connector's, then `transport`. */
+  readonly connectors: ReadonlyArray<Connector.Manifest>
+  /** Transport's settings, which every edge has. */
+  readonly transport: ReadonlyArray<Describe.FieldSpec>
+  /** What can be attached to a node to change it while it runs. */
+  readonly controllers: ReadonlyArray<Controller.Manifest>
   readonly faults: ReadonlyArray<Fault.FaultKind>
 }
 
@@ -174,6 +182,29 @@ export function make(options: Options = {}) {
       yield* Ref.update(state, (s) => ({ ...s, live: undefined }))
     })
 
+    /** What the design checks found last, as sent: a live edit only sends them again when they change. */
+    let reported = ""
+    const report = (diagnostics: ReadonlyArray<Diagnostic>) =>
+      Effect.suspend(() => {
+        reported = JSON.stringify(diagnostics)
+        return emit({ _tag: "diagnostics", diagnostics })
+      })
+
+    /**
+     * A live edit was applied: keep the engine's copy of the document in step, and check the design again. An edit can
+     * fix a problem or make one that the running simulation doesn't see (a controller now names a setting, an account
+     * total is now over its quota), so the checks are what a host shows, not the run.
+     */
+    const edited = (change: (doc: Design.Doc) => Design.Doc) =>
+      Effect.gen(function*() {
+        const { doc } = yield* Ref.get(state)
+        if (doc === undefined) return
+        const next = change(doc)
+        yield* Ref.update(state, (s) => ({ ...s, doc: next }))
+        const diagnostics = diagnose(next, registry)
+        if (JSON.stringify(diagnostics) !== reported) yield* report(diagnostics)
+      })
+
     // --- Build ---------------------------------------------------------------------------------------------
     const build = Effect.gen(function*() {
       yield* teardown
@@ -181,7 +212,7 @@ export function make(options: Options = {}) {
       if (doc === undefined) return
       const diagnostics = diagnose(doc, registry)
       yield* emit({ _tag: "reset" })
-      yield* emit({ _tag: "diagnostics", diagnostics })
+      yield* report(diagnostics)
       const fail = (phase: Phase) =>
         Ref.update(state, (s): State => ({ ...s, phase, effective: 0 })).pipe(
           Effect.andThen(emit({ _tag: "faults", faults: [] })),
@@ -198,10 +229,7 @@ export function make(options: Options = {}) {
       )
       if (built._tag === "Failure") {
         yield* Scope.close(liveScope, Exit.void)
-        yield* emit({
-          _tag: "diagnostics",
-          diagnostics: [...diagnostics, { level: "error", code: "make-failed", node: built.failure.node, message: `${built.failure.node}: ${built.failure.message}` }]
-        })
+        yield* report([...diagnostics, { level: "error", code: "make-failed", node: built.failure.node, message: `${built.failure.node}: ${built.failure.message}` }])
         return yield* fail("error")
       }
       const sim = built.success
@@ -318,17 +346,31 @@ export function make(options: Options = {}) {
           case "updateNode":
             if (live === undefined) return
             return yield* live.sim.configureNode(command.id, command.settings).pipe(
+              Effect.flatMap(() => edited((d) => Design.patchNode(d, command.id, { settings: command.settings }))),
               Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No node "${command.id}"`]))
             )
           case "updateEdge":
             if (live === undefined) return
             return yield* live.sim.configureEdge(command.id, command.settings).pipe(
+              Effect.flatMap(() => edited((d) => (d.edges[command.id] === undefined ? d : { ...d, edges: { ...d.edges, [command.id]: { ...d.edges[command.id]!, settings: command.settings } } }))),
               Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No edge "${command.id}"`]))
             )
           case "updateAccount":
             if (live === undefined) return
             return yield* live.sim.configureAccount(command.placement, command.settings).pipe(
+              Effect.flatMap(() => edited((d) => ({ ...d, accounts: { ...d.accounts, [command.placement]: command.settings } }))),
               Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No account for "${command.placement}" in this design`]))
+            )
+          case "updateController":
+            if (live === undefined) return
+            return yield* live.sim.configureController(command.id, command.settings).pipe(
+              Effect.flatMap(() =>
+                edited((d) => {
+                  const c = d.controllers?.[command.id]
+                  return c === undefined ? d : { ...d, controllers: { ...d.controllers, [command.id]: { ...c, settings: command.settings } } }
+                })
+              ),
+              Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No controller "${command.id}"`]))
             )
           case "inject": {
             if (live === undefined) return
@@ -365,7 +407,9 @@ export function make(options: Options = {}) {
           account: Object.fromEntries(p.regions.map((r) => [r.id, Describe.fields(p.account(r.id))]))
         })),
         components: registry.manifests,
-        edge: Describe.fields(Edge.Config),
+        connectors: registry.connectorManifests,
+        transport: Connector.transportFields(),
+        controllers: registry.controllerManifests,
         faults: Fault.catalog
       }
     })

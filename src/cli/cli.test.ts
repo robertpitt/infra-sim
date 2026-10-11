@@ -95,7 +95,7 @@ describe("help and usage", () => {
 describe("discovering what exists", () => {
   it("lists the examples, and prints one", async () => {
     const listed = json<Array<{ id: string }>>((await cli(["examples", "--json"])).out)
-    expect(listed.map((e) => e.id)).toEqual(["orders", "retry-storm", "multi-region", "fan-out", "poshub", "blank"])
+    expect(listed.map((e) => e.id)).toEqual(["orders", "retry-storm", "multi-region", "fan-out", "poshub", "cluster", "blank"])
     expect((await cli(["examples", "show", "orders"])).out).toMatch(/^version: 1/)
     expect((await cli(["examples", "path", "orders"])).out).toMatch(/01-orders\.yaml/)
   })

@@ -1,5 +1,5 @@
 import { examples } from "#examples"
-import { Design } from "#simulator"
+import { Connector, Controller, Design } from "#simulator"
 import { type ReactNode, useMemo, useState } from "react"
 import { PALETTE_MIME } from "../canvas/Canvas.tsx"
 import { NODE_W, nodeHeight } from "../canvas/geometry.ts"
@@ -9,24 +9,28 @@ import { useStats } from "../canvas/stats.ts"
 import * as viewport from "../canvas/viewport.ts"
 import { useStore } from "../lib/store.ts"
 import {
+  addController,
   addNode,
   doc,
+  removeController,
   removeSelection,
   renameNode,
   resetAccount,
   resetNodeSettings,
   select,
   setAccountSetting,
+  setControllerSetting,
   setDesignName,
+  setEdgeConnector,
   setEdgeSetting,
   setNodeRegion,
   setNodeSetting,
   setSeed
 } from "../state/document.ts"
-import { accountFields, catalog, registry } from "../state/engine.ts"
+import { accountFields, catalog, connectorOf, registry } from "../state/engine.ts"
 import { openExample } from "../state/files.ts"
 import { run } from "../state/run.ts"
-import type { ComponentManifest } from "../state/types.ts"
+import type { ComponentManifest, ControllerManifest } from "../state/types.ts"
 import { FaultPanel } from "./FaultPanel.tsx"
 import { Icon } from "./Icon.tsx"
 import { Metrics } from "./Metrics.tsx"
@@ -65,9 +69,12 @@ function Section({ title, children, aside, open: initial = true }: { title: Reac
   )
 }
 
-const Diagnostics = ({ node, edge }: { node?: string; edge?: string }) => {
+const Diagnostics = ({ node, edge, controller }: { node?: string; edge?: string; controller?: string }) => {
   const all = useStore(run, (s) => s.diagnostics)
-  const mine = all.filter((d) => (node !== undefined ? d.node === node : edge !== undefined ? d.edge === edge : true))
+  // A controller's problems name its node too; they are shown with the controller.
+  const mine = all.filter((d) =>
+    controller !== undefined ? d.controller === controller : node !== undefined ? d.node === node && d.controller === undefined : edge !== undefined ? d.edge === edge : true
+  )
   if (mine.length === 0) return null
   return (
     <ul className="diagnostics">
@@ -366,6 +373,7 @@ function NodePanel({ id }: { id: string }) {
           manifest?.container?.decidesRegion && placement !== undefined && <FaultPanel target={{ kind: "region", id: placement }} />
         ) : (
           <>
+            <Controllers target={id} type={spec.type} />
             <FaultPanel target={{ kind: "node", id }} />
             <Section title="Live metrics">
               <Metrics stats={stats} />
@@ -374,6 +382,65 @@ function NodePanel({ id }: { id: string }) {
         )}
       </div>
     </>
+  )
+}
+
+/**
+ * What changes this node while it runs: each controller attached to it with its settings and what it is doing, and a
+ * way to attach another. A controller acts only through the node's settings, so its changes show in the run, not here.
+ */
+function Controllers({ target, type }: { target: string; type: string }) {
+  const attached = useStore(doc, (s) => s.design.controllers)
+  const available = useStore(catalog, (s) => s.controllers)
+  const mine = Object.entries(attached ?? {}).filter(([, c]) => c.target === target)
+  const fitting = available.filter((c) => Controller.fits(c, type))
+  if (fitting.length === 0) return null
+  return (
+    <Section title="Controllers" open={mine.length > 0}>
+      {mine.length === 0 && <p className="help">Nothing changes this while it runs. Attach a controller to scale one of its settings to its load.</p>}
+      {mine.map(([id, c]) => (
+        <AttachedController key={id} id={id} spec={c} manifest={available.find((m) => m.type === c.type)} />
+      ))}
+      <div className="field row">
+        <span className="field-lead">
+          <label className="field-label">Attach</label>
+        </span>
+        <select
+          value=""
+          aria-label="Attach a controller"
+          onChange={(e) => {
+            if (e.target.value !== "") addController(e.target.value, target)
+          }}
+        >
+          <option value="">Choose…</option>
+          {fitting.map((c) => (
+            <option key={c.type} value={c.type}>
+              {c.title}
+            </option>
+          ))}
+        </select>
+      </div>
+    </Section>
+  )
+}
+
+function AttachedController({ id, spec, manifest }: { id: string; spec: { readonly type: string; readonly settings?: Readonly<Record<string, unknown>> }; manifest: ControllerManifest | undefined }) {
+  const stats = useStats("controllers", id)
+  return (
+    <div className="controller" data-controller-id={id}>
+      <div className="controller-head">
+        <Icon name={manifest?.icon ?? "charts"} size={14} />
+        <span className="controller-title">{manifest?.title ?? spec.type}</span>
+        <button className="icon-btn" title="Detach this controller" aria-label="Detach this controller" onClick={() => removeController(id)}>
+          <Icon name="trash" size={13} />
+        </button>
+      </div>
+      <Diagnostics controller={id} />
+      {manifest !== undefined && (
+        <SettingsForm fields={manifest.settings} values={spec.settings ?? {}} onChange={(path, value) => setControllerSetting(id, path, value)} />
+      )}
+      {stats !== undefined && <Metrics stats={stats} />}
+    </div>
   )
 }
 
@@ -402,7 +469,7 @@ function Quotas({ placement, provider, region }: { placement: string; provider: 
 function EdgePanel({ id }: { id: string }) {
   const design = useStore(doc, (s) => s.design)
   const manifests = useStore(catalog, (s) => s.byType)
-  const edgeForm = useStore(catalog, (s) => s.edge)
+  const transport = useStore(catalog, (s) => s.transport)
   const stats = useStats("edges", id)
   const edge = design.edges[id]
   if (edge === undefined) return null
@@ -410,7 +477,10 @@ function EdgePanel({ id }: { id: string }) {
   const to = design.nodes[edge.to]
   const port = Design.portOf(edge)
   const portManifest = from === undefined ? undefined : manifests[from.type]?.outputs.find((o) => o.port === port)
-  const fields = [...(portManifest?.settings ?? []), ...edgeForm]
+  // What sits on the edge: the one the document names, or the one that fits best. Its form follows the port's own.
+  const on = from === undefined || to === undefined ? undefined : connectorOf({ type: from.type, port }, to.type, edge.connector)
+  const fields = Connector.edgeFields(portManifest?.settings ?? [], on?.connector.settings ?? [], transport)
+  const inferred = from === undefined || to === undefined ? undefined : connectorOf({ type: from.type, port }, to.type)?.connector
   return (
     <>
       <div className="side-bar">
@@ -422,19 +492,47 @@ function EdgePanel({ id }: { id: string }) {
       <div className="side-scroll">
         <header className="panel-head">
           <span className="node-icon edge-icon">
-            <Icon name="chevron" size={16} />
+            <Icon name={on?.connector.icon ?? "chevron"} size={16} />
           </span>
           <div className="panel-title">
             <span className="title-static">
               {from?.name ?? edge.from.node} <Icon name="chevron" size={12} /> {to?.name ?? edge.to}
             </span>
             <span className="muted small">
-              Connection{(manifests[from?.type ?? ""]?.outputs.length ?? 1) > 1 ? ` · ${portManifest?.label ?? port}` : ""}
+              {on?.connector.title ?? "Connection"}
+              {(manifests[from?.type ?? ""]?.outputs.length ?? 1) > 1 ? ` · ${portManifest?.label ?? port}` : ""}
             </span>
           </div>
         </header>
         <Diagnostics edge={id} />
-        <Section title="Policy">
+        {on !== undefined && on.choices.length > 1 && (
+          <Section title="Between them">
+            <div className="field row">
+              <span className="field-lead">
+                <label className="field-label">Connector</label>
+                <span className="hint" title="What sits on this connection between the two components. By default the most specific one that fits.">
+                  <Icon name="info" size={11} />
+                </span>
+              </span>
+              <select
+                value={edge.connector ?? ""}
+                onChange={(e) => setEdgeConnector(id, e.target.value === "" ? undefined : e.target.value)}
+                aria-label="Connector"
+              >
+                <option value="" title={inferred === undefined ? undefined : `${inferred.title}, the most specific connector that fits`}>
+                  Best fit
+                </option>
+                {on.choices.map((c) => (
+                  <option key={c.type} value={c.type}>
+                    {c.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {on.connector.description !== "" && <p className="help">{on.connector.description}</p>}
+          </Section>
+        )}
+        <Section title={on === undefined || Connector.isPlain(on.connector.type) ? "Policy" : on.connector.title}>
           <SettingsForm fields={fields} values={edge.settings ?? {}} onChange={(path, value) => setEdgeSetting(id, path, value)} />
         </Section>
         <FaultPanel target={{ kind: "edge", id }} />

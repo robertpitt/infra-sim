@@ -2,11 +2,40 @@ import { Duration } from "effect"
 import type { Fast } from "../../Component.ts"
 import type { Link } from "../../Edge.ts"
 import type { Message } from "../../Message.ts"
+import type { Lease, LeasedRecord } from "../../Protocol.ts"
 import type { TimerHandle } from "../../VirtualTime.ts"
 import { DLQ_RETRY_MS, type QueueConfig } from "./config.ts"
 import type { Tallies } from "./metrics.ts"
 import type { QueueStore } from "./store.ts"
-import type { Delivery, Entry } from "./types.ts"
+import type { Entry } from "./types.ts"
+
+/**
+ * One ReceiveMessage call's worth of messages (at most ten) and the timer that returns them if nobody deletes them.
+ * It is the queue's `Lease`: a consumer sees the messages it still owns and deletes them with `ack`.
+ */
+export class Delivery implements Lease {
+  timer: TimerHandle | undefined = undefined
+
+  constructor(
+    readonly entries: ReadonlyArray<Entry>,
+    readonly receipt: number,
+    readonly bytes: number,
+    private readonly owner: Deliveries
+  ) {}
+
+  get count(): number {
+    return this.entries.length
+  }
+
+  /** The messages this receive still owns: hidden, and not received again under a newer receipt. */
+  each(visit: (record: LeasedRecord) => void): void {
+    for (const e of this.entries) if (e.status === "hidden" && e.receipt === this.receipt) visit(e)
+  }
+
+  ack(keep?: ReadonlySet<LeasedRecord>): void {
+    this.owner.ack(this, keep)
+  }
+}
 
 export interface DeliveryEnv {
   readonly store: QueueStore
@@ -49,20 +78,28 @@ export class Deliveries {
     const entries: Array<Entry> = []
     const bytes = store.receive(max, receipt, byteBudget, entries)
     if (entries.length === 0) return undefined
-    const delivery: Delivery = { entries, receipt, bytes, timer: undefined }
+    const delivery = new Delivery(entries, receipt, bytes, this)
     // The visibility timeout is read when the message is received: changing it applies to the next receive.
     delivery.timer = fast.after(Duration.toMillis(fast.settings().visibilityTimeout), this.lapse, delivery)
     tallies.received.add(entries.length)
     return delivery
   }
 
-  /** The consumer finished: delete what this receive still owns. Returns how many were deleted. */
-  ack(delivery: Delivery): number {
+  /**
+   * The consumer finished: delete what this receive still owns, except what it reported failed (`keep`), which stays
+   * hidden until the visibility timeout returns it. Returns how many were deleted.
+   */
+  ack(delivery: Delivery, keep?: ReadonlySet<LeasedRecord>): number {
     const { store, tallies } = this.env
     let deleted = 0
     let duplicates = 0
+    let kept = 0
     for (const entry of delivery.entries) {
       if (entry.receipt === delivery.receipt) {
+        if (keep?.has(entry)) {
+          kept++
+          continue
+        }
         // Still this receive's: delete it (unless it left some other way, such as retention).
         if (entry.status === "hidden") {
           store.remove(entry)
@@ -70,8 +107,11 @@ export class Deliveries {
         }
       } else duplicates++
     }
-    delivery.timer?.cancel()
-    delivery.timer = undefined
+    // Messages it kept still need their visibility timeout to bring them back.
+    if (kept === 0) {
+      delivery.timer?.cancel()
+      delivery.timer = undefined
+    }
     tallies.deleted.add(deleted)
     tallies.duplicates.add(duplicates)
     if (deleted > 0) this.env.wake()
