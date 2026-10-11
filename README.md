@@ -20,6 +20,10 @@ npm run dev        # http://localhost:5173
 | `npm run typecheck` | Type-checks the engine (with no DOM types) and the app. |
 | `npm run bench -- poshub 60000 10` | CPU cost of simulating an example, at a multiple of its traffic. See `tools/`. |
 
+## Deployment
+
+Every push to `main` runs the typecheck and tests, builds the app, and publishes `dist/` to GitHub Pages ([`.github/workflows/pages.yml`](.github/workflows/pages.yml)): https://robertpitt.github.io/infra-sim/. One-time setup: in the repository's **Settings → Pages**, set **Source** to **GitHub Actions**.
+
 ## Designs are files
 
 A design is YAML or JSON. The [`examples/`](examples) folder holds the ones that ship with the app, and the app opens and saves the same format (File menu).

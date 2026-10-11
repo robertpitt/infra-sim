@@ -20,7 +20,5 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
-  "include": ["src", "vite.config.ts", "vitest.config.ts"],
-  // Tests are checked (and run) by vitest and `tsconfig.simulator.json`, so a stale test never blocks the app build.
-  "exclude": ["src/**/*.test.ts"]
+  "include": ["src", "vite.config.ts", "vitest.config.ts"]
 }
