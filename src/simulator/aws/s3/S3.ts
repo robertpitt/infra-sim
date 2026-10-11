@@ -1,7 +1,11 @@
 import { Duration, Effect, SubscriptionRef } from "effect"
 import * as Distribution from "../../Distribution.ts"
 import * as Flow from "../../Flow.ts"
-import { type Message, Rejected, Throttled } from "../../Message.ts"
+import type { Message } from "../../Message.ts"
+import { Outbox } from "../../kit/Outbox.ts"
+import * as Refuse from "../../kit/Refuse.ts"
+import { chance, mix, passes, records } from "../../kit/Shape.ts"
+import { counters, tallies, totals } from "../../kit/Tally.ts"
 import * as Aws from "../provider.ts"
 import { ARCHIVE_CLASSES, config, ports, state } from "./config.ts"
 import { carriesBody, isUpload, type Kind, newPlan, plan as planTransfer, tooLarge } from "./transfer.ts"
@@ -71,34 +75,19 @@ export const S3 = Aws.component({
       const table = new PrefixTable(node.id)
       const scratch = newPlan()
 
-      const served = { reads: 0, writes: 0, deletes: 0, heads: 0, lists: 0, copies: 0, deleteMarkers: 0, multipartParts: 0 }
-      const throttled = { reads: 0, writes: 0 }
-      const refused = { archived: 0, tooLarge: 0 }
-      const notifications = { pending: 0, delivered: 0, undelivered: 0 }
-      const replication = { pending: 0, delivered: 0, undelivered: 0 }
+      const served = tallies(undefined, ["reads", "writes", "deletes", "heads", "lists", "copies", "deleteMarkers", "multipartParts"])
+      const throttled = tallies(undefined, ["reads", "writes"])
+      const refused = tallies(undefined, ["archived", "tooLarge"])
       let transferring = 0
 
       // CloudWatch's request metrics, by their names: AllRequests is `requests`, GetRequests `get`, and so on. The
       // per-kind counters count requests that were served; `requests` counts every request, refused ones too.
-      const requests = node.meter.counter("requests")
-      const gets = node.meter.counter("get")
-      const heads = node.meter.counter("head")
-      const lists = node.meter.counter("list")
-      const puts = node.meter.counter("put")
-      const posts = node.meter.counter("post")
-      const copies = node.meter.counter("copy")
-      const deletes = node.meter.counter("delete")
-      const deleteMarkers = node.meter.counter("deleteMarkers")
-      const bytesDownloaded = node.meter.counter("bytesDownloaded")
-      const bytesUploaded = node.meter.counter("bytesUploaded")
-      const clientErrors = node.meter.counter("4xxErrors")
-      const serverErrors = node.meter.counter("5xxErrors")
+      const m = counters(node.meter, ["requests", "get", "head", "list", "put", "post", "copy", "delete", "deleteMarkers", "bytesDownloaded", "bytesUploaded", "4xxErrors", "5xxErrors"])
       const firstByteLatency = node.meter.sampler("firstByteLatency")
       const totalRequestLatency = node.meter.sampler("totalRequestLatency")
-      const delivered = node.meter.counter("delivered")
-      const undelivered = node.meter.counter("undelivered")
-      const replicated = node.meter.counter("replicated")
-      const replicationFailed = node.meter.counter("replicationFailed")
+      // Each destination hears about every change on its own, so a slow one never holds up the others.
+      const notifications = new Outbox(fast, tallies(node.meter, ["delivered"]).delivered, tallies(node.meter, ["undelivered"]).undelivered)
+      const replication = new Outbox(fast, tallies(node.meter, ["replicated"]).replicated, tallies(node.meter, ["replicationFailed"]).replicationFailed)
       const replicationLag = node.meter.sampler("replicationLag")
 
       node.meter.gaugeUnsafe("transferring", () => transferring)
@@ -113,27 +102,9 @@ export const S3 = Aws.component({
       node.meter.gaugeUnsafe("writeCeiling", () => Math.max(floorOf(false), table.highest(false)))
 
       // Failures are values with no per-call content: build each once.
-      const slowDown = Effect.fail(Throttled({ node: node.id, reason: "503 Slow Down: reduce your request rate" }))
-      const archivedObject = Effect.fail(Rejected({ node: node.id, reason: "403 InvalidObjectState: the object is archived; restore it before reading" }))
-      const entityTooLarge = Effect.fail(Rejected({ node: node.id, reason: "400 EntityTooLarge: a single PUT is limited to 5 GB; use multipart upload (and an object is at most 48.8 TiB)" }))
-
-      // Each destination hears about every change on its own, so a slow one never holds up the others. S3 calls Lambda
-      // asynchronously, so deliveries are marked async. The delay is S3's own, before any network hop.
-      const arm = (link: (typeof events)[number], event: Message): void => {
-        notifications.pending++
-        fast.after(Distribution.latencyMs(fast.settings().notificationDelay, fast.random), () => {
-          link.send(event, (failure) => {
-            notifications.pending--
-            if (failure === undefined) {
-              notifications.delivered++
-              delivered.n++
-            } else {
-              notifications.undelivered++
-              undelivered.n++
-            }
-          })
-        }, undefined)
-      }
+      const slowDown = Refuse.throttled(node.id, "503 Slow Down: reduce your request rate")
+      const archivedObject = Refuse.rejected(node.id, "403 InvalidObjectState: the object is archived; restore it before reading")
+      const entityTooLarge = Refuse.rejected(node.id, "400 EntityTooLarge: a single PUT is limited to 5 GB; use multipart upload (and an object is at most 48.8 TiB)")
 
       /** One event per object created (`created`) or removed, to every destination subscribed to that kind. */
       const notify = (message: Message, objects: number, created: boolean): void => {
@@ -147,11 +118,12 @@ export const S3 = Aws.component({
           const subscription = SubscriptionRef.getUnsafe(link.config)
           if (subscription.eventTypes !== "all" && (subscription.eventTypes === "created") !== created) continue
           for (let i = 0; i < messages; i++) {
-            if (subscription.filter < 1 && fast.random.nextDoubleUnsafe() >= subscription.filter) continue
+            if (!passes(fast.random, subscription.filter)) continue
             const event: Message = { ...base, bytes: EVENT_BYTES, count: each + (i < extra ? 1 : 0), operation: "write", invocation: "async" }
-            arm(link, event)
+            // S3 calls Lambda asynchronously. The delay is S3's own, before any network hop.
+            notifications.send(link, event, Distribution.latencyMs(c.notificationDelay, fast.random))
             // At-least-once: some are delivered twice, each copy on its own delay.
-            if (c.duplicateRate > 0 && fast.random.nextDoubleUnsafe() < c.duplicateRate) arm(link, event)
+            if (chance(fast.random, c.duplicateRate)) notifications.send(link, event, Distribution.latencyMs(c.notificationDelay, fast.random))
           }
         }
       }
@@ -164,8 +136,7 @@ export const S3 = Aws.component({
         if (replicas.length === 0 || message.group === REPLICA_GROUP) return
         const c = fast.settings()
         for (const link of replicas) {
-          const rule = SubscriptionRef.getUnsafe(link.config)
-          if (rule.filter < 1 && fast.random.nextDoubleUnsafe() >= rule.filter) continue
+          if (!passes(fast.random, SubscriptionRef.getUnsafe(link.config).filter)) continue
           const now = fast.now()
           let lag = Distribution.latencyMs(c.replicationDelay, fast.random)
           if (c.replicationTimeControl) {
@@ -175,52 +146,28 @@ export const S3 = Aws.component({
             lag = Math.max(lag, pipe.busyUntil - now)
           }
           const replica: Message = { ...message, bytes, operation: "write", invocation: "async", group: REPLICA_GROUP }
-          replication.pending++
-          fast.after(lag, () => {
-            link.send(replica, (failure) => {
-              replication.pending--
-              if (failure === undefined) {
-                replication.delivered++
-                replicated.n++
-                replicationLag.add(fast.now() - now)
-              } else {
-                replication.undelivered++
-                replicationFailed.n++
-              }
-            })
-          }, undefined)
+          replication.send(link, replica, lag, 1, (failure) => failure === undefined && replicationLag.add(fast.now() - now))
         }
       }
 
       return {
         call: (message) => {
           const c = fast.settings()
-          const count = message.count >= 1 ? message.count : 1
+          const count = records(message)
           const reading = message.operation === "read"
 
           // The engine says only read or write, so the mix of request kinds is a setting of the bucket. A draw is made
           // only when there is a mix to draw from, so a bucket with none consumes no randomness.
-          let kind: Kind
-          if (reading) {
-            kind = "get"
-            if (c.listShare > 0 || c.headShare > 0) {
-              const u = fast.random.nextDoubleUnsafe()
-              kind = u < c.listShare ? "list" : u < c.listShare + c.headShare ? "head" : "get"
-            }
-          } else {
-            kind = "put"
-            if (c.deleteShare > 0 || c.copyShare > 0) {
-              const u = fast.random.nextDoubleUnsafe()
-              kind = u < c.deleteShare ? "delete" : u < c.deleteShare + c.copyShare ? "copy" : "put"
-            }
-          }
+          const kind: Kind = reading
+            ? mix(fast.random, "get", "list", c.listShare, "head", c.headShare)
+            : mix(fast.random, "put", "delete", c.deleteShare, "copy", c.copyShare)
           // HEAD, LIST and DELETE carry no body.
           const body = carriesBody(kind) && message.bytes > 0 ? message.bytes : 0
 
-          requests.n += count
+          m.requests.n += count
           if (tooLarge(kind, body, count, c.multipart.enabled)) {
-            refused.tooLarge += count
-            clientErrors.n += count
+            refused.tooLarge.add(count)
+            m["4xxErrors"].n += count
             return entityTooLarge
           }
 
@@ -234,16 +181,16 @@ export const S3 = Aws.component({
           const floor = reading ? (directory ? DIRECTORY_RATE.read : PREFIX_RATE.read) : (directory ? DIRECTORY_RATE.write : PREFIX_RATE.write)
           const allowance = table.get(directory ? 0 : prefixIndex(message.key, c.prefixes), reading, floor, c.prefixScaling)
           if (!node.limiter.takeUnsafe(allowance.key, allowance.bucket, scratch.tokens)) {
-            reading ? (throttled.reads += count) : (throttled.writes += count)
-            serverErrors.n += count
+            throttled[reading ? "reads" : "writes"].add(count)
+            m["5xxErrors"].n += count
             table.refuse(allowance, fast.now(), c.prefixScaling)
             return slowDown
           }
 
           // An archived object cannot be read until it is restored. HEAD and LIST still work.
           if (kind === "get" && ARCHIVED.has(c.storageClass) && !(c.restoredShare > 0 && fast.random.nextDoubleUnsafe() < c.restoredShare)) {
-            refused.archived += count
-            clientErrors.n += count
+            refused.archived.add(count)
+            m["4xxErrors"].n += count
             return archivedObject
           }
 
@@ -265,44 +212,44 @@ export const S3 = Aws.component({
               const requestsSent = parts > 0 ? parts : count
               switch (kind) {
                 case "get":
-                  served.reads += count
-                  gets.n += requestsSent
-                  bytesDownloaded.n += body
+                  served.reads.add(count)
+                  m.get.n += requestsSent
+                  m.bytesDownloaded.n += body
                   break
                 case "head":
-                  served.reads += count
-                  served.heads += count
-                  heads.n += count
+                  served.reads.add(count)
+                  served.heads.add(count)
+                  m.head.n += count
                   break
                 case "list":
-                  served.reads += count
-                  served.lists += count
-                  lists.n += count
+                  served.reads.add(count)
+                  served.lists.add(count)
+                  m.list.n += count
                   break
                 case "put":
-                  served.writes += count
-                  puts.n += requestsSent
-                  bytesUploaded.n += body
+                  served.writes.add(count)
+                  m.put.n += requestsSent
+                  m.bytesUploaded.n += body
                   break
                 case "copy":
                   // CloudWatch counts a copy as a PUT on the destination.
-                  served.writes += count
-                  served.copies += count
-                  copies.n += count
-                  puts.n += requestsSent
+                  served.writes.add(count)
+                  served.copies.add(count)
+                  m.copy.n += count
+                  m.put.n += requestsSent
                   break
                 case "delete":
-                  served.deletes += count
-                  deletes.n += count
+                  served.deletes.add(count)
+                  m.delete.n += count
                   if (c.versioning) {
-                    served.deleteMarkers += count
-                    deleteMarkers.n += count
+                    served.deleteMarkers.add(count)
+                    m.deleteMarkers.n += count
                   }
                   break
               }
               if (parts > 0) {
-                served.multipartParts += parts
-                posts.n += controls
+                served.multipartParts.add(parts)
+                m.post.n += controls
               }
               // Strongly consistent: the object is visible the moment the call returns. Notifications and replicas
               // follow later, off the request path.
@@ -320,13 +267,13 @@ export const S3 = Aws.component({
           return {
             bucketType: c.bucketType,
             prefixes: c.bucketType === "directory" ? 1 : c.prefixes,
-            served: { ...served },
-            throttled: { ...throttled },
-            refused: { ...refused },
+            served: totals(served),
+            throttled: totals(throttled),
+            refused: totals(refused),
             transferring,
             scaled: { prefixes: table.scaled.size, readCeiling: Math.max(floorOf(true), table.highest(true)), writeCeiling: Math.max(floorOf(false), table.highest(false)) },
-            notifications: { destinations: events.length, ...notifications },
-            replication: { destinations: replicas.length, ...replication }
+            notifications: { destinations: events.length, pending: notifications.pending, delivered: notifications.delivered.total, undelivered: notifications.undelivered.total },
+            replication: { destinations: replicas.length, pending: replication.pending, delivered: replication.delivered.total, undelivered: replication.undelivered.total }
           }
         })
       }

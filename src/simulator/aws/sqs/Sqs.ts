@@ -6,10 +6,11 @@ import {
   API_BATCH,
   Consumer,
   MAX_MESSAGE_BYTES,
+  DEDUP_WINDOW_MS,
   Queue,
   SWEEP_MS
 } from "./config.ts"
-import { DedupWindow } from "./dedup.ts"
+import { DedupWindow } from "../../kit/Dedup.ts"
 import { Deliveries } from "./delivery.ts"
 import { type ConsumerLink, Pollers } from "./mapping.ts"
 import { makeTallies } from "./metrics.ts"
@@ -95,7 +96,7 @@ export const Sqs = Aws.component({
 
       const store = new QueueStore(fifo)
       const tallies = makeTallies(node.meter)
-      const dedup = new DedupWindow()
+      const dedup = new DedupWindow(DEDUP_WINDOW_MS)
       const sendRate = new FifoRate(`${node.id}/fifo`, node.limiter)
       const receiveRate = new FifoRate(`${node.id}/fifo-receive`, node.limiter)
 

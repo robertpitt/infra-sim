@@ -1,18 +1,5 @@
-import type { Counter, Meter } from "../../Telemetry.ts"
-
-/**
- * One thing counted two ways: a windowed counter, which the telemetry turns into a per-second rate each frame, and a
- * running total, which the probe reports. Bumping it is two additions.
- */
-export class Tally {
-  total = 0
-  constructor(private readonly counter: Counter | undefined) {}
-
-  add(n: number): void {
-    if (this.counter !== undefined) this.counter.n += n
-    this.total += n
-  }
-}
+import { Tally } from "../../kit/Tally.ts"
+import type { Meter } from "../../Telemetry.ts"
 
 /**
  * What a queue counts, named after the CloudWatch metric each one stands in for (the README has the full mapping).

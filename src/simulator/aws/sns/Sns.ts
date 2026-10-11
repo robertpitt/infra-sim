@@ -1,8 +1,11 @@
 import { Effect, Schema } from "effect"
+import { DedupWindow } from "../../kit/Dedup.ts"
+import { Gate } from "../../kit/Admit.ts"
+import * as Refuse from "../../kit/Refuse.ts"
+import { bodyBytes, records } from "../../kit/Shape.ts"
 import * as Component from "../../Component.ts"
 import * as Distribution from "../../Distribution.ts"
 import * as Flow from "../../Flow.ts"
-import { Rejected, Throttled } from "../../Message.ts"
 import { keyOf } from "../../Provider.ts"
 import * as Aws from "../provider.ts"
 import {
@@ -16,13 +19,16 @@ import {
   Subscription,
   Topic
 } from "./config.ts"
-import { DeduplicationWindow, GroupRates } from "./fifo.ts"
 import { FanOut } from "./fanout.ts"
 
 const D = Aws.docs.sns
 
 /** FIFO publishes with no message group are treated as one group (AWS rejects them: the group id is required). */
 const DEFAULT_GROUP = ""
+
+const GROUP_BUCKET = { rate: FIFO_GROUP_RATE, burst: FIFO_GROUP_RATE }
+const TOPIC_BUCKET = { rate: FIFO_TOPIC_RATE, burst: FIFO_TOPIC_RATE }
+const TOPIC_BYTES_BUCKET = { rate: FIFO_TOPIC_BYTES_PER_SECOND, burst: FIFO_TOPIC_BYTES_PER_SECOND }
 
 export const Sns = Aws.component({
   type: "aws.sns",
@@ -79,8 +85,8 @@ export const Sns = Aws.component({
       const { fast } = node
       const region = keyOf(node.placement)
       const fan = new FanOut(fast, node.meter, node.out("out"), node.out("dlq"))
-      const groupRates = new GroupRates(FIFO_GROUP_RATE)
-      let dedup: DeduplicationWindow | undefined
+      const gate = new Gate(node.limiter)
+      let dedup: DedupWindow | undefined
       let published = 0
       let throttled = 0
       let duplicates = 0
@@ -98,37 +104,30 @@ export const Sns = Aws.component({
         call: (message) => {
           const c = fast.settings()
           const account = fast.account() as Aws.Account
-          // A message that carries nothing or counts nothing is still one message: it must not be free or negative.
-          const count = message.count >= 1 ? message.count : 1
-          const bytes = message.bytes > 0 ? message.bytes : 0
+          const count = records(message)
+          const bytes = bodyBytes(message)
           const limitKb = messageLimitKb(c.maxMessageSize)
-          if (bytes > limitKb * 1024) {
-            return Effect.fail(Rejected({ node: node.id, reason: `message over the ${limitKb} KB limit` }))
-          }
+          if (bytes > limitKb * 1024) return Refuse.rejected(node.id, `message over the ${limitKb} KB limit`)
           const fifo = c.kind === "fifo"
-          const now = fast.now()
           const group = fifo ? message.group ?? DEFAULT_GROUP : undefined
-          // The most specific limit first, so a publish refused by its group does not use up the topic's or the region's allowance.
-          let refused: string | undefined
-          if (group !== undefined && !groupRates.take(group, count, now)) refused = "message group rate limit"
-          else if (fifo && c.fifoThroughput === "topic") {
-            if (!node.limiter.takeUnsafe(`${node.id}/topic`, { rate: FIFO_TOPIC_RATE, burst: FIFO_TOPIC_RATE }, count)) refused = "FIFO topic rate limit"
-            else if (!node.limiter.takeUnsafe(`${node.id}/topic-bytes`, { rate: FIFO_TOPIC_BYTES_PER_SECOND, burst: FIFO_TOPIC_BYTES_PER_SECOND }, bytes)) refused = "FIFO topic bandwidth limit"
+          // The most specific limit first. All are checked before any is taken, so a publish refused by one costs the others nothing.
+          if (group !== undefined) gate.add(`${node.id}/group/${group}`, GROUP_BUCKET, count, "message group rate limit")
+          if (fifo && c.fifoThroughput === "topic") {
+            gate.add(`${node.id}/topic`, TOPIC_BUCKET, count, "FIFO topic rate limit")
+            gate.add(`${node.id}/topic-bytes`, TOPIC_BYTES_BUCKET, bytes, "FIFO topic bandwidth limit")
           }
-          if (refused === undefined) {
-            const rate = fifo ? account.snsFifoPublishRate : account.snsPublishRate
-            if (!node.limiter.takeUnsafe(`${region}/sns.${c.kind}`, { rate, burst: rate }, count)) refused = "publish rate limit"
-          }
+          const rate = fifo ? account.snsFifoPublishRate : account.snsPublishRate
+          const refused = gate.add(`${region}/sns.${c.kind}`, { rate, burst: rate }, count, "publish rate limit").take()
           if (refused !== undefined) {
             throttled++
-            return Effect.fail(Throttled({ node: node.id, reason: refused }))
+            return Refuse.throttled(node.id, refused)
           }
           return Flow.delayed(fast, Distribution.latencyMs(c.publishLatency, fast.random), () => {
             published += count
             publishedCount.n += count
             publishSize.add(bytes)
             if (fifo && c.deduplication) {
-              dedup ??= new DeduplicationWindow(DEDUPLICATION_WINDOW_MS, DEDUPLICATION_CAPACITY)
+              dedup ??= new DedupWindow(DEDUPLICATION_WINDOW_MS, DEDUPLICATION_CAPACITY)
               // The duplicate is accepted (the publisher sees success) and then dropped.
               if (dedup.isDuplicate(message.id, fast.now())) {
                 duplicates += count

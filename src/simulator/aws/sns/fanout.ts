@@ -1,11 +1,13 @@
 import { Duration, SubscriptionRef } from "effect"
+import * as Flow from "../../Flow.ts"
+import { passes } from "../../kit/Shape.ts"
+import { type Tally, tallies, totals } from "../../kit/Tally.ts"
 import type { Fast } from "../../Component.ts"
 import * as Distribution from "../../Distribution.ts"
 import type * as Edge from "../../Edge.ts"
 import type { CallFailure, Message } from "../../Message.ts"
 import type { Meter } from "../../Telemetry.ts"
 import { ENVELOPE_BYTES, type SubscriptionEdge, type TopicConfig } from "./config.ts"
-import { SerialLanes } from "./fifo.ts"
 
 /**
  * Delivering a published message to every subscription.
@@ -22,23 +24,17 @@ class Subscription {
   /** Earliest virtual time the throttle lets the next delivery start. */
   nextAt = 0
   /** FIFO: a lane per message group, so a group's messages reach this subscriber one at a time, in order. */
-  readonly lanes = new SerialLanes()
+  readonly lanes = new Flow.Lanes()
 
   constructor(readonly link: Edge.Link<SubscriptionEdge>) {}
 }
 
 /**
- * Counts of what happened to deliveries since the simulation began, for the probe. The per-second rates come from the
- * meter's counters of the same names, which reset every frame.
+ * What happened to deliveries since the simulation began, for the probe. The per-second rates come from the meter's
+ * counters of the same names, which reset every frame.
  */
-export interface Totals {
-  delivered: number
-  undelivered: number
-  filteredOut: number
-  overflow: number
-  redriven: number
-  redriveFailed: number
-}
+const TALLIES = ["delivered", "undelivered", "filteredOut", "overflow", "redriven", "redriveFailed"] as const
+export type Totals = Record<(typeof TALLIES)[number], number>
 
 /** One message on its way to one subscriber, from admission to the subscriber's answer. */
 class Delivery {
@@ -77,14 +73,10 @@ class Delivery {
 
   /** The edge has the answer, after any retries. A failure here is final: SNS has stopped trying. */
   private readonly finish = (failure: CallFailure | undefined): void => {
-    const fan = this.fan
     this.sub.pending--
-    fan.pending--
-    if (failure === undefined) fan.record("delivered", this.count)
-    else {
-      fan.record("undelivered", this.count)
-      if (this.deadLetter) fan.redrive(this.message, this.count)
-    }
+    this.fan.pending--
+    this.fan.record(failure === undefined ? "delivered" : "undelivered", this.count)
+    if (failure !== undefined && this.deadLetter) this.fan.redrive(this.message, this.count)
     this.release()
   }
 }
@@ -93,11 +85,10 @@ const sendNow = (delivery: Delivery): void => delivery.send()
 const noop = (): void => {}
 
 export class FanOut {
-  /** Deliveries admitted and not yet finished, across every subscription. */
-  pending = 0
   private readonly subscriptions: ReadonlyArray<Subscription>
-  readonly totals: Totals = { delivered: 0, undelivered: 0, filteredOut: 0, overflow: 0, redriven: 0, redriveFailed: 0 }
-  private readonly counters: Record<keyof Totals, { n: number }>
+  readonly tally: Record<keyof Totals, Tally>
+  /** Deliveries admitted and not yet answered, across every subscription: queued behind a group or the throttle included. */
+  pending = 0
 
   constructor(
     readonly fast: Fast<TopicConfig>,
@@ -107,19 +98,15 @@ export class FanOut {
     private readonly deadLetters: ReadonlyArray<Edge.Link<Edge.Config>>
   ) {
     this.subscriptions = links.map((link) => new Subscription(link))
-    this.counters = {
-      delivered: meter.counter("delivered"),
-      undelivered: meter.counter("undelivered"),
-      filteredOut: meter.counter("filteredOut"),
-      overflow: meter.counter("overflow"),
-      redriven: meter.counter("redriven"),
-      redriveFailed: meter.counter("redriveFailed")
-    }
+    this.tally = tallies(meter, TALLIES)
+  }
+
+  get totals(): Totals {
+    return totals(this.tally)
   }
 
   record(what: keyof Totals, n: number): void {
-    this.counters[what].n += n
-    this.totals[what] += n
+    this.tally[what].add(n)
   }
 
   /**
@@ -133,7 +120,7 @@ export class FanOut {
       const edge = SubscriptionRef.getUnsafe(sub.link.config)
       // The filter policy is evaluated by SNS before anything is queued: a filtered-out message costs nothing later and
       // never waits behind a FIFO group.
-      if (edge.filterMatch < 1 && fast.random.nextDoubleUnsafe() >= edge.filterMatch) {
+      if (!passes(fast.random, edge.filterMatch)) {
         this.record("filteredOut", count)
         continue
       }

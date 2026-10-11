@@ -201,7 +201,10 @@ export class Lanes {
   }
 
   private start(key: string, task: (release: () => void) => void): void {
+    let released = false
     task(() => {
+      if (released) return
+      released = true
       const next = this.waiting.get(key)?.shift()
       if (next !== undefined) this.start(key, next)
       else this.waiting.delete(key)

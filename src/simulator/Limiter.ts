@@ -14,6 +14,8 @@ import { Effect } from "effect"
 export interface Limiter {
   /** Take `tokens` from the bucket named `key`, or report that there aren't enough. Never waits. */
   readonly takeUnsafe: (key: string, bucket: Bucket, tokens?: number) => boolean
+  /** Whether a take of `tokens` would succeed, without taking anything. */
+  readonly fitsUnsafe: (key: string, bucket: Bucket, tokens?: number) => boolean
   /** Tokens in the bucket right now. */
   readonly levelUnsafe: (key: string, bucket: Bucket) => number
   /** How many buckets are being remembered. Idle, fully refilled ones are forgotten (see `makeWith`). */
@@ -78,18 +80,22 @@ export const makeWith = (now: () => number): Limiter => {
     return state
   }
 
+  /** A request bigger than the whole bucket could never succeed; let it have the bucket rather than starve forever. */
+  const needed = (tokens: number, bucket: Bucket): number => (tokens > bucket.burst ? Math.max(1, bucket.burst) : tokens)
+
   const takeUnsafe = (key: string, bucket: Bucket, tokens = 1): boolean => {
     const state = refresh(key, bucket)
-    // A request bigger than the whole bucket could never succeed; let it have the bucket rather than starve forever.
-    const needed = tokens > bucket.burst ? Math.max(1, bucket.burst) : tokens
-    if (state.tokens < needed) return false
-    state.tokens -= needed
+    const need = needed(tokens, bucket)
+    if (state.tokens < need) return false
+    state.tokens -= need
     return true
   }
+  const fitsUnsafe = (key: string, bucket: Bucket, tokens = 1): boolean => refresh(key, bucket).tokens >= needed(tokens, bucket)
   const levelUnsafe = (key: string, bucket: Bucket): number => refresh(key, bucket).tokens
 
   return {
     takeUnsafe,
+    fitsUnsafe,
     levelUnsafe,
     size: () => states.size,
     take: (key, bucket, tokens) => Effect.sync(() => takeUnsafe(key, bucket, tokens)),
