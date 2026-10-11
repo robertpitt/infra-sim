@@ -32,7 +32,7 @@ const coalesce = (events: ReadonlyArray<Event>): ReadonlyArray<Event> => {
   for (const event of events) {
     const last = out[out.length - 1]
     if (event._tag === "frames" && last?._tag === "frames") out[out.length - 1] = { _tag: "frames", frames: [...last.frames, ...event.frames] }
-    else if (event._tag === "status" && last?._tag === "status") out[out.length - 1] = event
+    else if ((event._tag === "status" || event._tag === "scenario") && last?._tag === event._tag) out[out.length - 1] = event
     else out.push(event)
   }
   return out
@@ -59,8 +59,8 @@ void runtime
         Stream.runForEach(e.events, (event) =>
           Effect.sync(() => {
             pending.push(event)
-            // Anything that isn't a frame (a state change, a rejection) shouldn't wait for the next batch.
-            if (event._tag !== "frames" && event._tag !== "status") {
+            // Anything that isn't a frame or a progress report (a state change, an alert, a rejection) shouldn't wait for the next batch.
+            if (event._tag !== "frames" && event._tag !== "status" && event._tag !== "scenario") {
               clearTimeout(timer)
               flush()
             } else if (timer === undefined) timer = setTimeout(flush, FLUSH_MS)

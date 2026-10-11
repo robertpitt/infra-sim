@@ -82,7 +82,7 @@ check("Esc closes the report", (await page.locator(".dialog").count()) === 0)
 check("the template became a design with a region box and clients", (await page.locator(".group-box").count()) === 1 && (await nodes()) >= 8, `${await nodes()} nodes`)
 check("no error banner", (await page.locator(".banner.error").count()) === 0)
 await page.waitForTimeout(2500)
-check("it simulates", (await page.locator(".clock b").innerText()) !== "00:00.0")
+check("it simulates", (await page.locator(".clock").innerText()) !== "00:00.0")
 await page.screenshot({ path: ".tmp/imported.png" })
 
 // Opening a CloudFormation file with plain Open is recognised

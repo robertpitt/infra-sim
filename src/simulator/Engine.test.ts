@@ -181,6 +181,102 @@ describe("Engine", () => {
         yield* settle
         expect(tagged(events, "rejected").map((r) => r.command)).toEqual(["setSpeed", "dance"])
       })))
+
+  describe("scenarios", () => {
+    const outage = {
+      version: 1 as const,
+      name: "API outage",
+      duration: "60s",
+      warmup: "5s",
+      timeline: [
+        { at: "10s", inject: { target: "node:api", fault: "Outage", for: "30s" }, note: "the API goes down" },
+        { at: "45s", note: "well after" }
+      ],
+      assert: [
+        { check: "web.errorRatio < 1%", to: "10s", name: "healthy before" },
+        { check: "web.errorRatio > 90%", from: "12s", to: "38s", name: "down during" }
+      ]
+    }
+    const progressOf = (events: ReadonlyArray<Event>) => tagged(events, "scenario").at(-1)?.progress
+
+    it("plays a scenario: events land at their times, and the run stops at its end with every check decided", () =>
+      withEngine((engine, events) =>
+        Effect.gen(function*() {
+          yield* engine.send({ _tag: "load", design: design() })
+          yield* engine.send({ _tag: "scenario", scenario: outage })
+          yield* settle
+          expect(progressOf(events)).toMatchObject({ name: "API outage", duration: 60_000, warmup: 5_000, t: 0, finished: false })
+          expect(progressOf(events)!.checks.map((c) => c.state)).toEqual(["waiting", "waiting"])
+
+          // Halfway through the outage: the fault went in at exactly 10 s, the first check is decided, the second measuring.
+          yield* engine.send({ _tag: "step", ms: 20_000 })
+          yield* settle
+          expect(tagged(events, "faults").at(-1)!.faults).toMatchObject([{ target: { kind: "node", id: "api" }, fault: { _tag: "Outage" }, startedAt: 10_000 }])
+          const middle = progressOf(events)!
+          expect(middle.timeline.map((e) => e.done)).toEqual([true, false])
+          expect(middle.checks.map((c) => c.state)).toEqual(["passed", "holding"])
+
+          // A long step stops at the end of the scenario, not after it.
+          yield* engine.send({ _tag: "step", ms: 120_000 })
+          yield* settle
+          expect(lastStatus(events).t).toBe(60_000)
+          const end = progressOf(events)!
+          expect(end).toMatchObject({ finished: true, passed: true, t: 60_000 })
+          expect(end.checks.map((c) => c.state)).toEqual(["passed", "passed"])
+          expect(end.checks[1]!.actual).toBeGreaterThan(0.9)
+
+          // The clients saw the outage, so the standard alarms paged.
+          const alerts = tagged(events, "alerts").at(-1)!.alerts
+          expect(alerts.find((a) => a.rule === "errors" && a.target.id === "web")).toMatchObject({ severity: "critical", firedAt: 30_000 })
+        })))
+
+    it("pauses a playing run at the scenario's end", () =>
+      withEngine((engine, events) =>
+        Effect.gen(function*() {
+          yield* engine.send({ _tag: "load", design: design() })
+          yield* engine.send({ _tag: "scenario", scenario: { version: 1, duration: "2s" } })
+          yield* engine.send({ _tag: "setSpeed", speed: 50 })
+          yield* engine.send({ _tag: "play" })
+          yield* settle
+          for (let i = 0; i < 20; i++) {
+            yield* TestClock.adjust(16)
+            yield* settle
+          }
+          expect(lastStatus(events)).toMatchObject({ phase: "paused", t: 2_000 })
+          expect(progressOf(events)).toMatchObject({ finished: true, passed: true })
+        })))
+
+    it("starts again on reset, and lets go on clearScenario", () =>
+      withEngine((engine, events) =>
+        Effect.gen(function*() {
+          yield* engine.send({ _tag: "load", design: design() })
+          yield* engine.send({ _tag: "scenario", scenario: outage })
+          yield* engine.send({ _tag: "step", ms: 120_000 })
+          yield* settle
+          expect(progressOf(events)).toMatchObject({ finished: true })
+          yield* engine.send({ _tag: "reset" })
+          yield* settle
+          expect(progressOf(events)).toMatchObject({ t: 0, finished: false })
+          expect(tagged(events, "alerts").at(-1)!.alerts).toEqual([])
+          yield* engine.send({ _tag: "clearScenario" })
+          yield* settle
+          expect(tagged(events, "scenario").at(-1)).toEqual({ _tag: "scenario" })
+          expect(lastStatus(events).t).toBe(0)
+        })))
+
+    it("refuses a scenario that names what the design doesn't have, and leaves the run alone", () =>
+      withEngine((engine, events) =>
+        Effect.gen(function*() {
+          yield* engine.send({ _tag: "load", design: design() })
+          yield* engine.send({ _tag: "step", ms: 5_000 })
+          yield* engine.send({ _tag: "scenario", scenario: { version: 1, duration: "1m", timeline: [{ at: "1s", inject: { target: "node:nope", fault: "Outage" } }] } })
+          yield* settle
+          expect(tagged(events, "rejected").map((r) => r.command)).toEqual(["scenario"])
+          expect(tagged(events, "rejected")[0]!.issues.join(" ")).toMatch(/no node "nope"/)
+          expect(tagged(events, "scenario")).toEqual([])
+          expect(lastStatus(events).t).toBe(5_000)
+        })))
+  })
 })
 
 void Fiber

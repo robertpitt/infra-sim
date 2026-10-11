@@ -2,6 +2,7 @@
 # Run it:  infra-sim run examples/scenarios/orders-peak.yaml --json
 version: 1
 name: Orders at peak
+description: Three times the traffic for a minute, with the payment-side table squeezed. Does the order pipeline hold?
 design: ../01-orders.yaml
 duration: 4m
 warmup: 30s

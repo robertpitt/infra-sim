@@ -3,7 +3,9 @@
  *
  * Hosts talk to `Engine`. Everything else is here for components, tools and tests.
  */
+export * as Alarm from "./Alarm.ts"
 export * as Builder from "./Builder.ts"
+export * as Check from "./Check.ts"
 export * as Component from "./Component.ts"
 export * as Connector from "./Connector.ts"
 export * as Connectors from "./connectors/index.ts"

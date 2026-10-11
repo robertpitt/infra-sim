@@ -57,6 +57,19 @@ export const fit = (bounds: Bounds | undefined, padding = 72): void => {
   view.set({ k, x: (w - bw * k) / 2 - bounds.minX * k, y: (h - bh * k) / 2 - bounds.minY * k })
 }
 
+/** Pan so the world-space point (x, y) is in the middle of the canvas, keeping the zoom. */
+export const centreOn = (x: number, y: number): void => {
+  const { w, h } = size()
+  view.set((v) => ({ ...v, x: w / 2 - x * v.k, y: h / 2 - y * v.k }))
+}
+
+/** Whether a world-space rectangle is wholly on screen. */
+export const isVisible = (r: { readonly x: number; readonly y: number; readonly w: number; readonly h: number }): boolean => {
+  const { w, h } = size()
+  const v = view.get()
+  return r.x * v.k + v.x >= 0 && r.y * v.k + v.y >= 0 && (r.x + r.w) * v.k + v.x <= w && (r.y + r.h) * v.k + v.y <= h
+}
+
 /** World-space point at the centre of the visible canvas. */
 export const centre = (): { x: number; y: number } => {
   const { w, h, left, top } = size()

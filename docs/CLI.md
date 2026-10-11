@@ -191,6 +191,7 @@ Find node and edge ids and counter names in `run --json` output (`nodes.<id>.rat
 | `timeline` | The scenario's events as they happened. |
 | `faults` | Each injected fault: `id`, `target`, `fault`, `from`, `to`. |
 | `assertions` | Each: `check`, `name`, `passed`, `actual`, `expected {op, value}`, `window {from, to}`, `problem` if it couldn't be checked. |
+| `alerts` | What the standard alarms raised: `rule`, `title`, `severity` (`critical` when clients see it, else `warning`), `target`, `check`, `unit`, `firedAt`, `resolvedAt` (absent if still firing), `value`, `peak`. Information, not a verdict: alerts never fail a run. |
 | `defects` | Components that crashed instead of failing a call (any makes `passed` false). |
 | `diagnostics` | Warnings about the design (feedback loops, unreachable nodes, quota overages). |
 | `input` | The file, its kind, the design it used, and the import report if a template was imported. |

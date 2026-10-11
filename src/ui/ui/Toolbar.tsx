@@ -92,11 +92,11 @@ export function Toolbar() {
           <Icon name="redo" size={14} />
         </button>
         <span className="sep" />
-        <button className="btn icon" title="Zoom out" onClick={() => viewport.zoomCenter(1 / 1.2)}>
+        <button className="btn icon zoom-btn" title="Zoom out" onClick={() => viewport.zoomCenter(1 / 1.2)}>
           <Icon name="minus" size={14} />
         </button>
         <span className="zoom">{zoom}%</span>
-        <button className="btn icon" title="Zoom in" onClick={() => viewport.zoomCenter(1.2)}>
+        <button className="btn icon zoom-btn" title="Zoom in" onClick={() => viewport.zoomCenter(1.2)}>
           <Icon name="plus" size={14} />
         </button>
         <button className="btn icon" title="Fit to screen (F)" onClick={fitView}>

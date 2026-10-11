@@ -3,22 +3,38 @@ import { Design, detectImporter, type Importer, type ImportReport, Layout, Topol
 import YAML from "yaml"
 import type { Doc } from "./types.ts"
 import type { Example } from "#examples"
-import { fit } from "../canvas/viewport.ts"
+import { centreOn, fit, isVisible } from "../canvas/viewport.ts"
+import { rectOf } from "../canvas/groups.ts"
 import { boundsOf } from "../canvas/geometry.ts"
 import { createStore } from "../lib/store.ts"
-import { doc, replaceDesign } from "./document.ts"
-import { catalog, registry } from "./engine.ts"
+import { doc, replaceDesign, select } from "./document.ts"
+import { catalog, client, registry } from "./engine.ts"
+import { run } from "./run.ts"
 
-/** Replace the design and frame it on screen. Asks first when there is edit history that would be lost. */
-export const openDesign = (design: Doc, confirmReplace = true): void => {
-  if (confirmReplace && doc.get().past.length > 0 && !window.confirm("Replace the current design? Your edits will be lost.")) return
+/**
+ * Replace the design and frame it on screen. Asks first when there is edit history that would be lost; false if the
+ * answer was no. A scenario playing against the old design stops: it was written for that one.
+ */
+export const openDesign = (design: Doc, confirmReplace = true): boolean => {
+  if (confirmReplace && doc.get().past.length > 0 && !window.confirm("Replace the current design? Your edits will be lost.")) return false
+  if (run.get().scenario !== undefined) client.send({ _tag: "clearScenario" })
   replaceDesign(design)
   requestAnimationFrame(() => fit(boundsOf(doc.get().design, catalog.get().byType)))
+  return true
 }
 
-export const openExample = (example: Example): void => openDesign(example.design())
+export const openExample = (example: Example): void => void openDesign(example.design())
 
 export const fitView = (): void => fit(boundsOf(doc.get().design, catalog.get().byType))
+
+/** Select a node and bring it into view if it is off screen. */
+export const showNode = (id: string): void => {
+  const node = doc.get().design.nodes[id]
+  if (node === undefined) return
+  select({ kind: "node", id })
+  const r = rectOf(node, catalog.get().byType[node.type])
+  if (!isVisible(r)) centreOn(r.x + r.w / 2, r.y + r.h / 2)
+}
 
 export type Format = "yaml" | "json"
 
@@ -65,7 +81,7 @@ export interface ImportOutcome {
 export const importOutcome = createStore<ImportOutcome | undefined>(undefined)
 
 /** Ask for a file. Resolves with `undefined` if the dialog is cancelled. */
-const pickFile = (accept: string): Promise<File | undefined> =>
+export const pickFile = (accept: string): Promise<File | undefined> =>
   new Promise((resolve) => {
     const input = document.createElement("input")
     input.type = "file"

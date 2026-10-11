@@ -1,4 +1,4 @@
-import type { ActiveFault, Diagnostic, Frame, Stats, Status, Target } from "./types.ts"
+import type { ActiveFault, Alert, Diagnostic, Frame, ScenarioProgress, Stats, Status, Target } from "./types.ts"
 import { createStore } from "../lib/store.ts"
 import { Ring } from "../lib/ring.ts"
 import { client } from "./engine.ts"
@@ -22,6 +22,10 @@ export interface RunState {
   readonly faults: ReadonlyArray<ActiveFault>
   readonly spans: ReadonlyArray<FaultSpan>
   readonly diagnostics: ReadonlyArray<Diagnostic>
+  /** The alarms watching the run: firing ones first, then recently resolved. */
+  readonly alerts: ReadonlyArray<Alert>
+  /** The scenario being played, if one is. */
+  readonly scenario: ScenarioProgress | undefined
   /** Most recent refused command, shown briefly. */
   readonly notice: string | undefined
 }
@@ -32,6 +36,8 @@ export const run = createStore<RunState>({
   faults: [],
   spans: [],
   diagnostics: [],
+  alerts: [],
+  scenario: undefined,
   notice: undefined
 })
 
@@ -86,6 +92,12 @@ client.subscribe((event) => {
     }
     case "diagnostics":
       run.set((s) => ({ ...s, diagnostics: event.diagnostics }))
+      return
+    case "alerts":
+      run.set((s) => ({ ...s, alerts: event.alerts }))
+      return
+    case "scenario":
+      run.set((s) => ({ ...s, scenario: event.progress }))
       return
     case "faults": {
       const now = history.last()?.t ?? run.get().status?.t ?? 0

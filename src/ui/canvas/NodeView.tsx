@@ -32,6 +32,17 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, p
   const stats = useStats("nodes", id)
   const faults = useStore(run, (s) => s.faults.filter((f) => f.target.kind === "node" && f.target.id === id).length)
   const down = useStore(run, (s) => s.faults.some((f) => f.target.kind === "node" && f.target.id === id && f.fault._tag === "Outage"))
+  // Alarms firing on this node: the worst severity, and what they are, for the badge.
+  const alerting = useStore(run, (s) => {
+    let worst: "critical" | "warning" | undefined
+    for (const a of s.alerts) {
+      if (a.resolvedAt !== undefined || a.target.id !== id) continue
+      if (a.severity === "critical") return "critical"
+      worst = "warning"
+    }
+    return worst
+  })
+  const alertTitles = useStore(run, (s) => s.alerts.filter((a) => a.resolvedAt === undefined && a.target.id === id).map((a) => a.title).join(", "))
   const controlled = useStore(doc, (s) => Object.values(s.design.controllers ?? {}).filter((c) => c.target === id).length)
   const at = spec.position ?? { x: 0, y: 0 }
   const height = nodeHeight(manifest)
@@ -70,6 +81,11 @@ export const NodeView = memo(function NodeView({ id, spec, manifest, selected, p
         {controlled > 0 && (
           <span className="node-badge controlled" title={`${controlled} controller${controlled > 1 ? "s" : ""} change${controlled > 1 ? "" : "s"} this while it runs`}>
             <Icon name="charts" size={12} />
+          </span>
+        )}
+        {alerting !== undefined && (
+          <span className={`node-badge alert ${alerting}`} title={`Alert: ${alertTitles}`}>
+            <Icon name="bell" size={12} />
           </span>
         )}
         {faults > 0 && (

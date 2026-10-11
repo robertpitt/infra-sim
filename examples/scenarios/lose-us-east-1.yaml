@@ -7,6 +7,7 @@
 #   infra-sim run examples/scenarios/lose-us-east-1.yaml
 version: 1
 name: Lose us-east-1
+description: Lose the US region for two minutes and see who notices. Europe goes down with it, because its handler writes to the US ledger synchronously.
 design: ../03-multi-region.yaml
 seed: 5
 duration: 6m

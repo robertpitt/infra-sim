@@ -1,4 +1,5 @@
 import { Cause, Clock, Context, Effect, Exit, Fiber, Layer, PubSub, Queue, Ref, Schema, Scope, Stream } from "effect"
+import * as Alarm from "./Alarm.ts"
 import { type Manifest } from "./Component.ts"
 import * as Connector from "./Connector.ts"
 import type * as Controller from "./Controller.ts"
@@ -8,6 +9,7 @@ import * as Design from "./Design.ts"
 import { diagnose } from "./Diagnostics.ts"
 import * as Fault from "./Fault.ts"
 import { Registry } from "./Registry.ts"
+import * as Scenario from "./Scenario.ts"
 import * as Simulation from "./Simulation.ts"
 import { Frame } from "./Telemetry.ts"
 import { VirtualTime } from "./VirtualTime.ts"
@@ -47,7 +49,16 @@ export const Command = Schema.Union([
   Schema.TaggedStruct("updateController", { id: Schema.String, settings: Schema.Record(Schema.String, Schema.Unknown) }),
   Schema.TaggedStruct("inject", { target: Fault.Target, fault: Fault.Fault, durationMs: Schema.optionalKey(Schema.Number) }),
   Schema.TaggedStruct("clearFault", { id: Schema.String }),
-  Schema.TaggedStruct("clearFaults", {})
+  Schema.TaggedStruct("clearFaults", {}),
+  /**
+   * Play a scenario: its overrides apply, its timeline happens at its times, its assertions are watched, and the run
+   * pauses at its end. Starts again from t = 0. A design inside the scenario replaces the document; a path to one is for
+   * the host to resolve, and without one the scenario plays against the design already loaded. It stays armed through
+   * `load` and `reset` (which start it again) until `clearScenario`.
+   */
+  Schema.TaggedStruct("scenario", { scenario: Scenario.Scenario }),
+  /** Stop playing the scenario: back to the design as it is, from t = 0. */
+  Schema.TaggedStruct("clearScenario", {})
 ])
 /** The JSON form of a command: what callers send. */
 export type Command = typeof Command.Encoded
@@ -75,6 +86,10 @@ export const Event = Schema.Union([
   Schema.TaggedStruct("frames", { frames: Schema.Array(Frame) }),
   Schema.TaggedStruct("faults", { faults: Schema.Array(ActiveFaultJson) }),
   Schema.TaggedStruct("diagnostics", { diagnostics: Schema.Array(Diagnostic) }),
+  /** The alarms watching the run (`Alarm.ts`): firing ones first, then the recently resolved. Sent when they change. */
+  Schema.TaggedStruct("alerts", { alerts: Schema.Array(Alarm.Alert) }),
+  /** Where the scenario being played stands; no `progress` when none is armed. */
+  Schema.TaggedStruct("scenario", { progress: Schema.optionalKey(Scenario.Progress) }),
   /** Time went back to 0 (load or reset): drop any accumulated history. */
   Schema.TaggedStruct("reset", {}),
   /** A command was refused, e.g. a setting outside its range. */
@@ -132,11 +147,16 @@ const MAX_WALL_STEP_MS = 100
 interface Live {
   readonly sim: Simulation.Service
   readonly scope: Scope.Closeable
+  readonly seed: number
+  readonly playback: Scenario.Playback | undefined
+  readonly alarms: Alarm.Monitor
 }
 
 interface State {
   readonly doc: Design.Doc | undefined
   readonly seed: number
+  /** The scenario being played, if any. */
+  readonly scenario: Scenario.Scenario | undefined
   readonly live: Live | undefined
   readonly phase: Phase
   readonly speed: number
@@ -154,6 +174,7 @@ export function make(options: Options = {}) {
     const state = yield* Ref.make<State>({
       doc: undefined,
       seed: 1,
+      scenario: undefined,
       live: undefined,
       phase: "empty",
       speed: 1,
@@ -166,7 +187,7 @@ export function make(options: Options = {}) {
     const status = Effect.gen(function*() {
       const s = yield* Ref.get(state)
       const t = s.live === undefined ? 0 : yield* s.live.sim.now
-      yield* emit({ _tag: "status", status: { phase: s.phase, t, speed: s.speed, effectiveSpeed: s.effective, seed: s.seed } })
+      yield* emit({ _tag: "status", status: { phase: s.phase, t, speed: s.speed, effectiveSpeed: s.effective, seed: s.live?.seed ?? s.seed } })
     })
 
     const stopPacer = Effect.gen(function*() {
@@ -197,21 +218,47 @@ export function make(options: Options = {}) {
      */
     const edited = (change: (doc: Design.Doc) => Design.Doc) =>
       Effect.gen(function*() {
-        const { doc } = yield* Ref.get(state)
+        const { doc, scenario } = yield* Ref.get(state)
         if (doc === undefined) return
         const next = change(doc)
         yield* Ref.update(state, (s) => ({ ...s, doc: next }))
-        const diagnostics = diagnose(next, registry)
+        const diagnostics = diagnose(running(next, scenario), registry)
         if (JSON.stringify(diagnostics) !== reported) yield* report(diagnostics)
       })
+
+    /** The design as it runs: with a scenario playing, its traffic scale and overrides on top of the document. */
+    const running = (doc: Design.Doc, scenario: Scenario.Scenario | undefined): Design.Doc =>
+      scenario === undefined ? doc : Scenario.prepare(doc, scenario, registry)
+
+    /**
+     * Settings for a live edit. With a scenario playing, an edit is made to the document and the scenario's overrides stay
+     * on top of it, as they were when it started.
+     */
+    const liveSettings = (doc: Design.Doc | undefined, scenario: Scenario.Scenario | undefined, pick: (d: Design.Doc) => Record<string, unknown> | undefined, settings: Record<string, unknown>) =>
+      doc === undefined || scenario === undefined ? settings : (pick(running(doc, scenario)) ?? settings)
 
     // --- Build ---------------------------------------------------------------------------------------------
     const build = Effect.gen(function*() {
       yield* teardown
-      const { doc, seed } = yield* Ref.get(state)
+      const { doc, seed, scenario } = yield* Ref.get(state)
       if (doc === undefined) return
-      const diagnostics = diagnose(doc, registry)
+      // A scenario is checked against the design every time: an edit may have removed something it names.
+      let playback: Scenario.Playback | undefined
+      if (scenario !== undefined) {
+        const made = yield* Effect.result(Scenario.playback(doc, scenario, registry))
+        if (made._tag === "Success") playback = made.success
+        else {
+          yield* Ref.update(state, (s) => ({ ...s, scenario: undefined }))
+          yield* reject("scenario", made.failure.issues)
+          yield* emit({ _tag: "scenario" })
+        }
+      }
+      const runDoc = playback?.design ?? doc
+      const runSeed = playback?.seed ?? seed
+      const diagnostics = diagnose(runDoc, registry)
       yield* emit({ _tag: "reset" })
+      yield* emit({ _tag: "alerts", alerts: [] })
+      if (playback !== undefined) yield* emit({ _tag: "scenario", progress: playback.progress(0) })
       yield* report(diagnostics)
       const fail = (phase: Phase) =>
         Ref.update(state, (s): State => ({ ...s, phase, effective: 0 })).pipe(
@@ -220,9 +267,9 @@ export function make(options: Options = {}) {
         )
       if (hasErrors(diagnostics)) return yield* fail("error")
 
-      const design = yield* Schema.decodeUnknownEffect(Design.codec(registry))(doc, { errors: "all" }).pipe(Effect.orDie)
+      const design = yield* Schema.decodeUnknownEffect(Design.codec(registry))(runDoc, { errors: "all" }).pipe(Effect.orDie)
       const liveScope = yield* Scope.make()
-      const built = yield* Simulation.make(design, { seed, ...(options.frameMs === undefined ? {} : { frameMs: options.frameMs }) }).pipe(
+      const built = yield* Simulation.make(design, { seed: runSeed, ...(options.frameMs === undefined ? {} : { frameMs: options.frameMs }) }).pipe(
         Effect.provide(VirtualTime.layer),
         Scope.provide(liveScope),
         Effect.result
@@ -240,22 +287,58 @@ export function make(options: Options = {}) {
         ),
         liveScope
       )
-      yield* Ref.update(state, (s): State => ({ ...s, live: { sim, scope: liveScope }, phase: "paused", effective: 0 }))
+      // Anything a scenario does at t = 0 happens before the first frame.
+      if (playback !== undefined) yield* playback.apply(sim, 0).pipe(Effect.catch((e) => reject("scenario", e.issues)))
+      const alarms = Alarm.monitor(runDoc, registry)
+      yield* Ref.update(state, (s): State => ({ ...s, live: { sim, scope: liveScope, seed: runSeed, playback, alarms }, phase: "paused", effective: 0 }))
       yield* status
     })
 
     // --- Pacing ----------------------------------------------------------------------------------------------
-    /** Advance up to `virtualMs`, in slices, stopping early if the wall-clock `deadline` passes. */
+    /**
+     * Advance up to `virtualMs`, in slices, stopping early if the wall-clock `deadline` passes. A scenario's events land
+     * at exactly their time, and a scenario stops time at its end (`settle` decides what happens then).
+     */
     const advanceBy = (live: Live, virtualMs: number, deadline: number) =>
       Effect.gen(function*() {
         const target = (yield* live.sim.now) + virtualMs
         const out: Array<Frame> = []
+        const playback = live.playback
         for (;;) {
           const now = yield* live.sim.now
           if (now >= target || (yield* Clock.currentTimeMillis) >= deadline) break
-          out.push(...(yield* live.sim.advanceTo(Math.min(target, now + live.sim.frameMs * 4))))
+          const stop = playback?.nextStop() ?? Infinity
+          if (stop <= now) break
+          const until = Math.min(target, now + live.sim.frameMs * 4, stop)
+          const frames = yield* live.sim.advanceTo(until)
+          out.push(...frames)
+          if (playback !== undefined) {
+            playback.record(frames)
+            if (until === stop) yield* playback.apply(live.sim, until).pipe(Effect.catch((e) => reject("scenario", e.issues)))
+          }
         }
+        if (out.length > 0 && live.alarms.observe(out)) yield* emit({ _tag: "alerts", alerts: live.alarms.alerts() })
         return out
+      })
+
+    /** Tell the host how the scenario is doing. Once it has ended nothing changes, so nothing more is sent. */
+    const progress = (live: Live) =>
+      Effect.gen(function*() {
+        const playback = live.playback
+        if (playback === undefined || playback.ended()) return
+        yield* emit({ _tag: "scenario", progress: playback.progress(yield* live.sim.now) })
+      })
+
+    /** A scenario that has reached its end is decided and reported. True when that just happened: time should stop there. */
+    const settle = (live: Live) =>
+      Effect.gen(function*() {
+        const playback = live.playback
+        if (playback === undefined || playback.ended()) return false
+        const now = yield* live.sim.now
+        if (now < playback.duration) return false
+        playback.end()
+        yield* emit({ _tag: "scenario", progress: playback.progress(now) })
+        return true
       })
 
     const pace = Effect.gen(function*() {
@@ -275,9 +358,15 @@ export function make(options: Options = {}) {
           yield* Ref.update(state, (x) => ({ ...x, effective: x.effective === 0 ? advanced / elapsed : x.effective * 0.8 + (advanced / elapsed) * 0.2 }))
         }
         if (frames.length > 0) yield* emit({ _tag: "frames", frames })
+        if (yield* settle(s.live)) {
+          // The scenario is over: stop here, so its end is where the run rests. Playing again carries on past it.
+          yield* Ref.update(state, (x): State => ({ ...x, phase: "paused", effective: 0, pacer: undefined }))
+          return yield* status
+        }
         if ((yield* Clock.currentTimeMillis) - lastStatus >= 100) {
           lastStatus = yield* Clock.currentTimeMillis
           yield* status
+          yield* progress(s.live)
         }
       }
     })
@@ -341,26 +430,38 @@ export function make(options: Options = {}) {
             if (live === undefined) return
             const frames = yield* advanceBy(live, command.ms, Infinity)
             if (frames.length > 0) yield* emit({ _tag: "frames", frames })
+            if (!(yield* settle(live))) yield* progress(live)
             return yield* status
           }
-          case "updateNode":
+          case "updateNode": {
             if (live === undefined) return
-            return yield* live.sim.configureNode(command.id, command.settings).pipe(
+            const { doc, scenario } = yield* Ref.get(state)
+            const settings = liveSettings(doc && Design.patchNode(doc, command.id, { settings: command.settings }), scenario, (d) => d.nodes[command.id]?.settings, command.settings)
+            return yield* live.sim.configureNode(command.id, settings).pipe(
               Effect.flatMap(() => edited((d) => Design.patchNode(d, command.id, { settings: command.settings }))),
               Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No node "${command.id}"`]))
             )
-          case "updateEdge":
+          }
+          case "updateEdge": {
             if (live === undefined) return
-            return yield* live.sim.configureEdge(command.id, command.settings).pipe(
+            const { doc, scenario } = yield* Ref.get(state)
+            const patched = doc?.edges[command.id] === undefined ? doc : { ...doc, edges: { ...doc.edges, [command.id]: { ...doc.edges[command.id]!, settings: command.settings } } }
+            const settings = liveSettings(patched, scenario, (d) => d.edges[command.id]?.settings, command.settings)
+            return yield* live.sim.configureEdge(command.id, settings).pipe(
               Effect.flatMap(() => edited((d) => (d.edges[command.id] === undefined ? d : { ...d, edges: { ...d.edges, [command.id]: { ...d.edges[command.id]!, settings: command.settings } } }))),
               Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No edge "${command.id}"`]))
             )
-          case "updateAccount":
+          }
+          case "updateAccount": {
             if (live === undefined) return
-            return yield* live.sim.configureAccount(command.placement, command.settings).pipe(
+            const { doc, scenario } = yield* Ref.get(state)
+            const patched = doc === undefined ? doc : { ...doc, accounts: { ...doc.accounts, [command.placement]: command.settings } }
+            const settings = liveSettings(patched, scenario, (d) => d.accounts?.[command.placement], command.settings)
+            return yield* live.sim.configureAccount(command.placement, settings).pipe(
               Effect.flatMap(() => edited((d) => ({ ...d, accounts: { ...d.accounts, [command.placement]: command.settings } }))),
               Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No account for "${command.placement}" in this design`]))
             )
+          }
           case "updateController":
             if (live === undefined) return
             return yield* live.sim.configureController(command.id, command.settings).pipe(
@@ -388,6 +489,29 @@ export function make(options: Options = {}) {
             return
           case "clearFaults":
             if (live !== undefined) yield* live.sim.faults.clearAll
+            return
+          case "scenario": {
+            const s = yield* Ref.get(state)
+            const spec = command.scenario
+            const doc = typeof spec.design === "object" ? spec.design : s.doc
+            if (doc === undefined) return yield* reject("scenario", ["Load a design first, or put one in the scenario"])
+            // Checked before anything is torn down, so a scenario that can't play leaves the run as it was.
+            const made = yield* Effect.result(Scenario.playback(doc, spec, registry))
+            if (made._tag === "Failure") return yield* reject("scenario", made.failure.issues)
+            const wasRunning = s.phase === "running"
+            yield* Ref.update(state, (x) => ({ ...x, doc, scenario: spec, ...(typeof spec.design === "object" ? { seed: doc.seed ?? 1 } : {}) }))
+            yield* build
+            if (wasRunning) yield* play
+            return
+          }
+          case "clearScenario": {
+            const s = yield* Ref.get(state)
+            if (s.scenario === undefined) return
+            yield* Ref.update(state, (x) => ({ ...x, scenario: undefined }))
+            yield* emit({ _tag: "scenario" })
+            yield* build
+            if (s.phase === "running") yield* play
+          }
         }
       })
 

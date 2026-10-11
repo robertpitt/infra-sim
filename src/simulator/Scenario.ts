@@ -1,4 +1,6 @@
 import { Duration, Effect, Schema } from "effect"
+import * as Alarm from "./Alarm.ts"
+import { type Assertion, clientIds, combine, compare, evaluate, measure, parseAssertion, parseDuration, parseValue, rateOver, type Scope, statsOf, subjectOf, totalOver, unitOf, within } from "./Check.ts"
 import * as Design from "./Design.ts"
 import * as Fault from "./Fault.ts"
 import { Registry } from "./Registry.ts"
@@ -27,43 +29,14 @@ import { VirtualTime } from "./VirtualTime.ts"
  *     - { check: "web.latency.p99 < 800ms", from: 7m }
  */
 
-// ---------------------------------------------------------------------------------------------------------
-// Durations
-// ---------------------------------------------------------------------------------------------------------
-
-const UNITS: Readonly<Record<string, number>> = {
-  ms: 1, millis: 1, millisecond: 1, milliseconds: 1,
-  s: 1_000, sec: 1_000, secs: 1_000, second: 1_000, seconds: 1_000,
-  m: 60_000, min: 60_000, mins: 60_000, minute: 60_000, minutes: 60_000,
-  h: 3_600_000, hr: 3_600_000, hrs: 3_600_000, hour: 3_600_000, hours: 3_600_000,
-  d: 86_400_000, day: 86_400_000, days: 86_400_000
-}
-
-/**
- * A duration in milliseconds: `"250ms"`, `"90s"`, `"2m"`, `"1h30m"`, `"2 minutes"`. A bare number is **seconds**.
- * `undefined` if it isn't one.
- */
-export const parseDuration = (input: unknown): number | undefined => {
-  if (typeof input === "number") return Number.isFinite(input) && input >= 0 ? input * 1000 : undefined
-  if (typeof input !== "string") return undefined
-  const text = input.trim().toLowerCase()
-  if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text) * 1000
-  let total = 0
-  let rest = text
-  while (rest.length > 0) {
-    const m = /^\s*(\d+(?:\.\d+)?)\s*([a-z]+)\s*/.exec(rest)
-    if (m === null || UNITS[m[2]!] === undefined) return undefined
-    total += Number(m[1]) * UNITS[m[2]!]!
-    rest = rest.slice(m[0].length)
-  }
-  return text.length === 0 ? undefined : total
-}
-
-const DurationInput = Schema.Union([Schema.Number, Schema.String])
+// Durations and assertions are written in the check language, which lives in `Check.ts` and is shared with alarms.
+export { type Aggregate, ASSERTION_SYNTAX, type Assertion, parseAssertion, parseDuration } from "./Check.ts"
 
 // ---------------------------------------------------------------------------------------------------------
 // The scenario document
 // ---------------------------------------------------------------------------------------------------------
+
+const DurationInput = Schema.Union([Schema.Number, Schema.String])
 
 const Settings = Schema.Record(Schema.String, Schema.Unknown)
 
@@ -144,234 +117,6 @@ export class ScenarioError extends Error {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Assertions
-// ---------------------------------------------------------------------------------------------------------
-
-type Op = "<" | "<=" | ">" | ">=" | "==" | "!="
-
-export interface Assertion {
-  /** The text it was written as. */
-  readonly text: string
-  readonly name: string | undefined
-  readonly subject: { readonly scope: "node" | "edge" | "system"; readonly id: string }
-  readonly metric: Metric
-  readonly agg: Aggregate | undefined
-  readonly op: Op
-  readonly value: number
-  /** The window in ms from the start of the run, when the assertion sets one. */
-  readonly from: number | undefined
-  readonly to: number | undefined
-}
-
-export type Aggregate = "mean" | "max" | "min" | "last" | "sum"
-type Metric =
-  | { readonly kind: "rate"; readonly name: string }
-  | { readonly kind: "total"; readonly name: string }
-  | { readonly kind: "gauge"; readonly name: string }
-  | { readonly kind: "dist"; readonly name: string; readonly stat: "mean" | "p50" | "p95" | "p99" | "max" }
-  | { readonly kind: "errorRatio" }
-  | { readonly kind: "successRatio" }
-  | { readonly kind: "throughput" }
-
-/** What an assertion can say, for help text and for agents writing one. */
-export const ASSERTION_SYNTAX = `<subject>.<metric>[:<aggregate>] <op> <value> [@ <from>..<to>]
-
-subject   a node id; edge:<edge id>; or system (every client together)
-metric    errorRatio | successRatio | throughput
-          rate.<counter>          per-second rate of a counter: rate.ok, rate.fail, rate.fail.Throttled, rate.in, rate.sent
-          total.<counter>         how many events in the window
-          gauge.<name>            a gauge: gauge.depth, gauge.concurrent, gauge.inflight, gauge.cacheHitRate
-          latency.<stat>          p50 | p95 | p99 | mean | max, of the 'latency' distribution (other distributions: dist.<name>.<stat>)
-aggregate how to combine the window's frames: mean (default) | max | min | last | sum
-op        < <= > >= == !=
-value     a number, with optional unit: 500ms, 2s, 1.5%, 10/s
-window    @ 2m..3m measures only that stretch (default: after the warm-up, to the end of the run)
-
-examples  api.errorRatio < 1%
-          system.latency.p99 < 800ms
-          orders-queue.gauge.depth:max < 5000
-          fn.rate.fail.Throttled == 0
-          edge:web.out->api.rate.fail < 5/s @ 4m..6m`
-
-const OPS: ReadonlyArray<Op> = ["<=", ">=", "==", "!=", "<", ">"]
-
-/** Parse an assertion written as text. Returns the reason it can't be read as a string. */
-export const parseAssertion = (text: string, extra: { readonly name?: string; readonly from?: number; readonly to?: number } = {}): Assertion | string => {
-  let body = text.trim()
-  let from = extra.from
-  let to = extra.to
-  const window = /\s@\s*([^\s.]+(?:\s*[a-z]+)?)\s*\.\.\s*([^\s]+(?:\s*[a-z]+)?)\s*$/i.exec(body)
-  if (window !== null) {
-    const a = parseDuration(window[1])
-    const b = parseDuration(window[2])
-    if (a === undefined || b === undefined) return `"${text}": can't read the window ${window[1]}..${window[2]}`
-    from = a
-    to = b
-    body = body.slice(0, window.index).trim()
-  }
-  const op = OPS.find((o) => body.includes(` ${o} `) || body.includes(o))
-  if (op === undefined) return `"${text}": no comparison (use one of ${OPS.join(" ")})`
-  const at = body.indexOf(` ${op} `) >= 0 ? body.indexOf(` ${op} `) + 1 : body.indexOf(op)
-  const left = body.slice(0, at).trim()
-  const right = body.slice(at + op.length).trim()
-  const value = parseValue(right)
-  if (value === undefined) return `"${text}": can't read the value "${right}" (a number, with an optional unit: 500ms, 2s, 1.5%, 10/s)`
-
-  const m = /^(?<subject>edge:\S+?|\S+?)\.(?<metric>(?:errorRatio|successRatio|throughput|rate|total|gauge|latency|dist)\S*?)(?::(?<agg>mean|max|min|last|sum))?$/.exec(left)
-  if (m?.groups === undefined) return `"${text}": expected <subject>.<metric>, e.g. api.errorRatio or orders-queue.gauge.depth:max`
-  const { subject, metric, agg } = m.groups as { subject: string; metric: string; agg: Aggregate | undefined }
-  const parsed = parseMetric(metric)
-  if (typeof parsed === "string") return `"${text}": ${parsed}`
-  const scope = subject === "system" ? "system" : subject.startsWith("edge:") ? "edge" : "node"
-  return {
-    text,
-    name: extra.name,
-    subject: { scope, id: scope === "edge" ? subject.slice(5) : subject },
-    metric: parsed,
-    agg,
-    op,
-    value,
-    from,
-    to
-  }
-}
-
-const parseValue = (text: string): number | undefined => {
-  const m = /^(-?\d+(?:\.\d+)?)\s*(%|ms|s|m|h|\/s|)$/.exec(text.trim())
-  if (m === null) return undefined
-  const n = Number(m[1])
-  switch (m[2]) {
-    case "%": return n / 100
-    case "ms": return n
-    case "s": return n * 1000
-    case "m": return n * 60_000
-    case "h": return n * 3_600_000
-    default: return n
-  }
-}
-
-const parseMetric = (text: string): Metric | string => {
-  const [head, ...rest] = text.split(".")
-  const name = rest.join(".")
-  switch (head) {
-    case "errorRatio": return { kind: "errorRatio" }
-    case "successRatio": return { kind: "successRatio" }
-    case "throughput": return { kind: "throughput" }
-    case "rate":
-    case "total":
-    case "gauge":
-      return name === "" ? `${head} needs a name, like ${head}.ok` : { kind: head, name }
-    case "latency": {
-      const stat = name
-      return ["mean", "p50", "p95", "p99", "max"].includes(stat) ? { kind: "dist", name: "latency", stat: stat as "mean" } : "latency needs a statistic: p50, p95, p99, mean or max"
-    }
-    case "dist": {
-      const stat = rest[rest.length - 1]
-      const dist = rest.slice(0, -1).join(".")
-      return dist !== "" && ["mean", "p50", "p95", "p99", "max"].includes(stat ?? "") ? { kind: "dist", name: dist, stat: stat as "mean" } : "dist needs a name and a statistic, like dist.age.p95"
-    }
-    default:
-      return `unknown metric "${text}"`
-  }
-}
-
-// ---------------------------------------------------------------------------------------------------------
-// Measuring frames
-// ---------------------------------------------------------------------------------------------------------
-
-type Scope = "nodes" | "edges"
-
-/** Frames whose window ends in (from, to]. */
-const within = (frames: ReadonlyArray<Frame>, from: number, to: number) => frames.filter((f) => f.t > from && f.t <= to)
-
-const statsOf = (frame: Frame, scope: Scope, id: string): Stats | undefined => frame[scope][id]
-
-const combine = (values: ReadonlyArray<number>, agg: Aggregate): number => {
-  if (values.length === 0) return 0
-  switch (agg) {
-    case "max": return Math.max(...values)
-    case "min": return Math.min(...values)
-    case "last": return values[values.length - 1]!
-    case "sum": return values.reduce((a, b) => a + b, 0)
-    case "mean": return values.reduce((a, b) => a + b, 0) / values.length
-  }
-}
-
-/** Events per second of a counter, over the frames. `sum` of rates would be meaningless, so it counts events instead. */
-const rateOver = (frames: ReadonlyArray<Frame>, scope: Scope, id: string, name: string, agg: Aggregate): number =>
-  agg === "sum"
-    ? frames.reduce((n, f) => n + ((statsOf(f, scope, id)?.rates[name] ?? 0) * f.dt) / 1000, 0)
-    : combine(frames.map((f) => statsOf(f, scope, id)?.rates[name] ?? 0), agg)
-
-const totalOver = (frames: ReadonlyArray<Frame>, scope: Scope, id: string, name: string): number => rateOver(frames, scope, id, name, "sum")
-
-/**
- * A statistic of a distribution over the frames. Percentiles can't be merged exactly from per-frame summaries, so the
- * mean-aggregate is each frame's value weighted by its sample count: a good estimate, not an exact quantile.
- */
-const distOver = (frames: ReadonlyArray<Frame>, scope: Scope, id: string, name: string, stat: "mean" | "p50" | "p95" | "p99" | "max", agg: Aggregate): number => {
-  const points = frames.flatMap((f) => {
-    const d = statsOf(f, scope, id)?.dist[name]
-    return d === undefined ? [] : [{ n: d.n, v: d[stat] }]
-  })
-  if (points.length === 0) return 0
-  if (agg === "mean" || agg === "sum") {
-    const n = points.reduce((s, p) => s + p.n, 0)
-    return n === 0 ? 0 : points.reduce((s, p) => s + p.v * p.n, 0) / n
-  }
-  return combine(points.map((p) => p.v), agg)
-}
-
-const gaugeOver = (frames: ReadonlyArray<Frame>, scope: Scope, id: string, name: string, agg: Aggregate): number =>
-  combine(frames.map((f) => statsOf(f, scope, id)?.gauges[name] ?? 0), agg)
-
-/** The clients are the system's edge: what they see is what a user sees. */
-const clientIds = (design: Design.Doc, registry: { readonly get: (type: string) => { readonly inputs: boolean } | undefined }): ReadonlyArray<string> =>
-  Object.entries(design.nodes).filter(([, n]) => registry.get(n.type)?.inputs === false).map(([id]) => id)
-
-interface Subject {
-  readonly nodes: ReadonlyArray<string>
-  readonly scope: Scope
-}
-
-const measure = (frames: ReadonlyArray<Frame>, subject: Subject, metric: Metric, agg: Aggregate | undefined): number => {
-  const { nodes, scope } = subject
-  const sumOf = (f: (id: string) => number) => nodes.reduce((n, id) => n + f(id), 0)
-  switch (metric.kind) {
-    case "rate": {
-      const a = agg ?? "mean"
-      return a === "mean" || a === "sum" || nodes.length === 1
-        ? sumOf((id) => rateOver(frames, scope, id, metric.name, a))
-        : combine(frames.map((f) => nodes.reduce((n, id) => n + (statsOf(f, scope, id)?.rates[metric.name] ?? 0), 0)), a)
-    }
-    case "total":
-      return sumOf((id) => totalOver(frames, scope, id, metric.name))
-    case "gauge":
-      return agg === "sum" || nodes.length === 1
-        ? sumOf((id) => gaugeOver(frames, scope, id, metric.name, agg ?? "mean"))
-        : combine(frames.map((f) => nodes.reduce((n, id) => n + (statsOf(f, scope, id)?.gauges[metric.name] ?? 0), 0)), agg ?? "mean")
-    case "dist": {
-      // Several nodes: weight each by its own sample count.
-      const parts = nodes.map((id) => ({ id, n: frames.reduce((s, f) => s + (statsOf(f, scope, id)?.dist[metric.name]?.n ?? 0), 0) }))
-      const total = parts.reduce((s, p) => s + p.n, 0)
-      if (total === 0) return 0
-      const stat = metric.stat
-      if ((agg ?? "mean") === "max" || stat === "max") return Math.max(...parts.map((p) => distOver(frames, scope, p.id, metric.name, stat, agg ?? "mean")))
-      return parts.reduce((s, p) => s + distOver(frames, scope, p.id, metric.name, stat, agg ?? "mean") * p.n, 0) / total
-    }
-    case "errorRatio":
-    case "successRatio": {
-      const ok = sumOf((id) => totalOver(frames, scope, id, "ok"))
-      const fail = sumOf((id) => totalOver(frames, scope, id, "fail"))
-      const ratio = ok + fail === 0 ? 0 : fail / (ok + fail)
-      return metric.kind === "errorRatio" ? ratio : ok + fail === 0 ? 0 : 1 - ratio
-    }
-    case "throughput":
-      return sumOf((id) => rateOver(frames, scope, id, "ok", agg ?? "mean"))
-  }
-}
-
-// ---------------------------------------------------------------------------------------------------------
 // The result
 // ---------------------------------------------------------------------------------------------------------
 
@@ -434,6 +179,8 @@ export interface Result {
   readonly timeline: ReadonlyArray<{ readonly at: number; readonly what: string }>
   readonly faults: ReadonlyArray<FaultSpan>
   readonly assertions: ReadonlyArray<AssertionResult>
+  /** Alarms that went off during the run, as a monitoring system would have raised them. */
+  readonly alerts: ReadonlyArray<Alarm.Alert>
   /** Components that threw instead of failing a call. */
   readonly defects: ReadonlyArray<{ readonly t: number; readonly node: string; readonly message: string }>
   readonly diagnostics: ReadonlyArray<{ readonly level: string; readonly code: string; readonly message: string; readonly node?: string; readonly edge?: string }>
@@ -638,49 +385,131 @@ const describe = (event: TimelineEvent): string => {
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
+// ---------------------------------------------------------------------------------------------------------
+// Playing a scenario
+// ---------------------------------------------------------------------------------------------------------
+
+const EventKind = Schema.Literals(["inject", "clear", "set", "account", "note"])
+
+/** Where a check stands: before its window opens, measuring (and so far holding or breaking), or decided. */
+export const CheckState = Schema.Literals(["waiting", "holding", "breaking", "passed", "failed"])
+export type CheckState = typeof CheckState.Type
+
+export const CheckProgress = Schema.Struct({
+  check: Schema.String,
+  name: Schema.optionalKey(Schema.String),
+  window: Schema.Struct({ from: Schema.Number, to: Schema.Number }),
+  expected: Schema.Struct({ op: Schema.String, value: Schema.Number }),
+  unit: Schema.Literals(["ratio", "ms", "count", "rate", "number"]),
+  state: CheckState,
+  /** What it measures over its window so far; absent while waiting. */
+  actual: Schema.optionalKey(Schema.Number)
+})
+export type CheckProgress = typeof CheckProgress.Type
+
+/** A scenario part-way through: what has happened, what is coming, and how each assertion is doing. Plain data. */
+export const Progress = Schema.Struct({
+  name: Schema.optionalKey(Schema.String),
+  description: Schema.optionalKey(Schema.String),
+  duration: Schema.Number,
+  warmup: Schema.Number,
+  t: Schema.Number,
+  /** The run has reached its duration and every check is decided. */
+  finished: Schema.Boolean,
+  /** Once finished: did every check pass. */
+  passed: Schema.optionalKey(Schema.Boolean),
+  timeline: Schema.Array(Schema.Struct({ at: Schema.Number, what: Schema.String, kind: EventKind, done: Schema.Boolean })),
+  checks: Schema.Array(CheckProgress)
+})
+export type Progress = typeof Progress.Type
+
 /**
- * Run a scenario against a design. The design is checked first (every problem reported, by id), then run on a fresh
- * virtual-time world, stopping at each timeline event to apply it. The result is plain data.
+ * A scenario being played against a running simulation. Whoever drives time (`run` below, as fast as it can; the engine,
+ * paced against the clock) asks where to stop next, advances there, records the frames and applies what is due, so an
+ * event lands at exactly its time however fast the run. The checks are measured from the recorded frames, at any moment
+ * (for a live view) or once the end is reached (for the verdict), the same way either way.
  */
-export const run = (design: Design.Doc, scenario: Scenario, options: RunOptions = {}): Effect.Effect<Result, ScenarioError, Registry> =>
+export interface Playback {
+  /** The design the scenario runs: its traffic scale and overrides applied over the design's own settings. */
+  readonly design: Design.Doc
+  readonly seed: number
+  readonly duration: number
+  readonly warmup: number
+  /** Where the run has to stop next: the next event, or the end. Infinity once it has ended. */
+  readonly nextStop: () => number
+  /** Apply every event due by `now`, in order. */
+  readonly apply: (sim: Simulation.Service, now: number) => Effect.Effect<void, ScenarioError>
+  /** Keep what the checks will measure from new frames. */
+  readonly record: (frames: ReadonlyArray<Frame>) => void
+  /** Mark the end of the scenario. Time may go on (a live run can be played further), but nothing more happens. */
+  readonly end: () => void
+  readonly ended: () => boolean
+  readonly progress: (now: number) => Progress
+  /** Every assertion's verdict. Final once the end is reached. */
+  readonly results: () => ReadonlyArray<AssertionResult>
+  /** What happened, as it happened. */
+  readonly log: ReadonlyArray<{ readonly at: number; readonly what: string }>
+  readonly spans: ReadonlyArray<FaultSpan>
+}
+
+const kindOf = (event: TimelineEvent): typeof EventKind.Type =>
+  event.inject !== undefined ? "inject" : event.clear !== undefined ? "clear" : event.set !== undefined ? "set" : event.account !== undefined ? "account" : "note"
+
+/**
+ * Get a scenario ready to play against a design: checked (every problem reported, by id), its overrides applied, its
+ * timeline in order and its assertions parsed.
+ */
+export const playback = (
+  design: Design.Doc,
+  scenario: Scenario,
+  registry: { readonly get: (type: string) => { readonly type: string; readonly inputs: boolean } | undefined }
+): Effect.Effect<Playback, ScenarioError> =>
   Effect.gen(function*() {
-    const registry = yield* Registry
     const problems = check(design, scenario)
     if (problems.length > 0) return yield* Effect.fail(new ScenarioError(problems))
     const duration = parseDuration(scenario.duration)
     if (duration === undefined) return yield* Effect.fail(new ScenarioError(["duration: a scenario needs one (for example 5m)"]))
     const warmup = parseDuration(scenario.warmup ?? 0) ?? 0
     const prepared = prepare(design, scenario, registry)
-    const seed = scenario.seed ?? prepared.seed ?? 1
+    const clients = clientIds(prepared, registry)
 
-    const decoded = yield* Schema.decodeUnknownEffect(Design.codec(registry))(prepared, { errors: "all" }).pipe(
-      Effect.mapError((e) => new ScenarioError(e.message.split("\n").map((l) => l.trim()).filter(Boolean)))
+    const events = (scenario.timeline ?? [])
+      .map((event, index) => ({ event, at: parseDuration(event.at)!, index }))
+      .sort((a, b) => a.at - b.at || a.index - b.index)
+    // `check` has parsed every assertion already.
+    const assertions = (scenario.assert ?? []).map((a) =>
+      (typeof a === "string"
+        ? parseAssertion(a)
+        : parseAssertion(a.check, { ...(a.name === undefined ? {} : { name: a.name }), ...(a.from === undefined ? {} : { from: parseDuration(a.from) ?? 0 }), ...(a.to === undefined ? {} : { to: parseDuration(a.to) ?? 0 }) })) as Assertion
     )
-    const started = Date.now()
+    const windows = assertions.map((a) => ({ from: a.from ?? warmup, to: a.to ?? duration }))
 
-    const body = Effect.gen(function*() {
-      const sim = yield* Simulation.make(decoded, { seed, ...(options.frameMs === undefined ? {} : { frameMs: options.frameMs }) }).pipe(
-        Effect.provide(VirtualTime.layer),
-        Effect.mapError((e) => new ScenarioError([e.message]))
-      )
-      // What each node, edge and account currently has as overrides, so a later change merges over it.
-      const current = {
-        nodes: new Map(Object.entries(prepared.nodes).map(([id, n]) => [id, (n.settings ?? {}) as Bag])),
-        edges: new Map(Object.entries(prepared.edges).map(([id, e]) => [id, (e.settings ?? {}) as Bag])),
-        accounts: new Map(Object.entries(prepared.accounts ?? {}).map(([k, v]) => [k, v as Bag]))
-      }
-      const frames: Array<Frame> = []
-      const spans: Array<{ id: string; target: string; fault: Fault.Fault["_tag"]; from: number; to: number | undefined }> = []
-      const log: Array<{ at: number; what: string }> = []
-      const named = new Map<string, string>()
-      const fail = (message: string) => Effect.fail(new ScenarioError([message]))
+    // Only what the assertions read is kept, so a long live run doesn't hold every frame of a large design.
+    const keep = { nodes: new Set<string>(), edges: new Set<string>() }
+    for (const a of assertions) for (const id of subjectOf(a, clients).nodes) keep[a.subject.scope === "edge" ? "edges" : "nodes"].add(id)
+    const pick = (stats: Frame["nodes"], ids: ReadonlySet<string>) => {
+      const out: Record<string, Frame["nodes"][string]> = {}
+      for (const id of ids) if (stats[id] !== undefined) out[id] = stats[id]
+      return out
+    }
+    const recorded: Array<Frame> = []
 
-      const events = (scenario.timeline ?? [])
-        .map((event, index) => ({ event, at: parseDuration(event.at)!, index }))
-        .sort((a, b) => a.at - b.at || a.index - b.index)
+    // What each node, edge and account currently has as overrides, so a later change merges over it.
+    const current = {
+      nodes: new Map(Object.entries(prepared.nodes).map(([id, n]) => [id, (n.settings ?? {}) as Bag])),
+      edges: new Map(Object.entries(prepared.edges).map(([id, e]) => [id, (e.settings ?? {}) as Bag])),
+      accounts: new Map(Object.entries(prepared.accounts ?? {}).map(([k, v]) => [k, v as Bag]))
+    }
+    const spans: Array<{ id: string; target: string; fault: Fault.Fault["_tag"]; from: number; to: number | undefined }> = []
+    const log: Array<{ at: number; what: string }> = []
+    const named = new Map<string, string>()
+    const decided = new Map<number, number>()
+    let applied = 0
+    let ended = false
+    const fail = (message: string) => Effect.fail(new ScenarioError([message]))
 
-      for (const { event, at } of events) {
-        frames.push(...(yield* sim.advanceTo(at)))
+    const applyOne = (sim: Simulation.Service, event: TimelineEvent, at: number) =>
+      Effect.gen(function*() {
         log.push({ at, what: describe(event) })
         if (event.inject !== undefined) {
           const target = parseTarget(event.inject.target, prepared) as Fault.Target
@@ -688,8 +517,7 @@ export const run = (design: Design.Doc, scenario: Scenario, options: RunOptions 
           const fault = yield* Schema.decodeUnknownEffect(Fault.Fault)(encoded).pipe(Effect.mapError((e) => new ScenarioError([`timeline: ${e.message}`])))
           const lasts = event.inject.for === undefined ? undefined : parseDuration(event.inject.for)
           const active = yield* sim.faults.inject(target, fault, lasts).pipe(Effect.mapError(() => new ScenarioError([`timeline: nothing to inject into at ${event.inject!.target}`])))
-          const span = { id: active.id, target: event.inject.target, fault: fault._tag, from: at, to: lasts === undefined ? undefined : at + lasts }
-          spans.push(span)
+          spans.push({ id: active.id, target: event.inject.target, fault: fault._tag, from: at, to: lasts === undefined ? undefined : at + lasts })
           if (event.inject.id !== undefined) named.set(event.inject.id, active.id)
         } else if (event.clear !== undefined) {
           const open = yield* sim.faults.active
@@ -716,13 +544,119 @@ export const run = (design: Design.Doc, scenario: Scenario, options: RunOptions 
           yield* sim.configureAccount(placement, next).pipe(Effect.catch((e) => fail(`timeline: ${placement}: ${messageOf(e)}`)))
           current.accounts.set(placement, next)
         }
+      })
+
+    /** An assertion's value over its window up to `now`, and whether that window has closed. */
+    const measureAt = (i: number, now: number): { readonly actual: number; readonly closed: boolean } | undefined => {
+      const final = decided.get(i)
+      if (final !== undefined) return { actual: final, closed: true }
+      const { from, to } = windows[i]!
+      if (now <= from) return undefined
+      const closed = now >= to
+      const actual = evaluate(assertions[i]!, within(recorded, from, Math.min(now, to)), clients)
+      if (closed) decided.set(i, actual)
+      return { actual, closed }
+    }
+
+    const results = (): ReadonlyArray<AssertionResult> =>
+      assertions.map((a, i) => {
+        const actual = measureAt(i, Math.max(duration, windows[i]!.to))?.actual ?? 0
+        return { check: a.text, name: a.name, passed: compare(actual, a.op, a.value), actual: round(actual, 6), expected: { op: a.op, value: a.value }, window: windows[i]! }
+      })
+
+    return {
+      design: prepared,
+      seed: scenario.seed ?? prepared.seed ?? 1,
+      duration,
+      warmup,
+      nextStop: () => (ended ? Infinity : Math.min(events[applied]?.at ?? Infinity, duration)),
+      apply: (sim, now) =>
+        Effect.gen(function*() {
+          while (applied < events.length && events[applied]!.at <= now) {
+            const { event, at } = events[applied]!
+            applied++
+            yield* applyOne(sim, event, at)
+          }
+        }),
+      record: (frames) => {
+        if (keep.nodes.size === 0 && keep.edges.size === 0) return
+        for (const f of frames) recorded.push({ ...f, nodes: pick(f.nodes, keep.nodes), edges: pick(f.edges, keep.edges) })
+      },
+      end: () => {
+        ended = true
+      },
+      ended: () => ended,
+      progress: (now) => {
+        const checks = assertions.map((a, i): CheckProgress => {
+          const m = measureAt(i, now)
+          const base = {
+            check: a.text,
+            ...(a.name === undefined ? {} : { name: a.name }),
+            window: windows[i]!,
+            expected: { op: a.op, value: a.value },
+            unit: unitOf(a.metric)
+          }
+          if (m === undefined) return { ...base, state: "waiting" }
+          const ok = compare(m.actual, a.op, a.value)
+          return { ...base, actual: round(m.actual, 6), state: m.closed ? (ok ? "passed" : "failed") : ok ? "holding" : "breaking" }
+        })
+        const finished = ended || now >= duration
+        return {
+          ...(scenario.name === undefined ? {} : { name: scenario.name }),
+          ...(scenario.description === undefined ? {} : { description: scenario.description }),
+          duration,
+          warmup,
+          t: now,
+          finished,
+          ...(finished ? { passed: checks.every((c) => c.state === "passed") } : {}),
+          timeline: events.map(({ event, at }, i) => ({ at, what: describe(event), kind: kindOf(event), done: i < applied })),
+          checks
+        }
+      },
+      results,
+      log,
+      spans
+    }
+  })
+
+/**
+ * Run a scenario against a design, as fast as it goes. The design is checked first (every problem reported, by id),
+ * then run on a fresh virtual-time world, stopping at each timeline event to apply it. The result is plain data.
+ */
+export const run = (design: Design.Doc, scenario: Scenario, options: RunOptions = {}): Effect.Effect<Result, ScenarioError, Registry> =>
+  Effect.gen(function*() {
+    const registry = yield* Registry
+    const play = yield* playback(design, scenario, registry)
+    const { duration, warmup, seed } = play
+    const prepared = play.design
+
+    const decoded = yield* Schema.decodeUnknownEffect(Design.codec(registry))(prepared, { errors: "all" }).pipe(
+      Effect.mapError((e) => new ScenarioError(e.message.split("\n").map((l) => l.trim()).filter(Boolean)))
+    )
+    const started = Date.now()
+
+    const body = Effect.gen(function*() {
+      const sim = yield* Simulation.make(decoded, { seed, ...(options.frameMs === undefined ? {} : { frameMs: options.frameMs }) }).pipe(
+        Effect.provide(VirtualTime.layer),
+        Effect.mapError((e) => new ScenarioError([e.message]))
+      )
+      const frames: Array<Frame> = []
+      const alarms = Alarm.monitor(prepared, registry)
+      yield* play.apply(sim, 0)
+      while ((yield* sim.now) < duration) {
+        const stop = play.nextStop()
+        const advanced = yield* sim.advanceTo(stop)
+        frames.push(...advanced)
+        play.record(advanced)
+        alarms.observe(advanced)
+        yield* play.apply(sim, stop)
       }
-      frames.push(...(yield* sim.advanceTo(duration)))
+      play.end()
       const defects = yield* sim.defects
-      return { frames, spans, log, defects }
+      return { frames, defects, alerts: alarms.alerts() }
     })
 
-    const { frames, spans, log, defects } = yield* Effect.scoped(body)
+    const { frames, defects, alerts } = yield* Effect.scoped(body)
 
     const measured = within(frames, warmup, duration)
     const clients = clientIds(prepared, registry)
@@ -731,17 +665,7 @@ export const run = (design: Design.Doc, scenario: Scenario, options: RunOptions 
     const edges: Record<string, Summary> = {}
     for (const id of Object.keys(prepared.edges)) edges[id] = summarise(measured, "edges", [id])
     const system = summarise(measured, "nodes", clients)
-
-    const assertions: Array<AssertionResult> = (scenario.assert ?? []).map((a) => {
-      const text = typeof a === "string" ? a : a.check
-      const parsed = typeof a === "string" ? parseAssertion(a) : parseAssertion(a.check, { ...(a.name === undefined ? {} : { name: a.name }), ...(a.from === undefined ? {} : { from: parseDuration(a.from) ?? 0 }), ...(a.to === undefined ? {} : { to: parseDuration(a.to) ?? 0 }) })
-      const window = { from: typeof parsed === "string" ? warmup : (parsed.from ?? warmup), to: typeof parsed === "string" ? duration : (parsed.to ?? duration) }
-      if (typeof parsed === "string") return { check: text, name: undefined, passed: false, actual: undefined, expected: { op: "?", value: 0 }, window, problem: parsed }
-      const subjectNodes = parsed.subject.scope === "system" ? clients : [parsed.subject.id]
-      const scope: Scope = parsed.subject.scope === "edge" ? "edges" : "nodes"
-      const actual = measure(within(frames, window.from, window.to), { nodes: subjectNodes, scope }, parsed.metric, parsed.agg)
-      return { check: text, name: parsed.name, passed: compare(actual, parsed.op, parsed.value), actual: round(actual, 6), expected: { op: parsed.op, value: parsed.value }, window }
-    })
+    const assertions = play.results()
 
     const result: Result = {
       scenario: scenario.name,
@@ -754,28 +678,16 @@ export const run = (design: Design.Doc, scenario: Scenario, options: RunOptions 
       system,
       nodes,
       edges,
-      timeline: log,
-      faults: spans,
+      timeline: play.log,
+      faults: play.spans,
       assertions,
+      alerts,
       defects: defects.map((d) => ({ t: d.t, node: d.node, message: d.message })),
       diagnostics: [],
       ...(options.keepFrames === true ? { frames } : {})
     }
     return result
   })
-
-const compare = (actual: number, op: Op, expected: number): boolean => {
-  // Measured values are floats: treat a difference below rounding noise as equal.
-  const eps = 1e-9
-  switch (op) {
-    case "<": return actual < expected
-    case "<=": return actual <= expected + eps
-    case ">": return actual > expected
-    case ">=": return actual >= expected - eps
-    case "==": return Math.abs(actual - expected) <= Math.max(eps, Math.abs(expected) * 1e-6)
-    case "!=": return Math.abs(actual - expected) > Math.max(eps, Math.abs(expected) * 1e-6)
-  }
-}
 
 /** Seconds helper for callers that format durations. */
 export const toSeconds = (ms: number): number => Duration.toSeconds(Duration.millis(ms))

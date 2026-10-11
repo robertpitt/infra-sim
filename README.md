@@ -106,6 +106,10 @@ npm run build:cli                                        # dist-cli/infra-sim.mj
 
 A **scenario** is a design plus what happens to it: duration, traffic, setting overrides, a timeline of faults and live
 changes, and assertions (`api.errorRatio < 1%`, `orders-queue.gauge.depth:max < 5000`, `system.latency.p99 < 800ms`).
+The app plays the same files live (the dock's **Scenario** tab): the timeline happens at its times, each check shows whether
+it is holding, and the run stops at the end with a verdict. Every run is also watched by standard **alarms** (errors,
+throttling, timeouts, dead-lettered and expired messages, old backlogs, saturation), shown in the **Alerts** tab and on the
+nodes, and listed in the CLI's report.
 Runs are on virtual time and deterministic, so a simulated hour takes seconds and the same seed gives the same result. Exit
 codes: `0` held, `1` an assertion failed, `2` the input was wrong. `--json` prints the whole result as data. The guide for
 people and agents, with the scenario format, assertion syntax and output schema, is [`docs/CLI.md`](docs/CLI.md) (also
@@ -117,7 +121,7 @@ people and agents, with the scenario format, assertion syntax and output schema,
 ```
 src/simulator/   the engine: pure Effect, no DOM. Components, edges, faults, virtual time, the Engine protocol, importers
 src/cli/          the command line (Node only): a thin layer over the engine
-src/ui/          the React app: canvas, sidebar, charts. Runs the engine in a worker (src/ui/state/engine.worker.ts)
+src/ui/          the React app: canvas, sidebar, and a dock with charts, alerts and scenarios. Runs the engine in a worker (src/ui/state/engine.worker.ts)
 src/examples/    loads examples/*.yaml for the app and tests
 examples/        the example designs (and examples/imports: templates to try the importer on)
 docs/            AWS limits, with sources

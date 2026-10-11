@@ -198,9 +198,22 @@ time for a time, clear it, change a node's or edge's settings live, change accou
 checks everything first and reports every problem at once (unknown ids, unreadable times and assertions), then runs on a
 fresh virtual-time world, stopping at each timeline event to apply it, and returns a plain-data `Result`: a summary per node
 and edge over the measured window (rates per second, gauges as mean/max/last, latency percentiles, totals, error ratio), the
-faults that happened, and each assertion with its measured value. Assertions are small expressions
-(`<subject>.<metric>[:<aggregate>] <op> <value> [@ from..to]`; `Scenario.ASSERTION_SYNTAX` documents them). Percentiles over a
-window are a sample-weighted estimate from per-frame summaries; maxima are exact.
+faults that happened, each assertion with its measured value, and the alerts the run raised. Assertions are small expressions
+(`<subject>.<metric>[:<aggregate>] <op> <value> [@ from..to]`; `Check.ASSERTION_SYNTAX` documents them). The language lives in
+`Check.ts` (parsing, measuring frames, comparing), shared by scenarios and alarms. Percentiles over a window are a
+sample-weighted estimate from per-frame summaries; maxima are exact.
+
+A scenario is played through a `Scenario.Playback`: whoever drives time asks it where to stop next (the next event, or the
+end), advances there, records the frames and applies what is due, so an event lands at exactly its time however fast the run.
+`run` drives it as fast as it can; the engine drives it against the clock, so a scenario also plays live in the UI. Its
+checks can be read at any moment (`progress`: each one `waiting`, `holding` or `breaking` so far, then `passed` or `failed`
+when its window closes), and only what they read is kept, so a long live run doesn't hold every frame.
+
+**Alarms** (`Alarm.ts`) are what a monitoring system would page someone about: a standard set of rules written in the check
+language (errors, throttling, timeouts, expired and dead-lettered messages, an old backlog, saturation) applied to every node.
+The monitor works like CloudWatch alarms: telemetry is cut into 10-second periods, a rule must breach for some consecutive
+periods to fire and stay calm for three to resolve. Errors that the clients see are critical (they are what users see); errors
+inside are warnings, since retries may absorb them. It is plain code over frames, so the CLI and the engine raise the same alerts.
 
 `src/cli` is a thin Node layer over it (an `effect/cli` command tree, file loading, rendering): `run`, `check`, `import`, `convert`,
 `components`, `describe`, `examples`, `docs`. It loads designs, scenarios (resolving the design they name, which may itself
@@ -317,8 +330,8 @@ const program = Effect.gen(function*() {
 
 `Engine` is an actor for hosts. `send(command)` queues a command; handled strictly in order. `events` is a `Stream`. Both are Schemas, and commands are accepted in encoded JSON form and decoded at the door, so the same protocol works over a function call, `postMessage` or a socket.
 
-- **Commands:** `load`, `play`, `pause`, `reset`, `setSpeed`, `step`, `updateNode`, `updateEdge`, `updateAccount`, `updateController`, `inject`, `clearFault`, `clearFaults`. A live edit is also applied to the engine's copy of the document and the design is checked again; `diagnostics` is sent when what the checks find changes.
-- **Events:** `status` (phase, virtual time, speed, achieved speed, seed), `frames`, `faults`, `diagnostics`, `reset`, `rejected` (a refused command, with the reasons).
+- **Commands:** `load`, `play`, `pause`, `reset`, `setSpeed`, `step`, `updateNode`, `updateEdge`, `updateAccount`, `updateController`, `inject`, `clearFault`, `clearFaults`, `scenario`, `clearScenario`. A live edit is also applied to the engine's copy of the document and the design is checked again; `diagnostics` is sent when what the checks find changes. A `scenario` is checked before anything is torn down, then plays from t = 0: its overrides stay on top of live edits, `load` and `reset` start it again (or drop it, with the reasons, if the design no longer has what it names), and the run pauses at its end.
+- **Events:** `status` (phase, virtual time, speed, achieved speed, seed), `frames`, `faults`, `diagnostics`, `alerts` (when an alarm fires, resolves or moves), `scenario` (a scenario's progress, about ten times a second while it plays), `reset`, `rejected` (a refused command, with the reasons).
 - **Catalog:** component manifests (with derived forms, and each port's protocol), connector manifests, transport's form, and the fault kinds.
 - **Pacing:** a loop on the *real* clock sleeps about 16 ms, then advances virtual time by `elapsed × speed` within a wall-time budget, reporting the speed actually achieved when it can't keep up. A long stall (a hidden tab) is clamped rather than simulated in one burst.
 
@@ -350,6 +363,8 @@ To profile: `scratchpad/bench.ts` (a design for N virtual seconds at a traffic m
 - the engine over a controllable `TestClock`.
 
 ## The UI
+
+The canvas gets the room: a 40 px header holds the transport (a draggable, log-scale speed bar), the whole design's numbers as its clients see them (requests, errors, p95 latency, with a minute of sparkline) and the count of alerts firing. Selecting a node or connection lights up the path it is on and dims the rest. Under the canvas a dock, folded by default, has three tabs: charts for the selection, alerts (firing, then a history with the faults beside them; click one to see its node), and scenarios (pick one, then watch its track, timeline and checks until it stops with a verdict).
 
 One sidebar. With nothing selected it is a condensed component picker (grouped by provider, searchable, with examples); select a node, a container or a connection and it becomes that thing's settings. Forms are derived from the schema: every bounded number is a slider (logarithmic when the range spans three orders of magnitude), durations are typed with units (`250`, `1.5s`, `10m`), limits show as `hard` or `quota` pills linking to their source, and groups with an `enabled` switch collapse until it is on. A node's region is a selector, locked when a Region box decides it; a Region box shows its account quotas and takes regional faults. Containers are drawn as boxes behind their contents: drag one and its contents move, drop a node inside to adopt it, drag it out to release it.
 

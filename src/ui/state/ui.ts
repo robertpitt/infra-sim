@@ -1,35 +1,47 @@
 import { createStore } from "../lib/store.ts"
 
+export type DockTab = "charts" | "alerts" | "scenario"
+
 /** Which panels are showing. Defaults adapt to the window the app opens in. */
 export interface UiState {
   /** The one sidebar: components when nothing is selected, settings when something is. */
   readonly sidebar: boolean
   readonly dockCollapsed: boolean
+  /** What the dock under the canvas shows. */
+  readonly dockTab: DockTab
 }
 
-// The charts dock starts folded away so the canvas gets the room; once someone opens or closes it, that sticks.
+// The dock starts folded away so the canvas gets the room; once someone opens or closes it, or picks a tab, that sticks.
 const DOCK_KEY = "sim:ui:dock"
-const savedDock = (): boolean | undefined => {
+const TAB_KEY = "sim:ui:dock-tab"
+const read = (key: string): string | null => {
   try {
-    const raw = localStorage.getItem(DOCK_KEY)
-    return raw === null ? undefined : raw === "collapsed"
+    return localStorage.getItem(key)
   } catch {
-    return undefined
+    return null
   }
 }
+const savedTab = read(TAB_KEY)
 
 export const ui = createStore<UiState>({
   sidebar: window.innerWidth >= 1000,
-  dockCollapsed: savedDock() ?? true
+  dockCollapsed: read(DOCK_KEY) !== "open",
+  dockTab: savedTab === "alerts" || savedTab === "scenario" ? savedTab : "charts"
 })
 
 ui.subscribe(() => {
   try {
     localStorage.setItem(DOCK_KEY, ui.get().dockCollapsed ? "collapsed" : "open")
+    localStorage.setItem(TAB_KEY, ui.get().dockTab)
   } catch {
     // Storage blocked: the dock just starts collapsed next time.
   }
 })
 
-export const togglePanel = (key: keyof UiState): void => ui.set((s) => ({ ...s, [key]: !s[key] }))
-export const setPanel = (key: keyof UiState, value: boolean): void => ui.set((s) => (s[key] === value ? s : { ...s, [key]: value }))
+type Panel = "sidebar" | "dockCollapsed"
+export const togglePanel = (key: Panel): void => ui.set((s) => ({ ...s, [key]: !s[key] }))
+export const setPanel = (key: Panel, value: boolean): void => ui.set((s) => (s[key] === value ? s : { ...s, [key]: value }))
+
+/** Show a tab of the dock, opening the dock if it is folded away. */
+export const setDockTab = (tab: DockTab): void =>
+  ui.set((s) => (s.dockTab === tab && !s.dockCollapsed ? s : { ...s, dockTab: tab, dockCollapsed: false }))

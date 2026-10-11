@@ -41,3 +41,13 @@ export const fmtClock = (ms: number): string => {
 }
 
 export const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
+
+/** Virtual time as m:ss, for points on a timeline. */
+export const fmtTime = (ms: number): string => {
+  const total = Math.round(Math.max(0, ms) / 1000)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`
+}
+
+/** A measured value in the unit the engine says it has. */
+export const fmtUnit = (unit: string, value: number): string =>
+  unit === "ratio" ? fmtPct(value) : unit === "ms" ? fmtMs(value) : unit === "rate" ? `${fmtRate(value)}/s` : fmtCount(value)

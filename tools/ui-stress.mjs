@@ -17,8 +17,15 @@ await page.waitForSelector(".node")
 await page.locator(".section-toggle", { hasText: "Examples" }).click()
 await page.getByRole("button", { name: /POS Hub/ }).click()
 await page.waitForTimeout(1500)
-const speed = process.argv[2] ?? "50"
-await page.locator(".speed select").selectOption(speed)
+// The speed bar steps between round speeds with the arrow keys: go up to the first at or above the one asked for.
+const speed = Number(process.argv[2] ?? "50")
+const slider = page.locator(".speed-track")
+await slider.focus()
+await page.keyboard.press("Home")
+for (let i = 0; i < 12 && Number(await slider.getAttribute("aria-valuenow")) < speed; i++) {
+  await page.keyboard.press("ArrowRight")
+  await page.waitForTimeout(30)
+}
 // Measure the page's own responsiveness over 6 s: gaps between animation frames and long tasks.
 const result = await page.evaluate(() => new Promise((resolve) => {
   const gaps = []

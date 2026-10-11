@@ -67,9 +67,13 @@ interface Result {
   readonly timeline: ReadonlyArray<{ readonly at: number; readonly what: string }>
   readonly faults: ReadonlyArray<{ readonly id: string; readonly target: string; readonly fault: string; readonly from: number; readonly to: number | undefined }>
   readonly assertions: ReadonlyArray<{ readonly check: string; readonly name: string | undefined; readonly passed: boolean; readonly actual: number | undefined; readonly expected: { readonly op: string; readonly value: number }; readonly problem?: string }>
+  readonly alerts: ReadonlyArray<{ readonly severity: string; readonly title: string; readonly target: { readonly id: string }; readonly unit: string; readonly firedAt: number; readonly resolvedAt?: number; readonly peak: number }>
   readonly defects: ReadonlyArray<{ readonly t: number; readonly node: string; readonly message: string }>
 }
 type Summary = Scenario.Summary
+
+const fmtUnit = (unit: string, v: number): string =>
+  unit === "ratio" ? fmtPct(v) : unit === "ms" ? fmtMs(v) : unit === "rate" ? `${fmtRate(v)}/s` : fmtCount(v)
 
 /** What went wrong at a node, in a few words: its throttles and failures by kind, and any deep backlog. */
 const notes = (s: Summary): string => {
@@ -129,6 +133,32 @@ export const renderResult = (result: Result, style: Style, options: { readonly n
     out.push("")
     out.push(style.bold("Timeline"))
     for (const e of result.timeline) out.push(`  ${fmtDuration(e.at).padStart(6)}  ${e.what}`)
+  }
+
+  // What would have paged someone. Worth knowing, but not a verdict: only assertions pass or fail a run.
+  if (result.alerts.length > 0) {
+    out.push("")
+    out.push(style.bold(`Alerts (${result.alerts.length})`))
+    const byTime = [...result.alerts].sort((a, b) => a.firedAt - b.firedAt)
+    out.push(
+      table(
+        [
+          ["fired", "cleared", "severity", "node", "alert", "worst"].map((h) => style.dim(h)),
+          ...byTime.map((a) => [
+            fmtDuration(a.firedAt),
+            a.resolvedAt === undefined ? "still firing" : fmtDuration(a.resolvedAt),
+            a.severity === "critical" ? style.red(a.severity) : style.yellow(a.severity),
+            a.target.id,
+            a.title,
+            fmtUnit(a.unit, a.peak)
+          ])
+        ],
+        ["r", "r", "l", "l", "l", "r"]
+      )
+        .split("\n")
+        .map((l) => `  ${l}`)
+        .join("\n")
+    )
   }
 
   if (result.assertions.length > 0) {

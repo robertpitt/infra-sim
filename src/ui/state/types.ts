@@ -1,4 +1,4 @@
-import type { Component, Connector, Controller, Describe, Design, Engine, Fault, Telemetry } from "#simulator"
+import type { Alarm, Component, Connector, Controller, Describe, Design, Engine, Fault, Scenario, Telemetry } from "#simulator"
 
 /**
  * The shapes the UI works with, named plainly. Everything here is plain data (durations are milliseconds,
@@ -30,4 +30,9 @@ export type Catalog = Engine.Catalog
 
 export type FaultKind = Fault.FaultKind
 export type Target = Fault.Target
+export type Alert = Alarm.Alert
+export type ScenarioDoc = Scenario.Scenario
+export type ScenarioProgress = Scenario.Progress
+export type CheckProgress = Scenario.CheckProgress
+
 export type ActiveFault = Extract<Engine.Event, { readonly _tag: "faults" }>["faults"][number]

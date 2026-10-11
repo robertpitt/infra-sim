@@ -7,6 +7,8 @@ import { catalog } from "../state/engine.ts"
 import type { Overview } from "../state/overview.ts"
 import { overviewOf, overviewSeries } from "../state/overview.ts"
 import { history, run } from "../state/run.ts"
+import { setDockTab } from "../state/ui.ts"
+import { Icon } from "./Icon.tsx"
 
 /** Frames per number shown: one second of virtual time, as on the canvas. */
 const SMOOTHING_FRAMES = 4
@@ -56,7 +58,7 @@ export function KeyStats() {
         label="Errors"
         value={now === undefined ? "—" : fmtPct(ratio)}
         sub={now === undefined || now.fail < 0.05 ? undefined : `${fmtRate(now.fail)}/s`}
-        hint="Share of requests that failed, as their senders saw it"
+        hint={`Share of requests that failed, as their senders saw it${now === undefined ? "" : `: ${fmtRate(now.fail)}/s`}`}
         tone={tone}
         spark={pick((o) => o.errorRatio)}
         floor={0.05}
@@ -66,12 +68,27 @@ export function KeyStats() {
         label="Latency p95"
         value={now?.p95 === undefined ? "—" : fmtMs(now.p95)}
         sub={now?.p99 === undefined ? undefined : `p99 ${fmtMs(now.p99)}`}
-        hint={now?.p50 === undefined ? "End-to-end latency seen by the traffic sources" : `End-to-end latency seen by the traffic sources. p50 ${fmtMs(now.p50)}`}
+        hint={now?.p50 === undefined ? "End-to-end latency seen by the traffic sources" : `End-to-end latency seen by the traffic sources: p50 ${fmtMs(now.p50)}, p95 ${fmtMs(now.p95!)}, p99 ${fmtMs(now.p99!)}`}
         spark={pick((o) => o.p95)}
         floor={10}
         color="var(--amber)"
       />
+      <AlertsKpi />
     </div>
+  )
+}
+
+/** How many alarms are firing, and how many of those page someone. Opens the alerts. */
+function AlertsKpi() {
+  const firing = useStore(run, (s) => s.alerts.filter((a) => a.resolvedAt === undefined).length)
+  const critical = useStore(run, (s) => s.alerts.filter((a) => a.resolvedAt === undefined && a.severity === "critical").length)
+  const tone: Tone = critical > 0 ? "bad" : firing > 0 ? "warn" : undefined
+  const said = firing === 0 ? "No alerts firing" : `${firing} alert${firing > 1 ? "s" : ""} firing${critical > 0 ? `, ${critical} critical` : ""}`
+  return (
+    <button className="kpi kpi-button" data-tone={tone} onClick={() => setDockTab("alerts")} title={`${said}. Show the alerts`} aria-label={said}>
+      <Icon name="bell" size={16} className="kpi-icon" />
+      <b className="kpi-count">{firing}</b>
+    </button>
   )
 }
 
@@ -104,7 +121,7 @@ function Kpi({ label, value, unit, sub, hint, tone, spark, floor, color }: KpiPr
   )
 }
 
-const SPARK_W = 56
+const SPARK_W = 48
 const SPARK_H = 22
 
 function Sparkline({ points, floor, color }: { points: ReadonlyArray<number | undefined>; floor: number; color: string }) {

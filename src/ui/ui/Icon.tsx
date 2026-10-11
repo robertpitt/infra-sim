@@ -233,7 +233,21 @@ const paths: Record<string, ReactNode> = {
       <circle cx="12" cy="12" r="9" />
       <path d="M12 11v5M12 8v.5" />
     </>
-  )
+  ),
+  bell: (
+    <>
+      <path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z" />
+      <path d="M10 20.5a2 2 0 0 0 4 0" />
+    </>
+  ),
+  check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
+  flag: (
+    <>
+      <path d="M5 21V4" />
+      <path d="M5 4h11l-2 4 2 4H5" />
+    </>
+  ),
+  dot: <circle cx="12" cy="12" r="3.5" fill="currentColor" />
 }
 
 export const Icon = ({ name, size = 16, className }: { name: string; size?: number; className?: string }) => (
