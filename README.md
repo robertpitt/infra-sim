@@ -6,6 +6,8 @@ The engine is pure [Effect](https://effect.website) (`src/simulator`, no DOM) an
 
 ## Quick start
 
+Needs Node 22 or newer (`.nvmrc` pins 22).
+
 ```sh
 npm install
 npm run dev        # http://localhost:5173
