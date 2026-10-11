@@ -117,56 +117,75 @@ description: |-
   - Image hosts, delegated report providers (external): Wherever product images are fetched from; the application URLs that build reports on request.
   - Other pos-hub-* and partner services (not read) (external): Directories under falcon/cdk/services that look related by name, not examined: pos-hub-cdn, -clover, -dashboard, -email, -fresh-kds, -gloriafood, -lightspeed, -lightspeed-k, -review, -shopify, -sms, -square, -whatsapp, pos-res-3700, pos-integrations, partner-api-pos-hub, partner-api-kitchenhub, partner-api-bistrohub, accounting-hub, accounting-hub-apps, fhposhubonboard.
 seed: 11
+scenarios:
+  daily:
+    name: Daily traffic
+    description: |-
+      A day in the life of POS Hub, with the API and its authorizer, the change-event bus and its subscribers, the delayed-task scheduler, billing, reports, email and the media CDN. The external services are assumed to be up and running.
+    duration: 24 hours
+    traffic:
+      scale: 3
+    warmup: 15 minute
 nodes:
   aws-eu-west-1:
     type: aws.region
     name: eu-west-1 (Ireland)
-    position: {x: 350, y: 0}
-    size: {w: 4496, h: 2230}
+    position: { x: 350, y: 0 }
+    size: { w: 4496, h: 2230 }
     settings:
       region: eu-west-1
-    origin: {source: falcon/cdk/services/pos-hub/POSHubCoreStack.ts, ref: POSHubStack, type: Stack}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubCoreStack.ts,
+        ref: POSHubStack,
+        type: Stack,
+      }
   partner-apps:
     type: common.client
     name: POS & marketplace applications
     region: eu-west
-    position: {x: -6, y: 230}
+    position: { x: -6, y: 230 }
     settings:
       rps: 40
       payload: 4
-    origin: {source: external, ref: partner-apps}
+    origin: { source: external, ref: partner-apps }
   dashboards:
     type: common.client
     name: Dashboards (pos-hub-client)
     region: eu-west
-    position: {x: -6, y: 380}
+    position: { x: -6, y: 380 }
     settings:
       rps: 12
       payload: 2
-    origin: {source: external, ref: pos-hub-client}
+    origin: { source: external, ref: pos-hub-client }
   sign-in:
     type: common.client
     name: Sign-in (OAuth2 token, OTP)
     region: eu-west
-    position: {x: -6, y: 530}
+    position: { x: -6, y: 530 }
     settings:
       rps: 3
-    origin: {source: external, ref: oauth2}
+    origin: { source: external, ref: oauth2 }
   api:
     type: aws.apigateway
     name: POS Hub REST API
     parent: aws-eu-west-1
-    position: {x: 400, y: 905}
+    position: { x: 400, y: 905 }
     settings:
       apiType: rest
       integrationTimeout: 29 seconds
-      authorizer: {type: lambda, ttl: 0}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubCoreStack.ts, ref: api-v2, type: apigateway.RestApi}
+      authorizer: { type: lambda, ttl: 0 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubCoreStack.ts,
+        ref: api-v2,
+        type: apigateway.RestApi,
+      }
   api-handler:
     type: aws.lambda
     name: API handler
     parent: aws-eu-west-1
-    position: {x: 720, y: 980}
+    position: { x: 720, y: 980 }
     settings:
       memory: 512
       timeout: 10 minutes
@@ -177,282 +196,442 @@ nodes:
         init:
           mean: 700
       fanOut: weighted
-    origin: {source: falcon/cdk/services/pos-hub/ApiHandlers.ts, ref: api-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiHandlers.ts,
+        ref: api-handler,
+        type: lambda.Function,
+      }
   auth:
     type: aws.dynamodb
     name: Auth (tokens, codes)
     parent: aws-eu-west-1
-    position: {x: 1040, y: 80}
+    position: { x: 1040, y: 80 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: auth, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: auth,
+        type: dynamodb.Table,
+      }
   roles:
     type: aws.dynamodb
     name: Roles
     parent: aws-eu-west-1
-    position: {x: 1040, y: 230}
+    position: { x: 1040, y: 230 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: roles, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: roles,
+        type: dynamodb.Table,
+      }
   memberships:
     type: aws.dynamodb
     name: Memberships
     parent: aws-eu-west-1
-    position: {x: 1040, y: 680}
+    position: { x: 1040, y: 680 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: memberships, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: memberships,
+        type: dynamodb.Table,
+      }
   invitations:
     type: aws.dynamodb
     name: Invitations
     parent: aws-eu-west-1
-    position: {x: 1040, y: 830}
+    position: { x: 1040, y: 830 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: invitations, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: invitations,
+        type: dynamodb.Table,
+      }
   resellers:
     type: aws.dynamodb
     name: Resellers
     parent: aws-eu-west-1
-    position: {x: 3920, y: 1505}
+    position: { x: 3920, y: 1505 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: resellers, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: resellers,
+        type: dynamodb.Table,
+      }
   applications:
     type: aws.dynamodb
     name: Applications
     parent: aws-eu-west-1
-    position: {x: 3920, y: 1205}
+    position: { x: 3920, y: 1205 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: applications, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: applications,
+        type: dynamodb.Table,
+      }
   connections:
     type: aws.dynamodb
     name: Connections
     parent: aws-eu-west-1
-    position: {x: 3920, y: 905}
+    position: { x: 3920, y: 905 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: connections, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: connections,
+        type: dynamodb.Table,
+      }
   users:
     type: aws.dynamodb
     name: Users
     parent: aws-eu-west-1
-    position: {x: 1040, y: 1130}
+    position: { x: 1040, y: 1130 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: users, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: users,
+        type: dynamodb.Table,
+      }
   accounts:
     type: aws.dynamodb
     name: Accounts
     parent: aws-eu-west-1
-    position: {x: 1360, y: 980}
+    position: { x: 1360, y: 980 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: accounts, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: accounts,
+        type: dynamodb.Table,
+      }
   invoices:
     type: aws.dynamodb
     name: Invoices
     parent: aws-eu-west-1
-    position: {x: 1360, y: 1130}
+    position: { x: 1360, y: 1130 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: invoices, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: invoices,
+        type: dynamodb.Table,
+      }
   catalog-products:
     type: aws.dynamodb
     name: Catalog products
     parent: aws-eu-west-1
-    position: {x: 4240, y: 1205}
+    position: { x: 4240, y: 1205 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: catalog-products, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: catalog-products,
+        type: dynamodb.Table,
+      }
   catalog-categories:
     type: aws.dynamodb
     name: Catalog categories
     parent: aws-eu-west-1
-    position: {x: 3600, y: 530}
+    position: { x: 3600, y: 530 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: catalog-categories, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: catalog-categories,
+        type: dynamodb.Table,
+      }
   catalog-modifiers:
     type: aws.dynamodb
     name: Catalog modifiers
     parent: aws-eu-west-1
-    position: {x: 3600, y: 830}
+    position: { x: 3600, y: 830 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: catalog-modifiers, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: catalog-modifiers,
+        type: dynamodb.Table,
+      }
   catalog-modifier-groups:
     type: aws.dynamodb
     name: Catalog modifier groups
     parent: aws-eu-west-1
-    position: {x: 3600, y: 980}
+    position: { x: 3600, y: 980 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: catalog-modifier-groups, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: catalog-modifier-groups,
+        type: dynamodb.Table,
+      }
   menus:
     type: aws.dynamodb
     name: Menus
     parent: aws-eu-west-1
-    position: {x: 3920, y: 1355}
+    position: { x: 3920, y: 1355 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menus, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menus,
+        type: dynamodb.Table,
+      }
   menu-categories:
     type: aws.dynamodb
     name: Menu categories
     parent: aws-eu-west-1
-    position: {x: 3920, y: 605}
+    position: { x: 3920, y: 605 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-categories, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menu-categories,
+        type: dynamodb.Table,
+      }
   menu-items:
     type: aws.dynamodb
     name: Menu items
     parent: aws-eu-west-1
-    position: {x: 4240, y: 1055}
+    position: { x: 4240, y: 1055 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-items, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menu-items,
+        type: dynamodb.Table,
+      }
   menu-modifiers:
     type: aws.dynamodb
     name: Menu modifiers
     parent: aws-eu-west-1
-    position: {x: 1040, y: 1280}
+    position: { x: 1040, y: 1280 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-modifiers, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menu-modifiers,
+        type: dynamodb.Table,
+      }
   menu-modifier-groups:
     type: aws.dynamodb
     name: Menu modifier groups
     parent: aws-eu-west-1
-    position: {x: 1040, y: 1430}
+    position: { x: 1040, y: 1430 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-modifier-groups, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menu-modifier-groups,
+        type: dynamodb.Table,
+      }
   promotions:
     type: aws.dynamodb
     name: Promotions
     parent: aws-eu-west-1
-    position: {x: 1040, y: 1580}
+    position: { x: 1040, y: 1580 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: promotions, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: promotions,
+        type: dynamodb.Table,
+      }
   locations:
     type: aws.dynamodb
     name: Locations
     parent: aws-eu-west-1
-    position: {x: 3600, y: 1730}
+    position: { x: 3600, y: 1730 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: locations, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: locations,
+        type: dynamodb.Table,
+      }
   orders:
     type: aws.dynamodb
     name: Orders
     parent: aws-eu-west-1
-    position: {x: 3600, y: 1580}
+    position: { x: 3600, y: 1580 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: orders, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: orders,
+        type: dynamodb.Table,
+      }
   orders-association:
     type: aws.dynamodb
     name: Orders association
     parent: aws-eu-west-1
-    position: {x: 1040, y: 1730}
+    position: { x: 1040, y: 1730 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: orders-association, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: orders-association,
+        type: dynamodb.Table,
+      }
   deliveries:
     type: aws.dynamodb
     name: Deliveries
     parent: aws-eu-west-1
-    position: {x: 3600, y: 1880}
+    position: { x: 3600, y: 1880 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: deliveries, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: deliveries,
+        type: dynamodb.Table,
+      }
   payments:
     type: aws.dynamodb
     name: Payments
     parent: aws-eu-west-1
-    position: {x: 1360, y: 1280}
+    position: { x: 1360, y: 1280 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: payments, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: payments,
+        type: dynamodb.Table,
+      }
   audits:
     type: aws.dynamodb
     name: Audits
     parent: aws-eu-west-1
-    position: {x: 4560, y: 1130}
+    position: { x: 4560, y: 1130 }
     settings:
       mode: on-demand
-      gsi: {count: 3}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: audits, type: dynamodb.Table}
+      gsi: { count: 3 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: audits,
+        type: dynamodb.Table,
+      }
   reports:
     type: aws.dynamodb
     name: Reports
     parent: aws-eu-west-1
-    position: {x: 1680, y: 1130}
+    position: { x: 1680, y: 1130 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: reports, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: reports,
+        type: dynamodb.Table,
+      }
   scheduler-table:
     type: aws.dynamodb
     name: Scheduler table
     parent: aws-eu-west-1
-    position: {x: 2320, y: 1280}
+    position: { x: 2320, y: 1280 }
     settings:
       mode: on-demand
-      gsi: {count: 2}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-table, type: dynamodb.Table}
+      gsi: { count: 2 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: scheduler-table,
+        type: dynamodb.Table,
+      }
   assets:
     type: aws.s3
     name: Assets bucket
     parent: aws-eu-west-1
-    position: {x: 3600, y: 680}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubCoreStack.ts, ref: assets, type: s3.Bucket}
+    position: { x: 3600, y: 680 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubCoreStack.ts,
+        ref: assets,
+        type: s3.Bucket,
+      }
   database-assets:
     type: aws.s3
     name: Database assets bucket
     parent: aws-eu-west-1
-    position: {x: 2320, y: 830}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: assets, type: s3.Bucket}
+    position: { x: 2320, y: 830 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: assets,
+        type: s3.Bucket,
+      }
   report-artifacts:
     type: aws.s3
     name: Report artifacts bucket
     parent: aws-eu-west-1
-    position: {x: 1680, y: 980}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: report-artifacts, type: s3.Bucket}
+    position: { x: 1680, y: 980 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: report-artifacts,
+        type: s3.Bucket,
+      }
   store-change-handler:
     type: aws.lambda
     name: Store change handler
     parent: aws-eu-west-1
-    position: {x: 2640, y: 1055}
+    position: { x: 2640, y: 1055 }
     settings:
       memory: 256
       timeout: 10 seconds
@@ -460,35 +639,55 @@ nodes:
         mean: 30
       fanOut: sequential
       batchCalls: each
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: store-change-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: store-change-handler,
+        type: lambda.Function,
+      }
   events:
     type: aws.sns
     name: Event bus (SNS)
     parent: aws-eu-west-1
-    position: {x: 2960, y: 1055}
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: events, type: sns.Topic}
+    position: { x: 2960, y: 1055 }
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: events,
+        type: sns.Topic,
+      }
   dlq-incoming-events:
     type: aws.sqs
     name: Webhook events DLQ
     parent: aws-eu-west-1
-    position: {x: 3600, y: 230}
+    position: { x: 3600, y: 230 }
     settings:
       retention: 14 days
-    origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: dlq-incoming-events, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts,
+        ref: dlq-incoming-events,
+        type: sqs.Queue,
+      }
   incoming-events:
     type: aws.sqs
     name: Webhook events
     parent: aws-eu-west-1
-    position: {x: 3280, y: 830}
+    position: { x: 3280, y: 830 }
     settings:
       retention: 3 minutes
       maxReceives: 5
-    origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: incoming-events, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts,
+        ref: incoming-events,
+        type: sqs.Queue,
+      }
   webhook-router:
     type: aws.lambda
     name: Webhook router
     parent: aws-eu-west-1
-    position: {x: 3600, y: 380}
+    position: { x: 3600, y: 380 }
     settings:
       memory: 1024
       timeout: 10 seconds
@@ -496,21 +695,31 @@ nodes:
         mean: 50
       fanOut: sequential
       batchCalls: each
-    origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: router, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts,
+        ref: router,
+        type: lambda.Function,
+      }
   webhook-requests:
     type: aws.sqs
     name: Outgoing webhook requests
     parent: aws-eu-west-1
-    position: {x: 3920, y: 755}
+    position: { x: 3920, y: 755 }
     settings:
       visibilityTimeout: 30 seconds
       retention: 10 minutes
-    origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: outgoing-requests, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts,
+        ref: outgoing-requests,
+        type: sqs.Queue,
+      }
   webhook-dispatcher:
     type: aws.lambda
     name: Webhook dispatcher
     parent: aws-eu-west-1
-    position: {x: 4240, y: 905}
+    position: { x: 4240, y: 905 }
     settings:
       memory: 1024
       timeout: 30 seconds
@@ -520,32 +729,42 @@ nodes:
       batchCalls: each
       async:
         maxRetries: 0
-    origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: dispatcher, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts,
+        ref: dispatcher,
+        type: lambda.Function,
+      }
   partner-webhooks:
     type: common.http-endpoint
     name: Application webhook receivers
     region: eu-west
-    position: {x: 4966, y: 80}
+    position: { x: 4966, y: 80 }
     settings:
       latency:
         mean: 250
         cv: 0.8
       errorRate: 0.01
-    origin: {source: external, ref: partner-webhooks}
+    origin: { source: external, ref: partner-webhooks }
   opensearch-events:
     type: aws.sqs
     name: Search events
     parent: aws-eu-west-1
-    position: {x: 3280, y: 680}
+    position: { x: 3280, y: 680 }
     settings:
       visibilityTimeout: 60 seconds
       retention: 1 day
-    origin: {source: falcon/cdk/services/pos-hub/OpenSearchPlatform.ts, ref: incoming-events, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/OpenSearchPlatform.ts,
+        ref: incoming-events,
+        type: sqs.Queue,
+      }
   opensearch-ingress:
     type: aws.lambda
     name: OpenSearch ingress
     parent: aws-eu-west-1
-    position: {x: 3600, y: 80}
+    position: { x: 3600, y: 80 }
     settings:
       memory: 128
       timeout: 1 minute
@@ -555,30 +774,45 @@ nodes:
       fanOut: none
       async:
         maxRetries: 0
-    origin: {source: falcon/cdk/services/pos-hub/OpenSearchPlatform.ts, ref: ingress, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/OpenSearchPlatform.ts,
+        ref: ingress,
+        type: lambda.Function,
+      }
   menu-change-dlq:
     type: aws.sqs
     name: Menu change DLQ
     parent: aws-eu-west-1
-    position: {x: 3600, y: 2030}
+    position: { x: 3600, y: 2030 }
     settings:
       retention: 14 days
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-change-dlq, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menu-change-dlq,
+        type: sqs.Queue,
+      }
   menu-change-queue:
     type: aws.sqs
     name: Menu change queue
     parent: aws-eu-west-1
-    position: {x: 3280, y: 1430}
+    position: { x: 3280, y: 1430 }
     settings:
       visibilityTimeout: 6 minutes
       retention: 4 days
       maxReceives: 3
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-change-queue, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menu-change-queue,
+        type: sqs.Queue,
+      }
   menu-change-handler:
     type: aws.lambda
     name: Menu change handler
     parent: aws-eu-west-1
-    position: {x: 3600, y: 1130}
+    position: { x: 3600, y: 1130 }
     settings:
       memory: 256
       timeout: 1 minute
@@ -586,67 +820,82 @@ nodes:
         mean: 120
       fanOut: sequential
       batchCalls: once
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-change-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menu-change-handler,
+        type: lambda.Function,
+      }
   delivery-apps:
     type: common.http-endpoint
     name: Delivery applications (dispatch, quote, cancel)
     region: eu-west
-    position: {x: 4966, y: 680}
+    position: { x: 4966, y: 680 }
     settings:
       latency:
         mean: 400
         cv: 0.7
       errorRate: 0.01
-    origin: {source: external, ref: delivery-apps}
+    origin: { source: external, ref: delivery-apps }
   delivery-auto-dispatcher:
     type: aws.lambda
     name: Delivery auto-dispatcher
     parent: aws-eu-west-1
-    position: {x: 3280, y: 1280}
+    position: { x: 3280, y: 1280 }
     settings:
       memory: 128
       timeout: 3 minutes
       duration:
         mean: 60
       fanOut: sequential
-    origin: {source: falcon/cdk/services/pos-hub/DeliveryAutomation.ts, ref: auto-dispatcher, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/DeliveryAutomation.ts,
+        ref: auto-dispatcher,
+        type: lambda.Function,
+      }
   image-hosts:
     type: common.http-endpoint
     name: Image hosts
     region: eu-west
-    position: {x: 4966, y: 380}
+    position: { x: 4966, y: 380 }
     settings:
       latency:
         mean: 600
         cv: 0.8
       errorRate: 0.02
-    origin: {source: external, ref: image-hosts}
+    origin: { source: external, ref: image-hosts }
   image-import-handler:
     type: aws.lambda
     name: Image import
     parent: aws-eu-west-1
-    position: {x: 3280, y: 980}
+    position: { x: 3280, y: 980 }
     settings:
       memory: 512
       timeout: 2 minutes
       duration:
         mean: 250
       fanOut: sequential
-    origin: {source: falcon/cdk/services/pos-hub/ApiImageProcessor.ts, ref: image-import-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiImageProcessor.ts,
+        ref: image-import-handler,
+        type: lambda.Function,
+      }
   media-uploads:
     type: common.client
     name: Image uploads (presigned PUT)
     region: eu-west
-    position: {x: -6, y: 980}
+    position: { x: -6, y: 980 }
     settings:
       rps: 0.5
       payload: 600
-    origin: {source: external, ref: presigned-upload}
+    origin: { source: external, ref: presigned-upload }
   image-drop-handler:
     type: aws.lambda
     name: Image drop
     parent: aws-eu-west-1
-    position: {x: 3920, y: 1055}
+    position: { x: 3920, y: 1055 }
     settings:
       memory: 512
       timeout: 60 seconds
@@ -654,33 +903,48 @@ nodes:
         mean: 700
         cv: 0.5
       fanOut: sequential
-    origin: {source: falcon/cdk/services/pos-hub/ApiImageProcessor.ts, ref: image-drop-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiImageProcessor.ts,
+        ref: image-drop-handler,
+        type: lambda.Function,
+      }
   store-cleanup-handler:
     type: aws.lambda
     name: Store cleanup
     parent: aws-eu-west-1
-    position: {x: 3280, y: 1130}
+    position: { x: 3280, y: 1130 }
     settings:
       memory: 256
       timeout: 3 minutes
       duration:
         mean: 150
       fanOut: weighted
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: store-cleanup-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: store-cleanup-handler,
+        type: lambda.Function,
+      }
   scheduler-queue:
     type: aws.sqs
     name: Scheduler queue
     parent: aws-eu-west-1
-    position: {x: 1680, y: 830}
+    position: { x: 1680, y: 830 }
     settings:
       visibilityTimeout: 6 minutes
       retention: 30 minutes
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-queue, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: scheduler-queue,
+        type: sqs.Queue,
+      }
   scheduler-stream-handler:
     type: aws.lambda
     name: Scheduler stream handler
     parent: aws-eu-west-1
-    position: {x: 1360, y: 830}
+    position: { x: 1360, y: 830 }
     settings:
       memory: 1024
       timeout: 5 minutes
@@ -688,23 +952,28 @@ nodes:
         mean: 40
       fanOut: sequential
       batchCalls: each
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-stream-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: scheduler-stream-handler,
+        type: lambda.Function,
+      }
   schedule-feed-rule:
     type: common.client
     name: EventBridge rate(14 minutes)
     region: eu-west
-    position: {x: -6, y: 680}
+    position: { x: -6, y: 680 }
     settings:
       arrival: constant
       payload: 1
       rps: 0.0011904761904761906
       invocation: async
-    origin: {source: approximation, ref: scheduleFeedHandlerRule}
+    origin: { source: approximation, ref: scheduleFeedHandlerRule }
   schedule-feed-handler:
     type: aws.lambda
     name: Schedule feed handler
     parent: aws-eu-west-1
-    position: {x: 400, y: 1055}
+    position: { x: 400, y: 1055 }
     settings:
       memory: 1024
       timeout: 5 minutes
@@ -712,12 +981,17 @@ nodes:
         mean: 800
         cv: 0.4
       fanOut: sequential
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: schedule-feed-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: schedule-feed-handler,
+        type: lambda.Function,
+      }
   scheduler-queue-handler:
     type: aws.lambda
     name: Scheduler queue handler
     parent: aws-eu-west-1
-    position: {x: 2000, y: 1055}
+    position: { x: 2000, y: 1055 }
     settings:
       memory: 256
       timeout: 6 minutes
@@ -726,55 +1000,70 @@ nodes:
         cv: 0.6
       fanOut: weighted
       batchCalls: each
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-queue-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: scheduler-queue-handler,
+        type: lambda.Function,
+      }
   marketplace-apps:
     type: common.http-endpoint
     name: Marketplace & POS applications (publish, sync, store status)
     region: eu-west
-    position: {x: 4966, y: 230}
+    position: { x: 4966, y: 230 }
     settings:
       latency:
         mean: 1500
         cv: 0.8
       errorRate: 0.01
-    origin: {source: external, ref: marketplace-apps}
+    origin: { source: external, ref: marketplace-apps }
   invoice-dlq:
     type: aws.sqs
     name: Invoice DLQ
     parent: aws-eu-west-1
-    position: {x: 1040, y: 2030}
+    position: { x: 1040, y: 2030 }
     settings:
       kind: fifo
       retention: 14 days
-    origin: {source: falcon/cdk/services/pos-hub/BillingAutomation.ts, ref: invoice-dlq, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/BillingAutomation.ts,
+        ref: invoice-dlq,
+        type: sqs.Queue,
+      }
   invoice-queue:
     type: aws.sqs
     name: Invoice queue
     parent: aws-eu-west-1
-    position: {x: 720, y: 1130}
+    position: { x: 720, y: 1130 }
     settings:
       kind: fifo
       visibilityTimeout: 30 minutes
       retention: 2 hours
       maxReceives: 3
-    origin: {source: falcon/cdk/services/pos-hub/BillingAutomation.ts, ref: invoice-queue, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/BillingAutomation.ts,
+        ref: invoice-queue,
+        type: sqs.Queue,
+      }
   billing-rule:
     type: common.client
     name: EventBridge cron(0 0 * * ? *)
     region: eu-west
-    position: {x: -6, y: 830}
+    position: { x: -6, y: 830 }
     settings:
       arrival: constant
       payload: 1
       rps: 0.000011574074074074073
       invocation: async
       messageGroups: 200
-    origin: {source: approximation, ref: seedInvoiceQueueRule}
+    origin: { source: approximation, ref: seedInvoiceQueueRule }
   seed-invoices:
     type: aws.lambda
     name: Seed invoices
     parent: aws-eu-west-1
-    position: {x: 400, y: 1205}
+    position: { x: 400, y: 1205 }
     settings:
       memory: 128
       timeout: 5 minutes
@@ -782,12 +1071,17 @@ nodes:
         mean: 5000
         cv: 0.3
       fanOut: sequential
-    origin: {source: falcon/cdk/services/pos-hub/BillingAutomation.ts, ref: seedInvoiceQueueHandler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/BillingAutomation.ts,
+        ref: seedInvoiceQueueHandler,
+        type: lambda.Function,
+      }
   process-invoice-queue:
     type: aws.lambda
     name: Process invoice
     parent: aws-eu-west-1
-    position: {x: 1040, y: 980}
+    position: { x: 1040, y: 980 }
     settings:
       memory: 128
       timeout: 15 minutes
@@ -796,23 +1090,28 @@ nodes:
         cv: 0.5
       fanOut: sequential
       batchCalls: each
-    origin: {source: falcon/cdk/services/pos-hub/BillingAutomation.ts, ref: processInvoiceQueueHandler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/BillingAutomation.ts,
+        ref: processInvoiceQueueHandler,
+        type: lambda.Function,
+      }
   performance-report-rule:
     type: common.client
     name: EventBridge rate(1 hour)
     region: eu-west
-    position: {x: -6, y: 1130}
+    position: { x: -6, y: 1130 }
     settings:
       arrival: constant
       payload: 1
       rps: 0.0002777777777777778
       invocation: async
-    origin: {source: approximation, ref: hourlyScheduleRule}
+    origin: { source: approximation, ref: hourlyScheduleRule }
   performance-report-handler:
     type: aws.lambda
     name: Performance report
     parent: aws-eu-west-1
-    position: {x: 400, y: 1355}
+    position: { x: 400, y: 1355 }
     settings:
       memory: 512
       timeout: 10 minutes
@@ -820,30 +1119,45 @@ nodes:
         mean: 30000
         cv: 0.4
       fanOut: sequential
-    origin: {source: falcon/cdk/services/pos-hub/PerformanceReportAutomation.ts, ref: performance-report-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/PerformanceReportAutomation.ts,
+        ref: performance-report-handler,
+        type: lambda.Function,
+      }
   reports-dlq:
     type: aws.sqs
     name: Reports DLQ
     parent: aws-eu-west-1
-    position: {x: 1360, y: 680}
+    position: { x: 1360, y: 680 }
     settings:
       retention: 14 days
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: reports-dlq, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: reports-dlq,
+        type: sqs.Queue,
+      }
   reports-queue:
     type: aws.sqs
     name: Reports queue
     parent: aws-eu-west-1
-    position: {x: 1040, y: 530}
+    position: { x: 1040, y: 530 }
     settings:
       visibilityTimeout: 20 minutes
       retention: 4 days
       maxReceives: 3
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: reports-queue, type: sqs.Queue}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: reports-queue,
+        type: sqs.Queue,
+      }
   report-worker-handler:
     type: aws.lambda
     name: Report worker
     parent: aws-eu-west-1
-    position: {x: 1360, y: 1430}
+    position: { x: 1360, y: 1430 }
     settings:
       memory: 1024
       timeout: 15 minutes
@@ -852,56 +1166,66 @@ nodes:
         cv: 0.7
       fanOut: sequential
       batchCalls: each
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: report-worker-handler, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: report-worker-handler,
+        type: lambda.Function,
+      }
   report-delegates:
     type: common.http-endpoint
     name: Delegated report providers
     region: eu-west
-    position: {x: 4966, y: 530}
+    position: { x: 4966, y: 530 }
     settings:
       latency:
         mean: 800
         cv: 0.8
       errorRate: 0.01
-    origin: {source: external, ref: report-delegates}
+    origin: { source: external, ref: report-delegates }
   api-validation-failures:
     type: common.client
     name: API access log, BAD_REQUEST_BODY (subscription stand-in)
     region: eu-west
-    position: {x: -6, y: 80}
+    position: { x: -6, y: 80 }
     settings:
       arrival: constant
       payload: 1
       rps: 0.2
       invocation: async
-    origin: {source: approximation, ref: accessLogGroup subscription filter}
+    origin: { source: approximation, ref: accessLogGroup subscription filter }
   validation-failure-consumer:
     type: aws.lambda
     name: Validation failure consumer
     parent: aws-eu-west-1
-    position: {x: 400, y: 755}
+    position: { x: 400, y: 755 }
     settings:
       memory: 256
       timeout: 30 seconds
       duration:
         mean: 60
       fanOut: sequential
-    origin: {source: falcon/cdk/services/pos-hub/POSHubApiDeploymentStack.ts, ref: validation-failure-consumer, type: lambda.Function}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubApiDeploymentStack.ts,
+        ref: validation-failure-consumer,
+        type: lambda.Function,
+      }
   twilio:
     type: common.http-endpoint
     name: Twilio (OTP, SMS)
     region: us-east
-    position: {x: 4966, y: 830}
+    position: { x: 4966, y: 830 }
     settings:
       latency:
         mean: 350
         cv: 0.5
-    origin: {source: external, ref: twilio}
+    origin: { source: external, ref: twilio }
   token-authorizer:
     type: aws.lambda
     name: Token authorizer (request authorizer)
     parent: aws-eu-west-1
-    position: {x: 720, y: 830}
+    position: { x: 720, y: 830 }
     settings:
       memory: 256
       timeout: 10 seconds
@@ -912,21 +1236,29 @@ nodes:
         init:
           mean: 400
       fanOut: sequential
-    origin: {source: assumed, ref: "TokenAuthorizer (authorizerV2.ts) on the REST API, result cache TTL 0; memory, duration and init are assumed"}
+    origin:
+      {
+        source: assumed,
+        ref: "TokenAuthorizer (authorizerV2.ts) on the REST API, result cache TTL 0; memory, duration and init are assumed",
+      }
   ses:
     type: aws.ses
     name: SES (invitation, invoice and performance emails)
     parent: aws-eu-west-1
-    position: {x: 400, y: 1505}
+    position: { x: 400, y: 1505 }
     settings:
       call: send
       batchSize: 1
-    origin: {source: assumed, ref: "EmailService / AmazonSESProvider; account production quotas and recipient behaviour are the component defaults, assumed"}
+    origin:
+      {
+        source: assumed,
+        ref: "EmailService / AmazonSESProvider; account production quotas and recipient behaviour are the component defaults, assumed",
+      }
   media-cdn:
     type: aws.cloudfront
     name: Media CDN (stand-in for pos-hub-cdn)
     parent: aws-eu-west-1
-    position: {x: 3280, y: 530}
+    position: { x: 3280, y: 530 }
     settings:
       objects: 20000
       popularitySkew: 2
@@ -937,865 +1269,1049 @@ nodes:
       edge:
         locations: 4
         priceClass: "100"
-    origin: {source: assumed, ref: "pos-hub-cdn is a separate stack not read; distribution, object count and size, TTL and edge count are assumed"}
+    origin:
+      {
+        source: assumed,
+        ref: "pos-hub-cdn is a separate stack not read; distribution, object count and size, TTL and edge count are assumed",
+      }
   media-viewers:
     type: common.client
     name: Media and CSV viewers (assumed traffic)
     region: eu-west
-    position: {x: -6, y: 1280}
+    position: { x: -6, y: 1280 }
     settings:
       rps: 20
-    origin: {source: assumed, ref: "viewers of media and signed deliveries CSV links; rate assumed"}
+    origin:
+      {
+        source: assumed,
+        ref: "viewers of media and signed deliveries CSV links; rate assumed",
+      }
 edges:
   partner-apps.out->api:
     to: api
-    from: {node: partner-apps}
+    from: { node: partner-apps }
   dashboards.out->api:
     to: api
-    from: {node: dashboards}
+    from: { node: dashboards }
   sign-in.out->api:
     to: api
-    from: {node: sign-in}
+    from: { node: sign-in }
   api.out->api-handler:
     to: api-handler
     settings:
       weight: 100
-    from: {node: api}
+    from: { node: api }
   orders.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
-    from: {node: orders, port: stream}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)",
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: orders, port: stream }
   deliveries.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
-    from: {node: deliveries, port: stream}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)",
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: deliveries, port: stream }
   locations.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
-    from: {node: locations, port: stream}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)",
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: locations, port: stream }
   accounts.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
-    from: {node: accounts, port: stream}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)",
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: accounts, port: stream }
   users.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
-    from: {node: users, port: stream}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)",
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: users, port: stream }
   applications.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
-    from: {node: applications, port: stream}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)",
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: applications, port: stream }
   connections.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)", type: lambda.EventSourceMapping}
-    from: {node: connections, port: stream}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: "store-change-handler/DynamoEventSource (capture of this table inferred from the OpenSearch index named in the description)",
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: connections, port: stream }
   orders-association.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: orders-association, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: orders-association, port: stream }
   invitations.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: invitations, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: invitations, port: stream }
   reports.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: reports, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: reports, port: stream }
   invoices.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: invoices, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: invoices, port: stream }
   menus.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: menus, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: menus, port: stream }
   menu-categories.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: menu-categories, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: menu-categories, port: stream }
   menu-items.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: menu-items, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: menu-items, port: stream }
   catalog-products.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: catalog-products, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: catalog-products, port: stream }
   catalog-categories.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: catalog-categories, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: catalog-categories, port: stream }
   catalog-modifiers.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: catalog-modifiers, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: catalog-modifiers, port: stream }
   catalog-modifier-groups.stream->store-change-handler:
     to: store-change-handler
     settings:
       timeout: 10 seconds
       batchSize: 100
       batchWindow: 1 second
-    origin: {source: assumed, ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK"}
-    from: {node: catalog-modifier-groups, port: stream}
+    origin:
+      {
+        source: assumed,
+        ref: "store-change-handler/DynamoEventSource: capture of this table is a guess (18 tables, which not in hand); batch settings from the CDK",
+      }
+    from: { node: catalog-modifier-groups, port: stream }
   store-change-handler.out->events:
     to: events
-    from: {node: store-change-handler}
+    from: { node: store-change-handler }
   events.out->incoming-events:
     to: incoming-events
-    from: {node: events}
+    from: { node: events }
   incoming-events.dlq->dlq-incoming-events:
     to: dlq-incoming-events
-    from: {node: incoming-events, port: dlq}
+    from: { node: incoming-events, port: dlq }
   incoming-events.deliver->webhook-router:
     to: webhook-router
     settings:
       batchSize: 10
-    origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: webhook-router/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: incoming-events, port: deliver}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts,
+        ref: webhook-router/SqsEventSource,
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: incoming-events, port: deliver }
   webhook-router.out->applications:
     to: applications
     settings: &a1
       request: &a4
         operation: read
-    from: {node: webhook-router}
+    from: { node: webhook-router }
   webhook-router.out->connections:
     to: connections
     settings: *a1
-    from: {node: webhook-router}
+    from: { node: webhook-router }
   webhook-router.out->resellers:
     to: resellers
     settings: *a1
-    from: {node: webhook-router}
+    from: { node: webhook-router }
   webhook-router.out->menus:
     to: menus
     settings: *a1
-    from: {node: webhook-router}
+    from: { node: webhook-router }
   webhook-router.out->menu-categories:
     to: menu-categories
     settings: *a1
-    from: {node: webhook-router}
+    from: { node: webhook-router }
   webhook-router.out->webhook-requests:
     to: webhook-requests
-    from: {node: webhook-router}
+    from: { node: webhook-router }
   webhook-requests.deliver->webhook-dispatcher:
     to: webhook-dispatcher
     settings:
       batchSize: 10
-    origin: {source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts, ref: webhook-dispatcher/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: webhook-requests, port: deliver}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiWebhookEvents.ts,
+        ref: webhook-dispatcher/SqsEventSource,
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: webhook-requests, port: deliver }
   webhook-dispatcher.out->partner-webhooks:
     to: partner-webhooks
     settings:
       timeout: 29 seconds
-    from: {node: webhook-dispatcher}
+    from: { node: webhook-dispatcher }
   webhook-dispatcher.out->audits:
     to: audits
     settings: &a2
       request: &a3
         operation: write
-    from: {node: webhook-dispatcher}
+    from: { node: webhook-dispatcher }
   events.out->opensearch-events:
     to: opensearch-events
-    from: {node: events}
+    from: { node: events }
   opensearch-events.deliver->opensearch-ingress:
     to: opensearch-ingress
     settings:
       batchSize: 100
       batchWindow: 5 seconds
       maxConcurrency: 3
-    origin: {source: falcon/cdk/services/pos-hub/OpenSearchPlatform.ts, ref: opensearch-ingress/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: opensearch-events, port: deliver}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/OpenSearchPlatform.ts,
+        ref: opensearch-ingress/SqsEventSource,
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: opensearch-events, port: deliver }
   events.out->menu-change-queue:
     to: menu-change-queue
     settings:
       filterMatch: 0.05
-    origin: {source: assumed, ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share"}
-    from: {node: events}
+    origin:
+      {
+        source: assumed,
+        ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share",
+      }
+    from: { node: events }
   menu-change-queue.dlq->menu-change-dlq:
     to: menu-change-dlq
-    from: {node: menu-change-queue, port: dlq}
+    from: { node: menu-change-queue, port: dlq }
   menu-change-queue.deliver->menu-change-handler:
     to: menu-change-handler
     settings:
       batchSize: 10000
       batchWindow: 5 seconds
       maxConcurrency: 2
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: menu-change-handler/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: menu-change-queue, port: deliver}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: menu-change-handler/SqsEventSource,
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: menu-change-queue, port: deliver }
   menu-change-handler.out->menus:
     to: menus
     settings: *a2
-    from: {node: menu-change-handler}
+    from: { node: menu-change-handler }
   events.out->delivery-auto-dispatcher:
     to: delivery-auto-dispatcher
     settings:
       filterMatch: 0.05
-    origin: {source: assumed, ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share"}
-    from: {node: events}
+    origin:
+      {
+        source: assumed,
+        ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share",
+      }
+    from: { node: events }
   delivery-auto-dispatcher.out->applications:
     to: applications
     settings: *a1
-    from: {node: delivery-auto-dispatcher}
+    from: { node: delivery-auto-dispatcher }
   delivery-auto-dispatcher.out->connections:
     to: connections
     settings: *a1
-    from: {node: delivery-auto-dispatcher}
+    from: { node: delivery-auto-dispatcher }
   delivery-auto-dispatcher.out->locations:
     to: locations
     settings: *a1
-    from: {node: delivery-auto-dispatcher}
+    from: { node: delivery-auto-dispatcher }
   delivery-auto-dispatcher.out->orders:
     to: orders
     settings: *a1
-    from: {node: delivery-auto-dispatcher}
+    from: { node: delivery-auto-dispatcher }
   delivery-auto-dispatcher.out->delivery-apps:
     to: delivery-apps
     settings:
       timeout: 10 seconds
-    from: {node: delivery-auto-dispatcher}
+    from: { node: delivery-auto-dispatcher }
   delivery-auto-dispatcher.out->deliveries:
     to: deliveries
     settings: *a2
-    from: {node: delivery-auto-dispatcher}
+    from: { node: delivery-auto-dispatcher }
   events.out->image-import-handler:
     to: image-import-handler
     settings:
       filterMatch: 0.05
-    origin: {source: assumed, ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share"}
-    from: {node: events}
+    origin:
+      {
+        source: assumed,
+        ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share",
+      }
+    from: { node: events }
   image-import-handler.out->image-hosts:
     to: image-hosts
-    from: {node: image-import-handler}
+    from: { node: image-import-handler }
   image-import-handler.out->assets:
     to: assets
     settings: *a2
-    from: {node: image-import-handler}
+    from: { node: image-import-handler }
   image-import-handler.out->catalog-products:
     to: catalog-products
     settings: *a2
-    from: {node: image-import-handler}
+    from: { node: image-import-handler }
   image-import-handler.out->menu-items:
     to: menu-items
     settings: *a2
-    from: {node: image-import-handler}
+    from: { node: image-import-handler }
   media-uploads.out->assets:
     to: assets
     settings: *a2
-    from: {node: media-uploads}
+    from: { node: media-uploads }
   assets.events->image-drop-handler:
     to: image-drop-handler
     settings:
       eventTypes: created
       filter: 0.9
-    origin: {source: falcon/cdk/services/pos-hub/ApiImageProcessor.ts, ref: image-drop-handler/S3 notification, type: s3.NotificationDestination}
-    from: {node: assets, port: events}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/ApiImageProcessor.ts,
+        ref: image-drop-handler/S3 notification,
+        type: s3.NotificationDestination,
+      }
+    from: { node: assets, port: events }
   image-drop-handler.out->assets:
     to: assets
     settings: *a1
-    from: {node: image-drop-handler}
+    from: { node: image-drop-handler }
   image-drop-handler.out->menu-items:
     to: menu-items
     settings: *a2
-    from: {node: image-drop-handler}
+    from: { node: image-drop-handler }
   image-drop-handler.out->catalog-products:
     to: catalog-products
     settings: *a2
-    from: {node: image-drop-handler}
+    from: { node: image-drop-handler }
   events.out->store-cleanup-handler:
     to: store-cleanup-handler
     settings:
       filterMatch: 0.05
-    origin: {source: assumed, ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share"}
-    from: {node: events}
+    origin:
+      {
+        source: assumed,
+        ref: "SNS subscription filter policy (EVENT_NAME, CHANGE_TYPE or OBJECT_TYPE): share that passes is assumed, a small share",
+      }
+    from: { node: events }
   store-cleanup-handler.out->connections:
     to: connections
     settings: *a2
-    from: {node: store-cleanup-handler}
+    from: { node: store-cleanup-handler }
   store-cleanup-handler.out->menus:
     to: menus
     settings: *a2
-    from: {node: store-cleanup-handler}
+    from: { node: store-cleanup-handler }
   store-cleanup-handler.out->orders:
     to: orders
     settings: *a2
-    from: {node: store-cleanup-handler}
+    from: { node: store-cleanup-handler }
   store-cleanup-handler.out->locations:
     to: locations
     settings: *a2
-    from: {node: store-cleanup-handler}
+    from: { node: store-cleanup-handler }
   store-cleanup-handler.out->catalog-products:
     to: catalog-products
     settings: *a2
-    from: {node: store-cleanup-handler}
+    from: { node: store-cleanup-handler }
   store-cleanup-handler.out->catalog-categories:
     to: catalog-categories
     settings: *a2
-    from: {node: store-cleanup-handler}
+    from: { node: store-cleanup-handler }
   store-cleanup-handler.out->catalog-modifiers:
     to: catalog-modifiers
     settings: *a2
-    from: {node: store-cleanup-handler}
+    from: { node: store-cleanup-handler }
   store-cleanup-handler.out->catalog-modifier-groups:
     to: catalog-modifier-groups
     settings: *a2
-    from: {node: store-cleanup-handler}
+    from: { node: store-cleanup-handler }
   scheduler-table.stream->scheduler-stream-handler:
     to: scheduler-stream-handler
     settings:
       timeout: 5 minutes
       batchSize: 100
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-stream-handler/DynamoEventSource, type: lambda.EventSourceMapping}
-    from: {node: scheduler-table, port: stream}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: scheduler-stream-handler/DynamoEventSource,
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: scheduler-table, port: stream }
   scheduler-stream-handler.out->scheduler-queue:
     to: scheduler-queue
-    from: {node: scheduler-stream-handler}
+    from: { node: scheduler-stream-handler }
   schedule-feed-rule.out->schedule-feed-handler:
     to: schedule-feed-handler
-    from: {node: schedule-feed-rule}
+    from: { node: schedule-feed-rule }
   schedule-feed-handler.out->scheduler-table:
     to: scheduler-table
     settings: *a1
-    from: {node: schedule-feed-handler}
+    from: { node: schedule-feed-handler }
   schedule-feed-handler.out->scheduler-queue:
     to: scheduler-queue
-    from: {node: schedule-feed-handler}
+    from: { node: schedule-feed-handler }
   schedule-feed-handler.out->scheduler-table-2:
     to: scheduler-table
     settings: *a2
-    from: {node: schedule-feed-handler}
+    from: { node: schedule-feed-handler }
   scheduler-queue.deliver->scheduler-queue-handler:
     to: scheduler-queue-handler
     settings:
       batchSize: 10
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: scheduler-queue-handler/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: scheduler-queue, port: deliver}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: scheduler-queue-handler/SqsEventSource,
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: scheduler-queue, port: deliver }
   scheduler-queue-handler.out->orders:
     to: orders
     settings:
       request: *a3
       weight: 3
-    from: {node: scheduler-queue-handler}
+    from: { node: scheduler-queue-handler }
   scheduler-queue-handler.out->deliveries:
     to: deliveries
     settings:
       request: *a3
       weight: 1
-    from: {node: scheduler-queue-handler}
+    from: { node: scheduler-queue-handler }
   scheduler-queue-handler.out->locations:
     to: locations
     settings:
       request: *a4
       weight: 1
-    from: {node: scheduler-queue-handler}
+    from: { node: scheduler-queue-handler }
   scheduler-queue-handler.out->connections:
     to: connections
     settings:
       request: *a4
       weight: 1
-    from: {node: scheduler-queue-handler}
+    from: { node: scheduler-queue-handler }
   scheduler-queue-handler.out->menus:
     to: menus
     settings:
       request: *a4
       weight: 1
-    from: {node: scheduler-queue-handler}
+    from: { node: scheduler-queue-handler }
   scheduler-queue-handler.out->marketplace-apps:
     to: marketplace-apps
     settings:
       weight: 1.5
       timeout: 2 minutes
-    from: {node: scheduler-queue-handler}
+    from: { node: scheduler-queue-handler }
   scheduler-queue-handler.out->database-assets:
     to: database-assets
     settings:
       request: *a3
       weight: 1
-    from: {node: scheduler-queue-handler}
+    from: { node: scheduler-queue-handler }
   scheduler-queue-handler.out->scheduler-table:
     to: scheduler-table
     settings:
       request: *a3
       weight: 0.4
-    from: {node: scheduler-queue-handler}
+    from: { node: scheduler-queue-handler }
   billing-rule.out->seed-invoices:
     to: seed-invoices
-    from: {node: billing-rule}
+    from: { node: billing-rule }
   seed-invoices.out->accounts:
     to: accounts
     settings: *a1
-    from: {node: seed-invoices}
+    from: { node: seed-invoices }
   seed-invoices.out->resellers:
     to: resellers
     settings: *a1
-    from: {node: seed-invoices}
+    from: { node: seed-invoices }
   seed-invoices.out->invoice-queue:
     to: invoice-queue
-    from: {node: seed-invoices}
+    from: { node: seed-invoices }
   invoice-queue.dlq->invoice-dlq:
     to: invoice-dlq
-    from: {node: invoice-queue, port: dlq}
+    from: { node: invoice-queue, port: dlq }
   invoice-queue.deliver->process-invoice-queue:
     to: process-invoice-queue
     settings:
       batchSize: 3
       maxConcurrency: 5
-    origin: {source: falcon/cdk/services/pos-hub/BillingAutomation.ts, ref: process-invoice-queue/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: invoice-queue, port: deliver}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/BillingAutomation.ts,
+        ref: process-invoice-queue/SqsEventSource,
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: invoice-queue, port: deliver }
   process-invoice-queue.out->accounts:
     to: accounts
     settings: *a1
-    from: {node: process-invoice-queue}
+    from: { node: process-invoice-queue }
   process-invoice-queue.out->resellers:
     to: resellers
     settings: *a1
-    from: {node: process-invoice-queue}
+    from: { node: process-invoice-queue }
   process-invoice-queue.out->locations:
     to: locations
     settings: *a1
-    from: {node: process-invoice-queue}
+    from: { node: process-invoice-queue }
   process-invoice-queue.out->orders:
     to: orders
     settings: *a1
-    from: {node: process-invoice-queue}
+    from: { node: process-invoice-queue }
   process-invoice-queue.out->deliveries:
     to: deliveries
     settings: *a1
-    from: {node: process-invoice-queue}
+    from: { node: process-invoice-queue }
   process-invoice-queue.out->payments:
     to: payments
     settings: *a1
-    from: {node: process-invoice-queue}
+    from: { node: process-invoice-queue }
   process-invoice-queue.out->invoices:
     to: invoices
     settings: *a2
-    from: {node: process-invoice-queue}
+    from: { node: process-invoice-queue }
   process-invoice-queue.out->assets:
     to: assets
     settings: *a2
-    from: {node: process-invoice-queue}
+    from: { node: process-invoice-queue }
   performance-report-rule.out->performance-report-handler:
     to: performance-report-handler
-    from: {node: performance-report-rule}
+    from: { node: performance-report-rule }
   performance-report-handler.out->resellers:
     to: resellers
     settings: *a1
-    from: {node: performance-report-handler}
+    from: { node: performance-report-handler }
   performance-report-handler.out->locations:
     to: locations
     settings: *a1
-    from: {node: performance-report-handler}
+    from: { node: performance-report-handler }
   performance-report-handler.out->resellers-2:
     to: resellers
     settings: *a2
-    from: {node: performance-report-handler}
+    from: { node: performance-report-handler }
   reports-queue.dlq->reports-dlq:
     to: reports-dlq
-    from: {node: reports-queue, port: dlq}
+    from: { node: reports-queue, port: dlq }
   reports-queue.deliver->report-worker-handler:
     to: report-worker-handler
     settings:
       batchSize: 1
-    origin: {source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts, ref: report-worker-handler/SqsEventSource, type: lambda.EventSourceMapping}
-    from: {node: reports-queue, port: deliver}
+    origin:
+      {
+        source: falcon/cdk/services/pos-hub/POSHubDatabaseStack.ts,
+        ref: report-worker-handler/SqsEventSource,
+        type: lambda.EventSourceMapping,
+      }
+    from: { node: reports-queue, port: deliver }
   report-worker-handler.out->reports:
     to: reports
     settings: *a1
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   report-worker-handler.out->applications:
     to: applications
     settings: *a1
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   report-worker-handler.out->connections:
     to: connections
     settings: *a1
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   report-worker-handler.out->locations:
     to: locations
     settings: *a1
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   report-worker-handler.out->orders:
     to: orders
     settings: *a1
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   report-worker-handler.out->deliveries:
     to: deliveries
     settings: *a1
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   report-worker-handler.out->report-delegates:
     to: report-delegates
     settings:
       timeout: 30 seconds
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   report-worker-handler.out->report-artifacts:
     to: report-artifacts
     settings: *a2
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   report-worker-handler.out->reports-2:
     to: reports
     settings: *a2
-    from: {node: report-worker-handler}
+    from: { node: report-worker-handler }
   api-validation-failures.out->validation-failure-consumer:
     to: validation-failure-consumer
-    from: {node: api-validation-failures}
+    from: { node: api-validation-failures }
   validation-failure-consumer.out->audits:
     to: audits
     settings: *a2
-    from: {node: validation-failure-consumer}
+    from: { node: validation-failure-consumer }
   api-handler.out->auth:
     to: auth
     settings:
       weight: 14
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->roles:
     to: roles
     settings:
       weight: 3
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->memberships:
     to: memberships
     settings:
       weight: 3
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->invitations:
     to: invitations
     settings:
       weight: 1
       request:
         operation: write
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->resellers:
     to: resellers
     settings:
       weight: 3
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->applications:
     to: applications
     settings:
       weight: 5
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->connections:
     to: connections
     settings:
       weight: 7
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->users:
     to: users
     settings:
       weight: 3
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->accounts:
     to: accounts
     settings:
       weight: 3
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->invoices:
     to: invoices
     settings:
       weight: 2
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->catalog-products:
     to: catalog-products
     settings:
       weight: 4
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->catalog-categories:
     to: catalog-categories
     settings:
       weight: 2
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->catalog-modifiers:
     to: catalog-modifiers
     settings:
       weight: 2
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->catalog-modifier-groups:
     to: catalog-modifier-groups
     settings:
       weight: 2
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->menus:
     to: menus
     settings:
       weight: 5
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->menu-categories:
     to: menu-categories
     settings:
       weight: 3
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->menu-items:
     to: menu-items
     settings:
       weight: 5
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->menu-modifiers:
     to: menu-modifiers
     settings:
       weight: 3
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->menu-modifier-groups:
     to: menu-modifier-groups
     settings:
       weight: 2
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->promotions:
     to: promotions
     settings:
       weight: 2
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->locations:
     to: locations
     settings:
       weight: 8
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->orders:
     to: orders
     settings:
       weight: 18
       request:
         operation: write
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->orders-association:
     to: orders-association
     settings:
       weight: 2
       request:
         operation: write
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->deliveries:
     to: deliveries
     settings:
       weight: 6
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->payments:
     to: payments
     settings:
       weight: 4
       request:
         operation: read
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->audits:
     to: audits
     settings:
       weight: 7
       request:
         operation: write
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->reports:
     to: reports
     settings:
       weight: 1
       request:
         operation: write
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->scheduler-table:
     to: scheduler-table
     settings:
       request: *a3
       weight: 2
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->reports-queue:
     to: reports-queue
     settings:
       weight: 0.5
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->assets:
     to: assets
     settings:
       request: *a3
       weight: 0.5
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->database-assets:
     to: database-assets
     settings:
       request: *a3
       weight: 0.3
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->report-artifacts:
     to: report-artifacts
     settings:
       request: *a3
       weight: 0.1
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->marketplace-apps:
     to: marketplace-apps
     settings:
       weight: 1.5
       timeout: 2 minutes
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->delivery-apps:
     to: delivery-apps
     settings:
       weight: 1.5
       timeout: 10 seconds
-    from: {node: api-handler}
+    from: { node: api-handler }
   api-handler.out->twilio:
     to: twilio
     settings:
       weight: 1
-    from: {node: api-handler}
+    from: { node: api-handler }
   api.out->assets:
     to: assets
     settings:
       request: *a4
       weight: 0.2
-    from: {node: api}
+    from: { node: api }
   api.authorizer->token-authorizer:
     to: token-authorizer
-    origin: {source: assumed, ref: "TokenAuthorizer (authorizerV2.ts) invoked on every request, cache TTL 0"}
-    from: {node: api, port: authorizer}
+    origin:
+      {
+        source: assumed,
+        ref: "TokenAuthorizer (authorizerV2.ts) invoked on every request, cache TTL 0",
+      }
+    from: { node: api, port: authorizer }
   token-authorizer.out->auth:
     to: auth
     settings:
-      request: {operation: read}
-    origin: {source: assumed, ref: "authorizer reads (which tables and how many is assumed)"}
-    from: {node: token-authorizer}
+      request: { operation: read }
+    origin:
+      {
+        source: assumed,
+        ref: "authorizer reads (which tables and how many is assumed)",
+      }
+    from: { node: token-authorizer }
   token-authorizer.out->memberships:
     to: memberships
     settings:
-      request: {operation: read}
-    origin: {source: assumed, ref: "authorizer reads (which tables and how many is assumed)"}
-    from: {node: token-authorizer}
+      request: { operation: read }
+    origin:
+      {
+        source: assumed,
+        ref: "authorizer reads (which tables and how many is assumed)",
+      }
+    from: { node: token-authorizer }
   token-authorizer.out->roles:
     to: roles
     settings:
-      request: {operation: read}
-    origin: {source: assumed, ref: "authorizer reads (which tables and how many is assumed)"}
-    from: {node: token-authorizer}
+      request: { operation: read }
+    origin:
+      {
+        source: assumed,
+        ref: "authorizer reads (which tables and how many is assumed)",
+      }
+    from: { node: token-authorizer }
   api-handler.out->ses:
     to: ses
     settings:
       weight: 1
-    origin: {source: assumed, ref: "invitation email (EmailService/AmazonSESProvider); share of requests assumed, same weight as the invitation write"}
-    from: {node: api-handler}
+    origin:
+      {
+        source: assumed,
+        ref: "invitation email (EmailService/AmazonSESProvider); share of requests assumed, same weight as the invitation write",
+      }
+    from: { node: api-handler }
   process-invoice-queue.out->ses:
     to: ses
-    origin: {source: assumed, ref: "invoice email (EmailService/AmazonSESProvider), one per invoice processed"}
-    from: {node: process-invoice-queue}
+    origin:
+      {
+        source: assumed,
+        ref: "invoice email (EmailService/AmazonSESProvider), one per invoice processed",
+      }
+    from: { node: process-invoice-queue }
   performance-report-handler.out->ses:
     to: ses
-    origin: {source: assumed, ref: "performance email (EmailService/AmazonSESProvider), one per run"}
-    from: {node: performance-report-handler}
+    origin:
+      {
+        source: assumed,
+        ref: "performance email (EmailService/AmazonSESProvider), one per run",
+      }
+    from: { node: performance-report-handler }
   media-viewers.out->media-cdn:
     to: media-cdn
     settings:
-      request: {operation: read}
-    origin: {source: assumed, ref: "viewers of media and signed deliveries CSV links"}
-    from: {node: media-viewers}
+      request: { operation: read }
+    origin:
+      {
+        source: assumed,
+        ref: "viewers of media and signed deliveries CSV links",
+      }
+    from: { node: media-viewers }
   media-cdn.out->assets:
     to: assets
     settings:
       originType: s3
-      request: {operation: read}
-    origin: {source: assumed, ref: "CDN origin is the media bucket (assets); pos-hub-cdn itself not read"}
-    from: {node: media-cdn, port: out}
+      request: { operation: read }
+    origin:
+      {
+        source: assumed,
+        ref: "CDN origin is the media bucket (assets); pos-hub-cdn itself not read",
+      }
+    from: { node: media-cdn, port: out }
