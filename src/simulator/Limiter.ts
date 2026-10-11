@@ -16,6 +16,8 @@ export interface Limiter {
   readonly takeUnsafe: (key: string, bucket: Bucket, tokens?: number) => boolean
   /** Tokens in the bucket right now. */
   readonly levelUnsafe: (key: string, bucket: Bucket) => number
+  /** How many buckets are being remembered. Idle, fully refilled ones are forgotten (see `makeWith`). */
+  readonly size: () => number
   readonly take: (key: string, bucket: Bucket, tokens?: number) => Effect.Effect<boolean>
   readonly level: (key: string, bucket: Bucket) => Effect.Effect<number>
 }
@@ -30,11 +32,29 @@ export interface Bucket {
 interface State {
   tokens: number
   at: number
+  /** The bucket's own parameters as last seen, so an idle one can be recognised as full without being asked. */
+  rate: number
+  burst: number
 }
+
+/** Past this many buckets, and at most this often, buckets that have refilled completely are forgotten. */
+const SWEEP_ABOVE = 1_024
+const SWEEP_EVERY_MS = 10_000
 
 /** A limiter reading time from `now` (milliseconds). */
 export const makeWith = (now: () => number): Limiter => {
   const states = new Map<string, State>()
+  let swept = 0
+
+  /**
+   * Keys can be per-message-group, per-prefix, per-caller: an unbounded set over a long run. A bucket that has refilled
+   * completely is exactly what a new one starts as, so dropping it changes nothing, and only the buckets with something
+   * to remember stay. Cheap: it runs at most every `SWEEP_EVERY_MS` and only once there are many buckets.
+   */
+  const sweep = (t: number): void => {
+    swept = t
+    for (const [key, state] of states) if (state.tokens + ((t - state.at) * state.rate) / 1000 >= state.burst) states.delete(key)
+  }
 
   /** Bring the bucket up to date: refill for the time since it was last touched, capped at the burst. */
   const refresh = (key: string, bucket: Bucket): State => {
@@ -42,10 +62,13 @@ export const makeWith = (now: () => number): Limiter => {
     const burst = bucket.burst < 1 ? 1 : bucket.burst
     let state = states.get(key)
     if (state === undefined) {
-      state = { tokens: burst, at: t }
+      if (states.size > SWEEP_ABOVE && t - swept >= SWEEP_EVERY_MS) sweep(t)
+      state = { tokens: burst, at: t, rate: bucket.rate, burst }
       states.set(key, state)
       return state
     }
+    state.rate = bucket.rate
+    state.burst = burst
     const elapsed = t - state.at
     if (elapsed > 0) {
       state.tokens += (elapsed * bucket.rate) / 1000
@@ -68,6 +91,7 @@ export const makeWith = (now: () => number): Limiter => {
   return {
     takeUnsafe,
     levelUnsafe,
+    size: () => states.size,
     take: (key, bucket, tokens) => Effect.sync(() => takeUnsafe(key, bucket, tokens)),
     level: (key, bucket) => Effect.sync(() => levelUnsafe(key, bucket))
   }

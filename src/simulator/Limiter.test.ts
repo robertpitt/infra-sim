@@ -55,4 +55,32 @@ describe("Limiter", () => {
         expect(yield* l.take("k", { rate: 10, burst: 50 })).toBe(false)
       })
     ))
+
+  it("forgets buckets that have refilled completely, so per-key buckets don't grow without bound", () =>
+    inWorld((l, advance) =>
+      Effect.gen(function*() {
+        const small = { rate: 100, burst: 10 }
+        // A great many keys, each touched once (per group, per prefix, per caller).
+        for (let i = 0; i < 3_000; i++) yield* l.take(`key-${i}`, small)
+        expect(l.size()).toBeGreaterThan(2_000)
+        yield* advance(60_000) // every one of them has long since refilled
+        yield* l.take("fresh", small)
+        yield* advance(11_000)
+        yield* l.take("fresh-2", small) // a new key after the sweep interval triggers the sweep
+        expect(l.size()).toBeLessThan(50)
+      })
+    ))
+
+  it("never forgets a bucket that still has something to remember", () =>
+    inWorld((l, advance) =>
+      Effect.gen(function*() {
+        const slow = { rate: 1, burst: 100 }
+        for (let i = 0; i < 2_000; i++) yield* l.take(`k-${i}`, slow, 60) // each spent 60 of 100 tokens and needs a minute to refill
+        yield* advance(11_000)
+        yield* l.take("trigger", slow)
+        expect(l.size()).toBeGreaterThan(2_000)
+        // and the ones kept are still exact
+        expect(Math.round(yield* l.level("k-5", slow))).toBe(51)
+      })
+    ))
 })

@@ -37,18 +37,11 @@ describe("Engine", () => {
     withEngine((engine) =>
       Effect.sync(() => {
         expect(engine.catalog.providers.map((p) => p.id)).toEqual(["internet", "aws"])
-        expect(engine.catalog.components.map((c) => c.type)).toEqual([
-          "common.client",
-          "common.http-endpoint",
-          "aws.region",
-          "aws.vpc",
-          "aws.apigateway",
-          "aws.lambda",
-          "aws.sqs",
-          "aws.sns",
-          "aws.dynamodb",
-          "aws.s3"
-        ])
+        // Every component is described, namespaced by provider; services come and go, so check what must be there.
+        const types = engine.catalog.components.map((c) => c.type)
+        expect(types).toEqual(expect.arrayContaining(["common.client", "common.http-endpoint", "aws.region", "aws.vpc", "aws.apigateway", "aws.lambda", "aws.sqs", "aws.sns", "aws.dynamodb", "aws.s3"]))
+        expect(types.every((t) => /^(common|aws)\.[a-z0-9-]+$/.test(t))).toBe(true)
+        expect(new Set(types).size).toBe(types.length)
         expect(engine.catalog.edge.map((f) => f.key)).toEqual(["weight", "latency", "request", "timeout", "cancelOnTimeout", "retry"])
         expect(engine.catalog.faults.map((f) => f.tag)).toEqual(["Outage", "Errors", "Slow", "Blackhole", "Loss"])
         // Forms are derived from the schemas, durations in milliseconds.

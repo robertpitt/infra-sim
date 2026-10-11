@@ -185,6 +185,11 @@ export const forEach = (count: number, concurrency: number, task: (index: number
 export class Lanes {
   private readonly waiting = new Map<string, Array<(release: () => void) => void>>()
 
+  /** Lanes with work in them right now. A lane exists only while it has some. */
+  get open(): number {
+    return this.waiting.size
+  }
+
   run(key: string, task: (release: () => void) => void): void {
     const queue = this.waiting.get(key)
     if (queue !== undefined) {
