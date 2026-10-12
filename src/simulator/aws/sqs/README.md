@@ -214,6 +214,7 @@ Counters (per second in frames), after the CloudWatch metric they stand in for. 
 | Name | CloudWatch | Meaning |
 | --- | --- | --- |
 | `sent` | NumberOfMessagesSent | Accepted from callers. Not DLQ moves or redrive. |
+| `sentBytes` | SentMessageSize (Sum) | Bytes of those messages; over `sent`, the average SentMessageSize. |
 | `received` | NumberOfMessagesReceived | Every message a receive returned, redeliveries included. |
 | `deleted` | NumberOfMessagesDeleted | Deleted by the receive that owned them. |
 | `deduplicated` | NumberOfDeduplicatedSentMessages | FIFO sends dropped as duplicates. |
@@ -230,7 +231,19 @@ each time it is tried).
 
 Plus the framework's `in`, `ok`, `fail`, `fail.<Tag>`, `latency`, `inflight`. Gauges: `depth` (ApproximateNumberOfMessagesVisible),
 `hidden` (NotVisible), `delayed`, `oldestAgeMs` (ApproximateAgeOfOldestMessage), `groupsInflight` (FIFO,
-ApproximateNumberOfGroupsWithInflightMessages).
+ApproximateNumberOfGroupsWithInflightMessages). Distribution: `sentMessageSize` (SentMessageSize in bytes, one sample per
+send call: a batch's messages share a size).
+
+The event source mapping's edge records, beside transport's `calls`, `ok`, `fail`, `fail.<Tag>`, `latency`: rates `polled`
+(PolledEventCount: records the pollers received), `batches` (invocations, a throttled batch's retries included), `invoked`
+(InvokedEventCount: records in those invocations), `failedInvoke` (FailedInvokeEventCount: records in invocations that
+failed), `itemFailures`, `itemFailuresIgnored`; gauges `concurrency` (the concurrent batches it is running at), `busy`
+(pollers holding or running a batch), `batchSize` (what a batch is gathered to). `core.poller` records `batches`, `records`,
+`batchesFailed`, `recordsFailed` and gauges `workers`, `busy`, `batchSize`.
+
+The node's dashboard (`dashboard.ts`) charts these the way CloudWatch does; the mapping's charts follow transport's on its
+edge. Not charted, because the simulator doesn't model them: the fair-queue metrics (`...InQuietGroups`,
+ApproximateNumberOfNoisyGroups) and the mapping's DeletedEventCount (the queue's NumberOfMessagesDeleted counts deletes).
 
 Probe state: `ready`, `hidden`, `delayed`, `oldestAge`, `totals` (running totals of the counters above plus `enqueued`, which
 includes internal moves), `groups` (FIFO: `waiting`, `blocked` behind an in-flight message, `inflight`), `parked` (DLQ moves

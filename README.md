@@ -20,6 +20,10 @@ The engine is pure [Effect](https://effect.website) (`src/simulator`, no DOM) an
 
 <img src="docs/screenshots/settings.png" alt="The Fan-out example with the Emailer Lambda selected: the path from the app through SNS and SQS to the Emailer and the email provider is lit while the audit log and analytics branches are dimmed; its settings dialog is open, and the charts below show its rate, latency and concurrency." width="100%">
 
+**Read it the way you would read CloudWatch.** Select a component or a connection and the dock shows its dashboard: its key figures, and the charts an operator would put up for that service, named after the metrics AWS publishes. A DynamoDB table shows consumed against provisioned capacity, read and write throttle events, latency and average item size. A Lambda function shows invocations, errors, throttles, duration and concurrency against the regional quota. A queue shows the messages visible and the age of the oldest. Hover a chart's title for the CloudWatch metrics it stands for. Charts are drawn in steady, clock-aligned steps, so they don't jitter as the run plays.
+
+<img src="docs/screenshots/dashboard.png" alt="The Order pipeline's flash sale, with the Orders table selected: its key figures (read and write units, throttled requests, average item size, latency) above charts of write capacity consumed against provisioned, throttle events by direction, requests, latency and burst capacity left, during and after the rush." width="100%">
+
 **Designs are YAML, checked as you type.** The *Editor* tab shows the design as YAML, with completion, hover help and validation from the design's JSON Schema: the same schema VS Code uses for design files. Edits apply with ⌘S or when you go back to the canvas, as one undoable change.
 
 <img src="docs/screenshots/editor.png" alt="The YAML editor with a completion list inside a Lambda function's settings, offering only the settings a Lambda has that aren't set yet." width="100%">

@@ -128,12 +128,17 @@ constant-rate client at the expression's average rate; it could become this comp
 | `overflow` | dropped because `maxPending` was full | none (simulator bound) |
 | `noTarget` | invocations with nothing wired to `out` | none |
 
-`TargetErrorCount` and `TargetErrorThrottledCount` are the edge's `fail` and `fail.Throttled`. Distributions: `latency`
-(creation to success, as a client's), `startLatency` (creation to first attempt), `successLatency`. Gauges: `pending`,
-`quotaWait` (ms a new invocation would wait for the regional quota).
+`targetErrors` and `targetThrottled` are `TargetErrorCount` and `TargetErrorThrottledCount`: every attempt the target
+answered with an error, and of those the throttled ones (the edge's `fail` and `fail.Throttled` count the same).
+Distributions: `latency` (creation to success, as a client's), `startLatency` (creation to first attempt),
+`successLatency`. Gauges: `pending`, `quotaWait` (ms a new invocation would wait for the regional quota),
+`invocationQuota` (the region's invocation quota, shared by every schedule there).
 
 Probe state: `next` (virtual ms of the next occurrence, −1 for none), `occurrences`, `windows` (occurrences still
-invoking), `noTarget`, `pending`, the outcome totals above and `quotaWait`.
+invoking), `noTarget`, `pending`, the outcome totals above (not `targetErrors`, `targetThrottled`) and `quotaWait`.
+
+The node's dashboard (`dashboard.ts`) charts these under CloudWatch's names. `InvocationsSentToDeadLetterCount_Truncated_*`
+and the per-error-code `InvocationsFailedToBeSentToDeadLetterCount_<code>` aren't modelled.
 
 ## Not yet simulated
 

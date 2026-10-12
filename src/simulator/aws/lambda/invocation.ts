@@ -155,8 +155,14 @@ export const begin = (fn: FunctionRuntime, message: Message, done: Outcome): Flo
   // --- Admitted: take what the attempt holds ------------------------------------------------------------------------
   bump(stats.invocations)
   fn.inUse++
-  if (usesProvisioned) provisioned.take()
-  else if (!cap.reserved) region.unreservedInUse++
+  if (usesProvisioned) {
+    provisioned.take()
+    stats.provisionedInvocations.n++
+  } else {
+    // A function with provisioned environments that are all busy spills over onto standard concurrency.
+    if (provisioned.allocated > 0) stats.spilloverInvocations.n++
+    if (!cap.reserved) region.unreservedInUse++
+  }
 
   let finished = false
   let haveEnvironment = born >= 0
@@ -184,7 +190,10 @@ export const begin = (fn: FunctionRuntime, message: Message, done: Outcome): Flo
     if (finished) return
     finished = true
     timeout?.cancel()
-    if (haveEnvironment) stats.duration.add(fast.now() - startedAt)
+    // The handler ran if the attempt had an environment: a provisioned one, or an on-demand one (a SnapStart restore that
+    // overran never got one).
+    if (usesProvisioned || haveEnvironment) stats.duration.add(fast.now() - startedAt)
+    stats.completedInvocations.n++
     settle(false)
     if (failure === undefined) {
       if (items !== undefined) bump(stats.itemFailures, items.failed.length)
@@ -201,6 +210,7 @@ export const begin = (fn: FunctionRuntime, message: Message, done: Outcome): Flo
     cancelWork()
     bump(stats.timeouts)
     bump(stats.errors)
+    stats.completedInvocations.n++
     stats.duration.add(fast.now() - startedAt)
     settle(true)
     done({ kind: "function", failure: Failed({ node: fn.id, reason: "task timed out" }) })

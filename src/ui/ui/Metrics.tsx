@@ -28,6 +28,7 @@ const LABELS: Record<string, string> = {
   undelivered: "Undelivered",
   noroute: "No route",
   inflight: "In flight",
+  outstanding: "Awaiting a response",
   busy: "Workers busy",
   waiting: "Waiting",
   utilization: "Utilisation",

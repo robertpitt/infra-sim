@@ -7,6 +7,7 @@ import { type Call, type CallFailure, Failed, type ItemFailures, type Message, R
 import type { TimerHandle } from "../../VirtualTime.ts"
 import * as Aws from "../provider.ts"
 import { capacityOf, hasContentRules } from "./capacity.ts"
+import { dashboard } from "./dashboard.ts"
 import {
   ACTIONS_URL,
   ALB_ERRORS_URL,
@@ -116,6 +117,7 @@ export const Waf = Aws.component({
   quietAlarms: ["errors"],
   icon: "shield",
   accent: "#dd344c",
+  dashboard,
   limits: [
     { label: "Web ACL capacity", value: "5,000 WCUs; the base price includes 1,500", adjustable: false, source: WCU_URL, note: `AWS refuses a web ACL over ${MAX_WCU.toLocaleString("en-US")} WCUs (a design error here); over ${PRICED_WCU.toLocaleString("en-US")} costs more.` },
     { label: "Requests per second per web ACL", value: "100,000", adjustable: true, source: QUOTAS_URL, note: "Regional web ACLs. For CloudFront the developer guide says CloudFront sets the limit; Service Quotas lists 100,000 for CloudFront web ACLs too." },
@@ -171,6 +173,10 @@ export const Waf = Aws.component({
         [Verdict.BodySize]: meter.counter("blocked.bodySize"),
         [Verdict.Rules]: meter.counter("blocked.rules")
       }
+      // CountedRequests by rule: a rule whose action is Count matched, and evaluation went on.
+      const countedRateBased = meter.counter("counted.rateBased")
+      const countedBodySize = meter.counter("counted.bodySize")
+      const countedRules = meter.counter("counted.rules")
       const overQuotaN = meter.counter("overQuota")
       const uninspectedN = meter.counter("uninspected")
       const totals = { allowed: 0, blocked: 0, counted: 0, blockedByRateRule: 0, blockedByRules: 0, blockedBodySize: 0, blockedOversize: 0, overQuota: 0, uninspected: 0 }
@@ -204,6 +210,7 @@ export const Waf = Aws.component({
         if (rate !== undefined && (rate.scope === "all" || rate.scope === message.operation) && tracker.see(message.origin, message.key)) {
           if (rate.block) return Verdict.RateBased
           counted = true
+          countedRateBased.n++
         }
         // A read is a GET and carries no body.
         const body = message.operation === "write" ? message.bytes : 0
@@ -212,6 +219,7 @@ export const Waf = Aws.component({
         if (plan.coreBodySize !== undefined && body > CORE_BODY_LIMIT_BYTES) {
           if (plan.coreBodySize === "block") return Verdict.BodySize
           counted = true
+          countedBodySize.n++
         }
         if (plan.content) {
           // An attack hidden in a body larger than the inspection limit is caught only if it sits in the part that is
@@ -221,6 +229,7 @@ export const Waf = Aws.component({
           if (share > 0 && fast.random.nextDoubleUnsafe() < share) {
             if (plan.rulesBlock) return Verdict.Rules
             counted = true
+            countedRules.n++
           }
         }
         return Verdict.Allow
@@ -306,6 +315,8 @@ export const Waf = Aws.component({
       meter.gaugeUnsafe("busiestAddress", tracker.busiest)
       meter.gaugeUnsafe("blockedShare", () => blockedShare)
       meter.gaugeUnsafe("wcu", () => planOf(fast.settings()).wcu)
+      // The rate-based rule's limit (requests per window per address; 0 without the rule), to read `busiestAddress` against.
+      meter.gaugeUnsafe("rateLimit", () => planOf(fast.settings()).rate?.spec.limit ?? 0)
 
       return {
         call: (message) => {

@@ -14,7 +14,7 @@ import { keyOf, shardOfSlot, slotOf, Tally } from "./store.ts"
 /** The recent-rate gauges look back over this many one-second slots. */
 const WINDOW = 10
 const SECOND = 1000
-const IDLE: Utilization = { hottest: 0, hottestShard: 0, mean: 0 }
+const IDLE: Utilization = { hottest: 0, hottestShard: 0, mean: 0, hottestEngine: 0, meanEngine: 0, hottestNetwork: 0 }
 
 export type ElastiCacheNode = Aws.Node<typeof Config, typeof ports>
 
@@ -71,6 +71,15 @@ export const makeRuntime = (node: ElastiCacheNode) => {
   const flushes = node.meter.counter("flushes")
   const ecpu = node.meter.counter("ecpu")
   const tally = new Tally({ evictions: node.meter.counter("evictions"), expired: node.meter.counter("expired"), oom: node.meter.counter("oom") })
+  // As CloudWatch counts them: SET-type commands (fills, write-throughs, invalidations), the values written to the cache
+  // and read from it (NetworkBytesIn and NetworkBytesOut of client traffic; the replication stream is ReplicationBytes),
+  // and the latency of the cache commands that succeeded, the database's time apart.
+  const setTypeCmds = node.meter.counter("setTypeCmds")
+  const networkBytesIn = node.meter.counter("networkBytesIn")
+  const networkBytesOut = node.meter.counter("networkBytesOut")
+  const readLatency = node.meter.sampler("readLatency")
+  const writeLatency = node.meter.sampler("writeLatency")
+  const replication = { bytes: node.meter.counter("replicationBytes"), lag: node.meter.sampler("replicationLag") }
   const total = { reads: 0, writes: 0, hits: 0, misses: 0, collapsed: 0, databaseReads: 0, databaseWrites: 0, bypassed: 0, refused: 0, throttled: 0, failovers: 0 }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -84,7 +93,7 @@ export const makeRuntime = (node: ElastiCacheNode) => {
   // The nodes are spread over the region's zones from the node's own zone (or the region's first).
   const home = node.placement.zone === undefined ? 0 : Math.max(0, node.zones.all.indexOf(node.placement.zone))
   const zones = new ZoneMap(node.zones.all, home)
-  let cluster = new Cluster<Waiter>(d.shards, d.group, tally, zones)
+  let cluster = new Cluster<Waiter>(d.shards, d.group, tally, zones, replication)
   const serverless = new ServerlessCapacity(`${node.id}/elasticache`, d)
   let failSeen = initial.actions.failPrimary
   let flushSeen = initial.actions.flush
@@ -209,16 +218,20 @@ export const makeRuntime = (node: ElastiCacheNode) => {
       if (!cluster.writable(shard, now)) return Unavailable({ node: node.id, reason: "primary failing over: writes refused" })
       const failure = onNode(cluster.primaryOf(shard, now), now, 0)
       if (failure !== undefined) return failure
-      cluster.replicate(shard, now, set ? d.itemBytes : 0, d)
+      cluster.replicate(shard, now, set ? d.itemBytes : 0, d, now + commandDelay)
     }
+    setTypeCmds.n++
     if (!set) {
       store.delete(key)
+      writeLatency.add(commandDelay)
       return undefined
     }
+    networkBytesIn.n += d.itemBytes
     if (!d.storable) return Rejected({ node: node.id, reason: "SERVER_ERROR object too large for cache" })
     if (!store.set(key, expiry(now), d.capacity, d.policy, now)) {
       return Failed({ node: node.id, reason: "OOM command not allowed when used memory > 'maxmemory'" })
     }
+    writeLatency.add(commandDelay)
     return undefined
   }
 
@@ -291,6 +304,8 @@ export const makeRuntime = (node: ElastiCacheNode) => {
     }
     if (failure !== undefined) return cacheDown(message, failure)
     const delay = commandDelay
+    readLatency.add(delay)
+    networkBytesOut.n += bytes
     if (fresh) {
       cacheHits.n++
       total.hits++
@@ -359,7 +374,7 @@ export const makeRuntime = (node: ElastiCacheNode) => {
   const recent = { hits: new Float64Array(WINDOW), misses: new Float64Array(WINDOW) }
   let seen = { hits: 0, misses: 0 }
   let slot = 0
-  let utilization: Utilization = { hottest: 0, hottestShard: 0, mean: 0 }
+  let utilization: Utilization = IDLE
   const sum = (values: Float64Array): number => {
     let s = 0
     for (let i = 0; i < WINDOW; i++) s += values[i]!
@@ -392,8 +407,12 @@ export const makeRuntime = (node: ElastiCacheNode) => {
   node.meter.gaugeUnsafe("memoryUsed", memoryUsed)
   node.meter.gaugeUnsafe("engineUtilization", () => utilization.hottest)
   node.meter.gaugeUnsafe("meanUtilization", () => utilization.mean)
+  node.meter.gaugeUnsafe("engineCpu", () => utilization.hottestEngine)
+  node.meter.gaugeUnsafe("engineCpuMean", () => utilization.meanEngine)
+  node.meter.gaugeUnsafe("networkUtilization", () => utilization.hottestNetwork)
   node.meter.gaugeUnsafe("shardsWriteBlocked", blocked)
-  node.meter.gaugeUnsafe("ecpuCeiling", () => (d.serverless ? serverless.ceiling : 0))
+  // Only a serverless cache has ECPUs (a cluster can't become serverless in place, so this holds for the whole run).
+  if (d.serverless) node.meter.gaugeUnsafe("ecpuCeiling", () => (d.serverless ? serverless.ceiling : 0))
   node.meter.gaugeUnsafe("nodesDown", () => (d.serverless ? 0 : cluster.nodesDown(fast.now())))
 
   const probe = Effect.sync((): State => {

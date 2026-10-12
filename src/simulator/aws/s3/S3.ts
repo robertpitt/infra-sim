@@ -8,6 +8,7 @@ import { chance, mix, passes, records } from "../../kit/Shape.ts"
 import { counters, tallies, totals } from "../../kit/Tally.ts"
 import * as Aws from "../provider.ts"
 import { ARCHIVE_CLASSES, config, ports, state } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { carriesBody, isUpload, type Kind, newPlan, plan as planTransfer, tooLarge } from "./transfer.ts"
 import { D, DIRECTORY_RATE, EVENT_BYTES, MAX_OBJECT_BYTES, MiB, PREFIX_RATE, QUOTAS } from "./limits.ts"
 import { PrefixTable, prefixIndex } from "./prefixes.ts"
@@ -57,6 +58,7 @@ export const S3 = Aws.component({
     { label: "First-byte latency", value: "roughly 100 to 200 ms for latency-sensitive workloads; median tens of ms for small objects", adjustable: false, source: `${D}optimizing-performance.html`, note: "AWS publishes no distribution; the one here is assumed." },
     { label: "Throughput per connection", value: "not published today", adjustable: false, source: `${D}optimizing-performance-guidelines.html`, note: "AWS advises many parallel connections. The default rate here (about 90 MB/s) is assumed from older guidance." }
   ],
+  dashboard,
   highlights: [
     { rate: "fail.Throttled", label: "503/s" },
     { gauge: "transferring", label: "transferring" },

@@ -6,6 +6,7 @@ import * as Flow from "../Flow.ts"
 import { type CallFailure, Failed, type Reply, Unavailable } from "../Message.ts"
 import { Slots } from "../kit/Slots.ts"
 import * as Setting from "../Setting.ts"
+import * as dashboards from "./dashboards.ts"
 
 export const Config = Schema.Struct({
   objects: Setting.int({
@@ -84,6 +85,7 @@ export const Actor = Component.make({
   category: "compute",
   icon: "share",
   accent: "#e07a5f",
+  dashboard: dashboards.actor,
   highlights: [
     { gauge: "instances", label: "in memory" },
     { gauge: "queued", label: "queued" },

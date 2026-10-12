@@ -4,6 +4,7 @@ import * as Component from "../../Component.ts"
 import * as Aws from "../provider.ts"
 import { Dispatcher, limitsOf, Pacer, type Policy, Target } from "../eventbridge/delivery.ts"
 import { MAX_INPUT_KB, PRECISION_MS, Schedule, type ScheduleConfig } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { type Expression, MINUTE_MS, nextCron, parse, parseDateTime } from "./expression.ts"
 import { QUOTAS_PAGE } from "./quotas.ts"
 
@@ -57,6 +58,7 @@ export const Scheduler = Aws.component({
     { label: "Dead-letter queue", value: "a standard SQS queue", adjustable: false, source: `${D}configuring-schedule-dlq.html` },
     { label: "Lambda targets", value: "invoked asynchronously", adjustable: false, source: "https://docs.aws.amazon.com/lambda/latest/dg/with-eventbridge-scheduler.html" }
   ],
+  dashboard,
   highlights: [
     { rate: "invocations", label: "invokes/s" },
     { gauge: "pending", label: "pending" },
@@ -120,6 +122,8 @@ export const Scheduler = Aws.component({
       let windows = 0
       node.meter.gaugeUnsafe("pending", () => dispatcher.pending)
       node.meter.gaugeUnsafe("quotaWait", () => dispatcher.quotaWait())
+      // The region's invocation quota, shared by every schedule there: the line its invocations are read against.
+      node.meter.gaugeUnsafe("invocationQuota", () => (fast.account() as Aws.Account).schedulerInvocationRate)
 
       /** Virtual time of the expression's next occurrence at or after `now`, or `undefined` if none. */
       const due = (c: ScheduleConfig, now: number): number | undefined => {

@@ -127,6 +127,12 @@ export class Dispatcher {
   readonly tally: Record<keyof Outcomes, Tally>
   readonly startLatency: Sampler
   private readonly successLatency: Sampler
+  /**
+   * Attempts the target answered with an error (Scheduler's TargetErrorCount), and of those, the ones it throttled
+   * (TargetErrorThrottledCount). Rates only: an attempt that fails is usually retried, so these are not outcomes.
+   */
+  private readonly targetErrors: Counter
+  private readonly targetThrottled: Counter
   private readonly source: SourceMetrics | undefined
 
   constructor(
@@ -145,6 +151,8 @@ export class Dispatcher {
     this.tally = tallies(meter, OUTCOMES)
     this.startLatency = meter.sampler("startLatency")
     this.successLatency = meter.sampler("successLatency")
+    this.targetErrors = meter.counter("targetErrors")
+    this.targetThrottled = meter.counter("targetThrottled")
     this.source = asSource ? { sent: meter.counter("sent"), ok: meter.counter("ok"), fail: meter.counter("fail"), latency: meter.sampler("latency") } : undefined
   }
 
@@ -161,6 +169,12 @@ export class Dispatcher {
       this.source.ok.n++
       this.source.latency.add(ms)
     }
+  }
+
+  /** An attempt the target answered with an error (it may yet be retried). */
+  attemptFailed(failure: CallFailure): void {
+    this.targetErrors.n++
+    if (failure._tag === "Throttled") this.targetThrottled.n++
   }
 
   /** An invocation that failed for good. */
@@ -280,6 +294,7 @@ class Delivery {
       d.succeeded(now - this.createdAt)
       return this.finish()
     }
+    d.attemptFailed(failure)
     // A client error (a missing resource, no permission, a 4xx from an API destination) is not retried.
     if (failure._tag === "Rejected" || this.retries >= this.policy.maxRetries) return this.giveUp(false)
     const limits = d.limits()

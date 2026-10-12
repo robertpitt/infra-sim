@@ -168,13 +168,18 @@ Counters (rates per second in frames, totals in the probe), with the CloudWatch 
 | `dropped` | given up with no DLQ: lost | none |
 | `delayed` | invocations that had to wait for a rate limit | `ThrottledRules` |
 | `overflow` | dropped because the target's pending bound was full | none (simulator bound) |
+| `targetErrors`, `targetThrottled` | attempts a target answered with an error, and of those the throttled ones (rates only: most are retried) | none for a bus (Scheduler's TargetErrorCount, TargetErrorThrottledCount) |
 
 Distributions: `requestSize` (bytes per request, `PutEventsRequestSize`), `startLatency` (creation to first attempt,
 `IngestiontoInvocationStartLatency`), `successLatency` (creation to success, `IngestionToInvocationSuccessLatency`).
 Gauges: `pending` (invocations not finished), `quotaWait` (ms a new invocation would wait for the regional quota).
 
-Probe state: the counters above as totals, `pending`, `quotaWait`, `rules` (each rule's name, whether it is active, its
-targets and the targets left out) and `backlog` (pending per target).
+Probe state: the counters above as totals (not `targetErrors`, `targetThrottled`), `pending`, `quotaWait`, `rules` (each
+rule's name, whether it is active, its targets and the targets left out) and `backlog` (pending per target).
+
+The node's dashboard (`dashboard.ts`) charts these under CloudWatch's names; `Invocations` is drawn as invocations that
+ended (`delivered` + `failed`). Not charted, because not modelled: DeadLetterInvocations (targets not invoked, such as
+loop protection), TriggeredRules and per-rule dimensions (the counters are per bus), IngestiontoInvocationCompleteLatency.
 
 ## Not yet simulated
 

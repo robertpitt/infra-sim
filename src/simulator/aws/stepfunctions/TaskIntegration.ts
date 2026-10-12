@@ -4,6 +4,7 @@ import * as Edge from "../../Edge.ts"
 import type { Message } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
 import { docs } from "../docs.ts"
+import { taskDashboard } from "./dashboard.ts"
 import { DEFAULT_TASK_TIMEOUT_MS, RETRY_FIELD_MAX } from "./limits.ts"
 
 /**
@@ -55,6 +56,7 @@ export const TaskIntegration = Connector.make({
   docs: `${docs.stepfunctions}state-task.html`,
   from: { protocol: "invoke", component: "aws.stepfunctions" },
   to: { protocol: "invoke" },
+  dashboard: taskDashboard,
   config: Integration,
   make: (ctx) =>
     Effect.sync(() => ({

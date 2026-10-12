@@ -181,13 +181,25 @@ and replicas), `searchShards` (shard queries run, CloudWatch's SearchRate), `par
 refused by a full write queue), `searchRejected` (shard queries refused by a full search queue), `pressureRejected`
 (documents refused by indexing pressure), `replicaRejected` (replica writes refused by replica pressure),
 `unavailableDocs` (documents not indexed for want of a primary or a live node), `unavailableShards` (shard queries with no
-copy left), `lostTasks` (shard tasks lost with a node); plus the usual `in`, `ok`, `fail.<Tag>`, `latency`.
-Distribution: `searchableAfter` (ms from a document's creation to the refresh that makes it searchable).
+copy left), `lostTasks` (shard tasks lost with a node); and, rates only, `writeTasksRejected` (shard writes refused by a
+full write queue: ThreadpoolWriteRejected, in tasks), `coordinatingWriteRejected`, `primaryWriteRejected` and
+`replicaWriteRejected` (rejections for indexing pressure, one per request, shard part or replica copy); plus the usual
+`in`, `ok`, `fail.<Tag>`, `latency`.
+Distributions: `searchableAfter` (ms from a document's creation to the refresh that makes it searchable),
+`searchLatency` and `indexingLatency` (a shard's query, or a shard's part of a write on a primary or replica, from a
+thread taking it up to done: the time OpenSearch's SearchLatency and IndexingLatency count, queueing apart).
 Gauges: `cpu` (mean utilisation of live nodes over the frame), `cpuMax` (the busiest node), `writeActive`, `writeQueue`,
 `writeQueueMax`, `searchActive`, `searchQueue`, `searchQueueMax` (threads busy and tasks queued, summed over nodes or the
 largest node's), `indexingPressure` (the fullest node's coordinating and primary bytes over its limit), `unrefreshed`
 (documents not yet searchable), `refreshLag` (age of the oldest of them, ms), `clusterStatus` (0 green, 1 yellow, 2 red),
-`liveNodes`, `unassignedShards`, `waitingWrites`.
+`statusGreen`, `statusYellow`, `statusRed` (1 while it holds, as CloudWatch's three metrics), `liveNodes`,
+`activeShards`, `unassignedShards`, `waitingWrites`.
+
+The dashboard (`dashboard.ts`) charts these under CloudWatch's names: SearchRate, SearchLatency, IndexingRate,
+IndexingLatency, CPUUtilization (max and average), ThreadpoolSearchQueue and ThreadpoolWriteQueue, the thread pools' and
+indexing pressure's rejections, indexing pressure itself, ClusterStatus.green/yellow/red, Nodes with Shards.active and
+Shards.unassigned, and refresh lag. CloudWatch's rates are per minute; these are per second. There is no heap or disk
+(JVMMemoryPressure, FreeStorageSpace, the EBS metrics), and the domain keeps no documents (SearchableDocuments).
 
 Probe `state`: instance type, vCPUs, heap, threads and queues per pool, the indexing pressure limit, `status`, nodes
 (configured, live), `zones` (the zones its nodes are in) and `zonesDown`, shards (primaries, replicas, active, unassigned, promotions, waiting writes), `perNode` (zone, up, primaries,

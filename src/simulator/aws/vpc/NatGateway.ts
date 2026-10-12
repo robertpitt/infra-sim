@@ -5,6 +5,7 @@ import * as Flow from "../../Flow.ts"
 import { Throttled } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
 import * as Aws from "../provider.ts"
+import { natGatewayDashboard } from "./dashboard.ts"
 import { hop } from "./Hop.ts"
 import { source } from "./sources.ts"
 
@@ -85,6 +86,7 @@ export const NatGateway = Aws.component({
   icon: "gateway",
   accent: "#8c4fff",
   docs: source.natBasics,
+  dashboard: natGatewayDashboard,
   limits: [
     { label: "Bandwidth", value: "5 Gbps, scaling to 100 Gbps", adjustable: false, source: source.natBasics },
     { label: "Packets per second", value: "1 million, scaling to 10 million", adjustable: false, source: source.natBasics, note: "Beyond it the gateway drops packets. Not simulated: bandwidth binds first for all but tiny packets." },
@@ -120,14 +122,26 @@ export const NatGateway = Aws.component({
       let connections = 0
       let portAllocationErrors = 0
       const portErrors = node.meter.counter("ErrorPortAllocation")
+      // ConnectionAttemptCount and ConnectionEstablishedCount: every new connection asked for, and those given a port.
+      const connectionAttempts = node.meter.counter("connectionAttempts")
+      const connectionsEstablished = node.meter.counter("connectionsEstablished")
       node.meter.gaugeUnsafe("connections", () => connections)
 
       const limitOf = (c: Config): number => c.connectionsPerDestination * c.addresses
+      /** Connections open to the busiest destination: the one that runs out of ports first. */
+      const busiest = (): number => {
+        let most = 0
+        for (const n of open.values()) if (n > most) most = n
+        return most
+      }
+      node.meter.gaugeUnsafe("busiestDestination", busiest)
+      node.meter.gaugeUnsafe("portLimit", () => limitOf(fast.settings()))
 
       /** Take a connection for the call on `link`, or refuse it when the destination's ports are used up. */
       const gate = (link: Link): Link => ({
         ...link,
         send: (message, done) => {
+          connectionAttempts.n++
           const held = open.get(link.id) ?? 0
           if (held >= limitOf(fast.settings())) {
             portErrors.n++
@@ -137,6 +151,7 @@ export const NatGateway = Aws.component({
           }
           open.set(link.id, held + 1)
           connections++
+          connectionsEstablished.n++
           let released = false
           const release = (): void => {
             if (released) return
@@ -169,7 +184,7 @@ export const NatGateway = Aws.component({
         call: path.call,
         probe: Effect.sync(() => ({
           connections,
-          busiest: Math.max(0, ...open.values()),
+          busiest: busiest(),
           limit: limitOf(fast.settings()),
           portAllocationErrors,
           drops: path.totals.drops,

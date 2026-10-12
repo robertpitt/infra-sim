@@ -186,13 +186,18 @@ sum is the ceiling. Over 5,000 the design has an error (AWS refuses the web ACL)
 ## Metrics and state
 
 Counters (per second in frames): `allowed`, `blocked`, `counted` (AllowedRequests, BlockedRequests, CountedRequests);
-`blocked.rateBased`, `blocked.rules`, `blocked.bodySize` (Core rule set), `blocked.oversize`; `overQuota` (past the request
-quota) and `uninspected` (of those, routed by ALB fail-open). The framework's `in`, `ok`, `fail.Rejected` (403s),
+`blocked.rateBased`, `blocked.rules`, `blocked.bodySize` (Core rule set), `blocked.oversize` (BlockedRequests by Rule);
+`counted.rateBased`, `counted.bodySize`, `counted.rules` (CountedRequests by Rule: a Count rule matched); `overQuota`
+(past the request quota) and `uninspected` (of those, routed by ALB fail-open). The framework's `in`, `ok`, `fail.Rejected` (403s),
 `fail.Failed` (500s) and `latency` include the protected resource's time.
 
 Gauges: `rateLimitedAddresses` (addresses the rate-based rule limits now), `busiestAddress` (the highest count over the
 window of any address at the last check, to compare with the limit), `blockedShare` (share of requests blocked between the
-last two checks), `wcu` (capacity in use).
+last two checks), `wcu` (capacity in use), `rateLimit` (the rate-based rule's limit per window, 0 without the rule, to read
+`busiestAddress` against).
+
+The dashboard (`dashboard.ts`) charts allowed, blocked and counted requests, overall and by rule, the blocked share, the
+rate-based rule's busiest address against its limit, the addresses limited, requests past the quota, and latency.
 
 Probe state: `allowed`, `blocked`, `counted`, `blockedByRateRule`, `blockedByRules`, `blockedBodySize`, `blockedOversize`,
 `overQuota`, `uninspected` (totals), `rateLimitedAddresses`, `busiestAddressCount`, `trackedSources`, `wcu`.

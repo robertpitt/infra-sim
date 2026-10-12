@@ -6,6 +6,7 @@ import type { Unit } from "../../Protocol.ts"
 import type { Account } from "../account.ts"
 import * as Aws from "../provider.ts"
 import { Config, type Settings } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { instanceType } from "./instanceTypes.ts"
 import { overMaxMargin, PAGES } from "./limits.ts"
 import { type Cpu, cpuOf, PerMinute } from "./metrics.ts"
@@ -13,7 +14,7 @@ import { Request, type RequestHost } from "./request.ts"
 import { onDemandOf, SpotInterruptions } from "./spot.ts"
 import { State } from "./state.ts"
 import { pick } from "./termination.ts"
-import { give, ledgerOf, type Purchase, take } from "./vcpus.ts"
+import { give, ledgerOf, type Purchase, quotaOf, take } from "./vcpus.ts"
 import { WarmPool } from "./warmPool.ts"
 
 /** How long a launch EC2 refused (quota, no Spot capacity) waits before the group tries again. AWS publishes no figure: an assumption. */
@@ -58,6 +59,7 @@ export const Ec2 = Aws.component({
     { label: "Warm pools", value: "not with Spot Instances", adjustable: false, source: PAGES.warmPools },
     { label: "T3 CPU credits", value: "unlimited mode by default: never throttled (surplus credits are billed)", adjustable: false, source: PAGES.unlimited, note: "Standard-mode credits are not simulated." }
   ],
+  dashboard,
   highlights: [
     { gauge: "inService", label: "in service" },
     { gauge: "cpu", label: "CPU", format: "percent" },
@@ -86,7 +88,8 @@ export const Ec2 = Aws.component({
         launched: node.meter.counter("launches"),
         warm: node.meter.counter("warmStarts"),
         interruptions: node.meter.counter("spotInterruptions"),
-        recommendations: node.meter.counter("rebalanceRecommendations")
+        recommendations: node.meter.counter("rebalanceRecommendations"),
+        terminations: node.meter.counter("terminations")
       }
 
       // Workers per instance: its vCPUs times requests per vCPU, worked out again only when the settings change.
@@ -213,6 +216,7 @@ export const Ec2 = Aws.component({
             upAt.delete(unit.id)
             const instance = instances.get(unit.id)
             if (instance === undefined) return
+            counters.terminations.n++
             give(ledger, instance.purchase, instance.vcpus)
             instances.delete(unit.id)
           },
@@ -301,6 +305,28 @@ export const Ec2 = Aws.component({
         }
       }
 
+      // Gauges a group has only once it uses what they measure, so its dashboard shows their charts only then: the warm
+      // pool's desired capacity (WarmPoolDesiredCapacity) once it has a warm pool, and the Spot instances its purchase
+      // split asks for at its desired capacity once it buys Spot.
+      let warmGauged = false
+      let spotGauged = false
+      const gaugeOptions = (): void => {
+        const c = settings()
+        if (!warmGauged && c.warmPool.enabled) {
+          warmGauged = true
+          node.meter.gaugeUnsafe("warmDesired", () => pool.target())
+        }
+        if (!spotGauged && !c.warmPool.enabled && c.spot.onDemandPercentageAboveBase < 100) {
+          spotGauged = true
+          node.meter.gaugeUnsafe("spotDesired", () => {
+            const s = settings()
+            if (s.warmPool.enabled) return 0
+            const n = desired()
+            return n - onDemandOf(n, s.spot.onDemandBaseCapacity, s.spot.onDemandPercentageAboveBase)
+          })
+        }
+      }
+
       // Settings edited while running (by a person, a scenario or an autoscaler) apply at once.
       yield* node.spawn(
         SubscriptionRef.changes(node.config).pipe(
@@ -310,6 +336,7 @@ export const Ec2 = Aws.component({
               pool.refresh()
               spot.schedule()
               gaugeZones()
+              gaugeOptions()
             })
           )
         )
@@ -349,7 +376,14 @@ export const Ec2 = Aws.component({
       meter.gaugeUnsafe("warm", () => pool.ready)
       meter.gaugeUnsafe("warmPreparing", () => pool.preparing)
       meter.gaugeUnsafe("spotNoticed", () => spot.noticed)
+      // The region's running vCPUs against the account's quotas (AWS/Usage ResourceCount against its service quota),
+      // which every group in the region shares.
+      meter.gaugeUnsafe("vcpusOnDemand", () => ledger.onDemand)
+      meter.gaugeUnsafe("vcpusSpot", () => ledger.spot)
+      meter.gaugeUnsafe("vcpuQuotaOnDemand", () => quotaOf(account(), "onDemand"))
+      meter.gaugeUnsafe("vcpuQuotaSpot", () => quotaOf(account(), "spot"))
       gaugeZones()
+      gaugeOptions()
 
       return {
         call: (message) => handle(message, undefined),

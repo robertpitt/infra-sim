@@ -1,13 +1,14 @@
 import { type ReactNode, useState } from "react"
-import { Topology } from "#simulator"
+import { Dashboard, Topology } from "#simulator"
 import { fmtTime } from "../lib/format.ts"
 import { useStore } from "../lib/store.ts"
 import { doc } from "../state/document.ts"
-import { catalog, registry } from "../state/engine.ts"
+import { catalog, connectorOf, registry } from "../state/engine.ts"
 import { history, run } from "../state/run.ts"
-import { type DockTab, setDockTab, togglePanel, ui } from "../state/ui.ts"
+import { type DockTab, setDockHeight, setDockTab, togglePanel, ui } from "../state/ui.ts"
 import { AlertsPanel } from "./AlertsPanel.tsx"
 import { chartsFor } from "./charts.ts"
+import { Figures } from "./Figures.tsx"
 import { Icon } from "./Icon.tsx"
 import { LineChart } from "./LineChart.tsx"
 import { ScenarioPanel } from "./ScenarioPanel.tsx"
@@ -26,6 +27,8 @@ const WINDOWS = [
 export function Dock() {
   const collapsed = useStore(ui, (s) => s.dockCollapsed)
   const tab = useStore(ui, (s) => s.dockTab)
+  const height = useStore(ui, (s) => s.dockHeight)
+  const [dragging, setDragging] = useState(false)
   const [windowMs, setWindowMs] = useState(120_000)
   const subject = useStore(doc, (s) =>
     s.selection === undefined ? "Whole design" : s.selection.kind === "node" ? (s.design.nodes[s.selection.id]?.name ?? s.selection.id) : "Connection"
@@ -40,7 +43,29 @@ export function Dock() {
   const choose = (next: DockTab) => (open && next === tab ? togglePanel("dockCollapsed") : setDockTab(next))
 
   return (
-    <section className="dock" data-collapsed={collapsed || undefined}>
+    <section className="dock" data-collapsed={collapsed || undefined} style={{ ["--dock-h" as string]: `${height}px` }}>
+      {open && (
+        <div
+          className="dock-resize"
+          data-dragging={dragging || undefined}
+          title="Drag to resize"
+          onPointerDown={(e) => {
+            // Dragging the top edge up makes the body taller by as much.
+            e.currentTarget.setPointerCapture(e.pointerId)
+            const startY = e.clientY
+            const startH = height
+            setDragging(true)
+            const move = (m: PointerEvent) => setDockHeight(startH + (startY - m.clientY))
+            const up = () => {
+              setDragging(false)
+              window.removeEventListener("pointermove", move)
+              window.removeEventListener("pointerup", up)
+            }
+            window.addEventListener("pointermove", move)
+            window.addEventListener("pointerup", up)
+          }}
+        />
+      )}
       <header className="dock-head">
         <button className="icon-btn" onClick={() => togglePanel("dockCollapsed")} title={collapsed ? "Show the dock" : "Hide the dock"}>
           <Icon name={collapsed ? "chevron" : "down"} size={14} />
@@ -127,21 +152,56 @@ function Charts({ windowMs }: { windowMs: number }) {
   const tMax = Math.max(now, windowMs)
   const tMin = tMax - windowMs
   const selection = state.selection
-  const sources = Topology.sources(Topology.fromDoc(state.design, registry))
-  const type = selection?.kind === "node" ? state.design.nodes[selection.id]?.type : undefined
-  const highlights = type === undefined ? [] : (manifests[type]?.highlights ?? []).flatMap((h) => (h.gauge === undefined ? [] : [h.gauge]))
-  const charts = chartsFor(selection, state, windowMs, now, sources, highlights)
+  const design = state.design
+  const sources = Topology.sources(Topology.fromDoc(design, registry))
+  const dashboards = {
+    node: (id: string) => manifests[design.nodes[id]?.type ?? ""]?.dashboard,
+    // An edge: what transport records on every edge, then what its connector records (an event source mapping's pollers).
+    edge: (id: string): ReadonlyArray<Dashboard.Panel> => [...Dashboard.transport.panels, ...(edgeDashboard(id)?.panels ?? [])]
+  }
+  const edgeDashboard = (id: string) => {
+    const edge = design.edges[id]
+    const from = edge === undefined ? undefined : design.nodes[edge.from.node]
+    const to = edge === undefined ? undefined : design.nodes[edge.to]
+    if (edge === undefined || from === undefined || to === undefined) return undefined
+    return connectorOf({ type: from.type, port: edge.from.port ?? "out" }, to.type, edge.connector)?.connector.dashboard
+  }
+  const charts = chartsFor(selection, state, windowMs, now, sources, dashboards)
+  const figures =
+    selection?.kind === "node"
+      ? (dashboards.node(selection.id)?.figures ?? [])
+      : selection?.kind === "edge"
+      ? [...Dashboard.transport.figures, ...(edgeDashboard(selection.id)?.figures ?? [])]
+      : []
   const relevant = spans
     .filter((s) => selection === undefined || (s.target.kind === selection.kind && s.target.id === selection.id))
     .map((s) => ({ from: s.from, to: s.to ?? tMax }))
+  // Charts remember their scale: a new selection or window starts them afresh.
+  const subject = `${selection?.kind ?? "design"}:${selection?.id ?? ""}:${windowMs}`
 
   return (
-    <div className="charts">
-      {charts.length === 0 ? (
-        <p className="muted small pad">Charts appear here once the simulation is running.</p>
-      ) : (
-        charts.map((c) => <LineChart key={c.id} title={c.title} series={c.series} tMin={tMin} tMax={tMax} spans={relevant} format={c.format} height={136} />)
-      )}
+    <div className="charts-pane">
+      {figures.length > 0 && selection !== undefined && <Figures figures={figures} scope={selection.kind === "node" ? "nodes" : "edges"} id={selection.id} />}
+      <div className="charts">
+        {charts.length === 0 ? (
+          <p className="muted small pad">Charts appear here once the simulation is running.</p>
+        ) : (
+          charts.map((c) => (
+            <LineChart
+              key={`${subject}:${c.id}`}
+              title={c.title}
+              unit={c.unit}
+              series={c.series}
+              tMin={tMin}
+              tMax={tMax}
+              spans={relevant}
+              {...(c.cloudwatch === undefined ? {} : { cloudwatch: c.cloudwatch })}
+              {...(c.help === undefined ? {} : { help: c.help })}
+              height={132}
+            />
+          ))
+        )}
+      </div>
     </div>
   )
 }

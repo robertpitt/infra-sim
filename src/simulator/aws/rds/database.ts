@@ -2,11 +2,12 @@ import type { Fast, Zones } from "../../Component.ts"
 import * as Distribution from "../../Distribution.ts"
 import { Slots } from "../../kit/Slots.ts"
 import { type Tally, tallies } from "../../kit/Tally.ts"
-import type { Meter, Sampler } from "../../Telemetry.ts"
+import type { Counter, Meter, Sampler } from "../../Telemetry.ts"
 import { classOf, defaultMaxConnections, isAurora } from "./catalog.ts"
 import type { Config } from "./config.ts"
 import { DEFAULT_POLICY } from "./client.ts"
-import { type ClientPolicy, Pool, Server } from "./connections.ts"
+import { type ClientPolicy, type ConnectionCounters, Pool, Server } from "./connections.ts"
+import type { ClientConnections } from "./endpoint.ts"
 import { Failover } from "./failover.ts"
 import { CLUSTER_STANDBYS, MAX_CONNECTIONS_RANGE, STORAGE } from "./limits.ts"
 import { type Shape, Topology, type ZoneEffect } from "./zones.ts"
@@ -94,6 +95,11 @@ export class Role {
   readonly anonymous: Pool
   /** When storage will have worked through the I/O asked of it so far. */
   private ioFreeAt = 0
+  /** vCPU-milliseconds used up to `cpuAt` (busy vCPUs integrated over time), and where the last `cpuSince` read it. */
+  private cpuUsed = 0
+  private cpuAt = 0
+  private cpuReadUsed = 0
+  private cpuReadAt = 0
 
   constructor(
     readonly name: "writer" | "reader",
@@ -135,6 +141,29 @@ export class Role {
     const n = this.instances() * this.derived().vcpu
     return n > 0 ? Math.min(1, this.cpu.running / n) : 0
   }
+
+  /** The number of busy vCPUs is about to change (a query takes or gives back one): count the time at the old number. */
+  cpuChanging(now: number): void {
+    if (now > this.cpuAt) {
+      this.cpuUsed += this.cpu.running * (now - this.cpuAt)
+      this.cpuAt = now
+    }
+  }
+
+  /**
+   * Busy vCPUs as a share of all of them, averaged since the previous call: CPUUtilization as CloudWatch reports it over a
+   * period, where `utilization` is one instant's. For a gauge, which reads it once a frame.
+   */
+  cpuSince(now: number): number {
+    this.cpuChanging(now)
+    const elapsed = now - this.cpuReadAt
+    const used = this.cpuUsed - this.cpuReadUsed
+    this.cpuReadAt = now
+    this.cpuReadUsed = this.cpuUsed
+    const n = this.instances() * this.derived().vcpu
+    if (elapsed <= 0 || n <= 0) return this.utilization()
+    return Math.min(1, used / (elapsed * n))
+  }
 }
 
 /** One client of the database: its policy and its connections to each role. */
@@ -158,6 +187,12 @@ export interface Stats {
   readonly ioWait: Sampler
   /** Replica lag of each write, while there are readers, in ms. */
   readonly replicaLag: Sampler
+  /** Storage I/Os the writer's queries asked of its volume, reads and writes apart (CloudWatch's `ReadIOPS`, `WriteIOPS`). */
+  readonly readIops: Counter
+  readonly writeIops: Counter
+  /** Time a successful read, or write, spent in the database, in ms (Aurora's `SelectLatency` and `DMLLatency`). */
+  readonly selectLatency: Sampler
+  readonly dmlLatency: Sampler
 }
 
 export const makeStats = (meter: Meter): Stats => ({
@@ -166,7 +201,11 @@ export const makeStats = (meter: Meter): Stats => ({
   connectTime: meter.sampler("connectTime"),
   cpuWait: meter.sampler("cpuWait"),
   ioWait: meter.sampler("ioWait"),
-  replicaLag: meter.sampler("replicaLag")
+  replicaLag: meter.sampler("replicaLag"),
+  readIops: meter.counter("readIops"),
+  writeIops: meter.counter("writeIops"),
+  selectLatency: meter.sampler("selectLatency"),
+  dmlLatency: meter.sampler("dmlLatency")
 })
 
 /** Why the writer refuses while a failover is under way. A proxy waits these out; a direct client gets the error. */
@@ -304,9 +343,14 @@ export class Database {
     return group === undefined ? undefined : this.clients.get(group)
   }
 
-  attach(key: string, policy: () => ClientPolicy): void {
-    if (this.clients.has(key)) return
-    this.clients.set(key, { policy, writer: new Pool(this.writer.server, policy), reader: new Pool(this.reader.server, policy) })
+  attach(key: string, policy: () => ClientPolicy, counters?: ConnectionCounters): ClientConnections {
+    let client = this.clients.get(key)
+    if (client === undefined) {
+      client = { policy, writer: new Pool(this.writer.server, policy, undefined, counters), reader: new Pool(this.reader.server, policy, undefined, counters) }
+      this.clients.set(key, client)
+    }
+    const { writer, reader } = client
+    return { open: () => writer.busy + writer.idle + reader.busy + reader.idle, busy: () => writer.busy + reader.busy }
   }
 
   /** Close every client's connections that have been idle too long. */

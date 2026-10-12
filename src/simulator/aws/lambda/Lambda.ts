@@ -5,6 +5,7 @@ import * as Aws from "../provider.ts"
 import { runAsync } from "./async.ts"
 import { Concurrency, makeRegion } from "./concurrency.ts"
 import { Config, provisionedOf, type Settings } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { Environments } from "./environments.ts"
 import { type Attempt, begin, describe, type FunctionRuntime } from "./invocation.ts"
 import { ASYNC_PAYLOAD, D, SYNC_PAYLOAD } from "./limits.ts"
@@ -40,6 +41,7 @@ export const Lambda = Aws.component({
     { label: "Ephemeral storage (/tmp)", value: "512 to 10,240 MB", adjustable: false, source: `${D}gettingstarted-limits.html`, note: "Not simulated: the simulator has no storage use." },
     { label: "Concurrency limit", value: "set per region in the account quotas", adjustable: true, source: `${D}gettingstarted-limits.html` }
   ],
+  dashboard,
   highlights: [
     { gauge: "concurrent", label: "running" },
     { rate: "coldStarts", label: "cold/s" },
@@ -95,13 +97,31 @@ export const Lambda = Aws.component({
         asyncPending: 0
       }
       const destinations = { onFailure: node.out("onFailure"), onSuccess: node.out("onSuccess") }
+      const account = (): Aws.Account => fast.account() as Aws.Account
       concurrency.claim(initial)
+
+      // Gauges a function has only once it uses what they measure, so its dashboard shows their charts only then:
+      // provisioned environments in use (ProvisionedConcurrentExecutions) once it has provisioned concurrency, and its
+      // asynchronous events once it has had one.
+      let provisionedGauged = false
+      const gaugeProvisioned = (c: Settings): void => {
+        if (provisionedGauged || provisionedOf(c) === 0) return
+        provisionedGauged = true
+        node.meter.gaugeUnsafe("provisionedBusy", () => fn.provisioned.busy)
+      }
+      let asyncGauged = false
+      const gaugeAsync = (): void => {
+        asyncGauged = true
+        node.meter.gaugeUnsafe("asyncPending", () => fn.asyncPending)
+      }
+      gaugeProvisioned(initial)
 
       // A setting edited while running is picked up at once, not at the next call: an idle function still holds back
       // its reservation from everyone else's pool, and raising provisioned concurrency starts allocating it.
       const apply = (c: Settings): void => {
         concurrency.claim(c)
         fn.provisioned.retarget(provisionedOf(c), fast, Duration.toMillis(c.provisionedAllocation))
+        gaugeProvisioned(c)
       }
       yield* node.spawn(SubscriptionRef.changes(node.config).pipe(Stream.runForEach((c) => Effect.sync(() => apply(c)))))
 
@@ -112,7 +132,12 @@ export const Lambda = Aws.component({
       node.meter.gaugeUnsafe("concurrent", () => fn.inUse)
       node.meter.gaugeUnsafe("environments", environments)
       node.meter.gaugeUnsafe("provisioned", () => fn.provisioned.allocated)
-      node.meter.gaugeUnsafe("asyncPending", () => fn.asyncPending)
+      // As CloudWatch reports the region a function competes in: executions on the shared pool
+      // (UnreservedConcurrentExecutions), that plus what reservations and provisioned concurrency hold back
+      // (ClaimedAccountConcurrency, as the pool clamps it), and the account's quota.
+      node.meter.gaugeUnsafe("unreservedConcurrent", () => region.unreservedInUse)
+      node.meter.gaugeUnsafe("claimedConcurrency", () => region.unreservedInUse + (account().lambdaConcurrency - concurrency.standing().pool))
+      node.meter.gaugeUnsafe("accountConcurrency", () => account().lambdaConcurrency)
 
       return {
         call: (message) => {
@@ -122,6 +147,7 @@ export const Lambda = Aws.component({
           }
           if (async) {
             // 202 Accepted: the caller is done; the event is Lambda's problem now.
+            if (!asyncGauged) gaugeAsync()
             runAsync(fn, destinations, message, fast.now())
             return Effect.void
           }

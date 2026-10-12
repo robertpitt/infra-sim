@@ -6,6 +6,7 @@ import * as Aws from "../provider.ts"
 import * as Vcpus from "../ec2/vcpus.ts"
 import { Ec2Capacity } from "./capacity.ts"
 import { Config, type Settings } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { Deployments } from "./deployment.ts"
 import * as Fargate from "./fargate.ts"
 import {
@@ -112,6 +113,7 @@ export const Ecs = Aws.component({
     { label: "Tasks in PROVISIONING per cluster", value: `${PROVISIONING_PER_CLUSTER} (EC2 capacity providers)`, adjustable: false, source: PAGES.quotas },
     { label: "Fargate Spot interruption warning", value: "2 minutes", adjustable: false, source: PAGES.fargateSpot }
   ],
+  dashboard,
   highlights: [
     { gauge: "running", label: "running" },
     { gauge: "cpu", label: "CPU", format: "percent" },
@@ -133,6 +135,14 @@ export const Ecs = Aws.component({
       const workersPerTask = () => Math.max(1, Math.floor(vcpus() * s().task.requestsPerVcpu))
       const totals = { served: 0, errors: 0, refused: 0, lost: 0 }
       const counts = { interrupted: 0 }
+      // Task churn, as the service's events tell it: tasks launched (a crash-looping deployment launches over and over),
+      // tasks stopped, tasks that failed (crashed, or failed their health checks), and Fargate Spot interruptions.
+      const taskLaunches = node.meter.counter("taskLaunches")
+      const taskStops = node.meter.counter("taskStops")
+      const taskFailures = node.meter.counter("taskFailures")
+      const spotInterruptions = node.meter.counter("spotInterruptions")
+      /** Tasks that launched, so a stop counts only them (not a request for a task given up before it found capacity). */
+      const launched = new WeakSet<Unit>()
 
       // The service's own launch pace (500 tasks a minute, not adjustable) and the region's Fargate launch rate.
       const serviceKey = `${node.id}/ecs-launches`
@@ -191,6 +201,8 @@ export const Ecs = Aws.component({
 
       /** A task's start-up, decided as it launches (after it found capacity, and on EC2 an instance). */
       const phases = (unit: Unit): ReadonlyArray<Phase> => {
+        taskLaunches.n++
+        launched.add(unit)
         node.limiter.takeUnsafe(serviceKey, serviceBucket)
         if (onFargate) node.limiter.takeUnsafe(regionKey, regionBucket())
         const rev = deployments.launching(unit)
@@ -230,6 +242,7 @@ export const Ecs = Aws.component({
       const taskFailed = (unit: Unit): void => {
         if (failedOnce.has(unit)) return
         failedOnce.add(unit)
+        taskFailures.n++
         deployments.taskFailed(unit)
       }
       const crash = (unit: Unit): void => {
@@ -254,6 +267,7 @@ export const Ecs = Aws.component({
         if ((unit.state === "grace" || unit.state === "inService") && !deployments.broken(unit)) deployments.taskHealthy(unit)
       }
       fleet.observe((unit, event) => {
+        if (event === "gone" && launched.has(unit)) taskStops.n++
         if (event !== "up") return
         if (deployments.broken(unit)) {
           fleet.setHealthy(unit, false)
@@ -283,6 +297,7 @@ export const Ecs = Aws.component({
           const victim = spot[Math.floor(spotRandom.nextDoubleUnsafe() * spot.length)]
           if (victim !== undefined) {
             counts.interrupted++
+            spotInterruptions.n++
             // SIGTERM comes with the warning; the task stops after its stop timeout, and a replacement starts at once.
             fleet.interrupt(victim, Math.min(120_000, ms(s().stopTimeout)))
           }
@@ -339,6 +354,11 @@ export const Ecs = Aws.component({
       meter.gaugeUnsafe("oldTasks", () => deployments.rollout.status().old)
       meter.gaugeUnsafe("revision", () => deployments.current)
       meter.gaugeUnsafe("breakerFailures", () => deployments.failures)
+      // The rest of what the console and Container Insights show: tasks on Fargate On-Demand (on Fargate only), tasks of
+      // the revision being deployed, and the circuit breaker's threshold.
+      if (onFargate) meter.gaugeUnsafe("fargate", () => holding.onDemand)
+      meter.gaugeUnsafe("newTasks", () => deployments.rollout.status().fresh)
+      meter.gaugeUnsafe("breakerThreshold", () => deployments.threshold())
       if (ec2 !== undefined) {
         meter.gaugeUnsafe("instances", () => ec2.pool.totalsNow().hosts)
         meter.gaugeUnsafe("instancesLaunching", () => ec2.instances.pending)
@@ -346,6 +366,9 @@ export const Ecs = Aws.component({
         meter.gaugeUnsafe("capacityReservation", () => ec2.view.reservation)
         meter.gaugeUnsafe("cpuReservation", () => share(ec2.pool.totalsNow(), "cpu"))
         meter.gaugeUnsafe("memoryReservation", () => share(ec2.pool.totalsNow(), "memory"))
+        // CapacityProviderReservation and managed scaling's target, as shares (1 is 100%) to chart with the reservations.
+        meter.gaugeUnsafe("capacityProviderReservation", () => ec2.view.reservation / 100)
+        meter.gaugeUnsafe("targetCapacity", () => s().ec2.targetCapacity / 100)
       }
       gaugeZones()
 

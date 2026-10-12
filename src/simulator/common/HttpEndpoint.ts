@@ -4,6 +4,7 @@ import * as Distribution from "../Distribution.ts"
 import * as Flow from "../Flow.ts"
 import { Failed, Rejected, Throttled, Unavailable } from "../Message.ts"
 import * as Setting from "../Setting.ts"
+import * as dashboards from "./dashboards.ts"
 
 /**
  * Something outside your system that you call over HTTP: a payment provider, a partner's webhook, any third-party
@@ -19,6 +20,7 @@ export const HttpEndpoint = Component.make({
   category: "external",
   icon: "globe",
   accent: "#7d8aa3",
+  dashboard: dashboards.httpEndpoint,
   highlights: [
     { gauge: "inflight", label: "in flight" },
     { rate: "fail.Throttled", label: "429/s" }

@@ -34,6 +34,18 @@ export interface GroupHealth {
   readonly crossZone: () => boolean
   readonly healthyIn: (zone: string | undefined) => number
   readonly registeredIn: (zone: string | undefined) => number
+  /** Targets failing their health checks now (UnHealthyHostCount): not the ones still waiting for their first pass. */
+  readonly unhealthy: () => number
+}
+
+/**
+ * Targets of a health over every target group on the load balancer's edges: its HealthyHostCount or UnHealthyHostCount
+ * summed over its target groups, as the load balancer's own monitoring shows them. Read once a frame, not per request.
+ */
+export const hostsIn = (listener: Listener, health: "healthy" | "unhealthy"): number => {
+  let n = 0
+  for (const group of listener.groups.values()) n += health === "healthy" ? group.healthyIn(undefined) : group.unhealthy()
+  return n
 }
 
 type Shared = <A>(key: string, build: Effect.Effect<A, never, Scope.Scope>) => Effect.Effect<A>

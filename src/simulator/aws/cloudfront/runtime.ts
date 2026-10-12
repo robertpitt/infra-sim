@@ -86,6 +86,10 @@ export const makeRuntime = (node: CloudFrontNode) => {
   const proxied = node.meter.counter("proxied")
   const invalidationCount = node.meter.counter("invalidations")
   const functionErrors = node.meter.counter("functionErrors")
+  // FunctionInvocations and FunctionThrottles: every run of an edge function (CloudFront Functions or Lambda@Edge), and
+  // the Lambda@Edge runs refused by the Region's request rate.
+  const functionInvocations = node.meter.counter("functionInvocations")
+  const functionThrottles = node.meter.counter("functionThrottles")
   const rejectedCount = node.meter.counter("rejected")
   const bytesDownloaded = node.meter.counter("bytesDownloaded")
   const bytesUploaded = node.meter.counter("bytesUploaded")
@@ -200,6 +204,7 @@ export const makeRuntime = (node: CloudFrontNode) => {
   const hook = (kind: number, c: Config, d: Derived): number => {
     const f = c.functions
     if (kind === CLOUDFRONT_FUNCTION) {
+      functionInvocations.n++
       if (f.errorRate > 0 && fast.random.nextDoubleUnsafe() < f.errorRate) functionFailed = true
       return Distribution.latencyMs(f.cloudFrontFunction, fast.random)
     }
@@ -207,9 +212,11 @@ export const makeRuntime = (node: CloudFrontNode) => {
     // Lambda@Edge counts against the region's rate; over it the function is throttled.
     buckets()
     if (!node.limiter.takeUnsafe(lambdaKey, lambdaBucket)) {
+      functionThrottles.n++
       functionFailed = true
       return 0
     }
+    functionInvocations.n++
     let ms = Distribution.latencyMs(f.lambdaAtEdge, fast.random)
     if (ms > d.lambdaTimeoutMs) {
       functionFailed = true

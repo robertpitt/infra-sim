@@ -221,10 +221,20 @@ modelled because AWS publishes none. One message is one HTTP request: its `count
 
 Counters (per second in frames): `requests`, `cacheHit`, `cacheMiss`, `edgeHit`, `regionalHit`, `shieldHit`, `collapsed`,
 `originRequests`, `originRetries`, `originErrors`, `failover`, `staleServed`, `errorsCached`, `proxied`, `invalidations`,
-`functionErrors`, `rejected`, `bytesDownloaded`, `bytesUploaded`, `err4xx`, `err5xx`, `err502`, `err503`, `err504`.
-Sampler `originLatency`: first-byte time of requests that went to the origin. Gauges: `cacheHitRate` (last ten seconds),
+`functionErrors`, `functionInvocations`, `functionThrottles`, `rejected`, `bytesDownloaded`, `bytesUploaded`, `err4xx`,
+`err5xx`, `err502`, `err503`, `err504`. In CloudWatch's terms: `requests` is Requests; `bytesDownloaded` and
+`bytesUploaded` are BytesDownloaded and BytesUploaded; `err4xx`, `err5xx`, `err502`, `err503` and `err504` over `requests`
+are 4xxErrorRate, 5xxErrorRate, 502ErrorRate, 503ErrorRate and 504ErrorRate (their sum over `requests` TotalErrorRate);
+`cacheHit` over `cacheHit` + `cacheMiss` is CacheHitRate (writes and errors are neither); `functionInvocations` (every run
+of a CloudFront Function or Lambda@Edge), `functionErrors` (requests a failed function turned into a 503) and
+`functionThrottles` (Lambda@Edge runs refused by the Region's rate) stand for FunctionInvocations, FunctionExecutionErrors
+and FunctionThrottles.
+Sampler `originLatency` (OriginLatency): first-byte time of requests that went to the origin. Gauges: `cacheHitRate` (last ten seconds),
 `errorRate4xx`, `errorRate5xx` (share of requests, last ten seconds), `edgeObjects`, `regionalObjects`, `shieldObjects`,
 `fetching` (objects being fetched). The framework adds `in`, `ok`, `fail`, `fail.<Kind>`, `latency`, `inflight`.
+
+The dashboard (`dashboard.ts`) charts those CloudWatch metrics, and beyond them the hits by tier, the origins' requests,
+retries, errors and failovers, and the objects each tier holds.
 
 The probe reports `objects`, `ttlSeconds`, `edgeObjects`, `regionalObjects`, `shieldObjects`, `fetching`, `hitRatio` (since the
 start), `recentHitRatio`, the request, hit, miss, collapsed, stale and origin-request totals, `evictions`, and the

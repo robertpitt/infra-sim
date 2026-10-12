@@ -411,6 +411,14 @@ failover time), and serves from there. A component that spreads over zones witho
 
 Each node and edge has a meter. Once per frame (250 ms of virtual time by default) the simulation flushes them into a `Frame`: counters become per-second **rates**, samples become **percentiles** (`latency`, `age`), and gauges (a plain function, or any `Effect<number>`) are read. Counters and samplers are handles resolved once (`meter.counter("ok").n++`, `meter.sampler("latency").add(ms)`), and samples live in preallocated typed arrays. Frames are plain Schema-described data and arrive as `Simulation.frames` (a `Stream`) or from `advance`/`advanceTo`.
 
+**Dashboards** (`Dashboard.ts`) say what a component's or a connector's metrics look like on screen: key figures and
+charts, each line a metric (a rate, a gauge, a statistic of a distribution, or a ratio or sum of them, so an average item
+size is bytes over items), mirroring the service's CloudWatch metrics. They are data in the manifest; the UI evaluates them
+against frames (`Dashboard.valueOver`), averaging each point over a stretch of time aligned to the clock so a chart never
+re-draws what it has already drawn. A component without one gets `Dashboard.generic`; every edge shows `Dashboard.transport`
+and then its connector's. A panel that doesn't apply to a node's configuration (it reads only gauges the node never
+registered, or `requires` one it didn't) is hidden (`Dashboard.applies`).
+
 ## Designs
 
 ```

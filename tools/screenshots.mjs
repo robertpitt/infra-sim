@@ -1,7 +1,7 @@
 // The README's screenshots, taken from the running app in headless Chromium at 2x, so they can be retaken whenever the UI
 // changes.
 //   npm run dev   then   node tools/screenshots.mjs            (or URL=https://robertpitt.github.io/infra-sim/ node tools/screenshots.mjs)
-// Writes docs/screenshots/{scenario,settings,editor}.png.
+// Writes docs/screenshots/{scenario,settings,dashboard,editor}.png.
 import { chromium } from "playwright"
 import fs from "node:fs"
 
@@ -90,7 +90,30 @@ const shot = async (page, name) => {
   await page.close()
 }
 
-// 3. The YAML editor, completing a Lambda's settings from the design schema.
+// 3. A component's dashboard: the Order pipeline's orders table in its flash sale, out of write capacity and throttling.
+{
+  const page = await open()
+  await page.evaluate(() => {
+    localStorage.setItem("sim:ui:dock", "open")
+    localStorage.setItem("sim:ui:dock-height", "540")
+  })
+  await page.reload()
+  await page.waitForSelector(".node")
+  await example(page, /Order pipeline/)
+  await page.locator(".dock-tab", { hasText: "Scenario" }).click()
+  // Another card mentions the flash sale too: this one's title starts with it.
+  await page.locator(".scenario-card").filter({ hasText: /^Flash sale/ }).locator("button", { hasText: "Run" }).click()
+  await page.locator('.node:has(.node-name:text-is("Orders table")) .node-head').click()
+  await page.locator(".dock-tab", { hasText: "Charts" }).click()
+  await page.locator('button:text-is("5m")').first().click()
+  await speed(page, 8) // 50x
+  // The rush (1:00 to 2:00) is over, the table is still working through the backlog at its old capacity.
+  await pauseAt(page, 2 * 60 + 30)
+  await shot(page, "dashboard")
+  await page.close()
+}
+
+// 4. The YAML editor, completing a Lambda's settings from the design schema.
 {
   const page = await open()
   await page.locator(".view-tabs button", { hasText: "Editor" }).click()

@@ -32,6 +32,7 @@ export const runAsync = (fn: FunctionRuntime, destinations: Destinations, messag
   let throttleRetries = 0
   let functionRetries = 0
   fn.asyncPending++
+  stats.asyncEventsReceived.n++
 
   /** Send the record to a destination. A destination that refuses it is counted, as CloudWatch's DestinationDeliveryFailures. */
   const report = (links: ReadonlyArray<Link>): void => {
@@ -65,7 +66,10 @@ export const runAsync = (fn: FunctionRuntime, destinations: Destinations, messag
   }
 
   function attempt(): void {
+    // AsyncEventAge: how long the event waited for this invocation. A throttled attempt never invoked the function.
+    const age = fast.now() - acceptedAt
     begin(fn, message, (outcome) => {
+      if (outcome?.kind !== "throttled") stats.asyncEventAge.add(age)
       if (outcome === undefined) return succeed()
       const c = fast.settings()
       if (outcome.kind === "throttled") return retryAfter(Math.min(THROTTLE_RETRY_MAX_MS, THROTTLE_RETRY_FIRST_MS * 2 ** throttleRetries++))

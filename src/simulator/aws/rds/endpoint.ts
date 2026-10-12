@@ -1,4 +1,4 @@
-import type { ClientPolicy } from "./connections.ts"
+import type { ClientPolicy, ConnectionCounters } from "./connections.ts"
 
 /**
  * What a database or a proxy offers whatever is wired to it (its `Instance.offer`), and how its partners recognise it.
@@ -11,8 +11,19 @@ import type { ClientPolicy } from "./connections.ts"
  */
 export interface Endpoint {
   readonly kind: "rds.database" | "rds.proxy"
-  /** Tell the endpoint how the client whose requests carry `key` in `group` handles its connections. */
-  readonly attach: (key: string, policy: () => ClientPolicy) => void
+  /**
+   * Tell the endpoint how the client whose requests carry `key` in `group` handles its connections, and, if its edge
+   * keeps them, the counters of connections it opens and has refused. Returns that client's connections, live.
+   */
+  readonly attach: (key: string, policy: () => ClientPolicy, counters?: ConnectionCounters) => ClientConnections
+}
+
+/** One client's connections to an endpoint, as its edge reads them each frame. */
+export interface ClientConnections {
+  /** Open: running a query, held by the client around one, or idle in its pool. Each counts against the limit. */
+  readonly open: () => number
+  /** Checked out: running a query, or held by the client around one. */
+  readonly busy: () => number
 }
 
 /** A database, as a proxy in front of it sees it. */

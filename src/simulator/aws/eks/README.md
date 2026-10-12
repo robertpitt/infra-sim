@@ -149,9 +149,20 @@ nothing rolls back.
 
 ## Metrics and state
 
-Gauges: `replicas`, `ready`, `pending`, `starting`, `terminating`, `busy`, `queued`, `cpu`, `cpuPods`, `oldPods`, `nodes`,
-`nodesLaunching`, `nodesDesired`, `requestedCpu` and `requestedMemory` (requests over allocatable, 0-1), `ready.<zone>`,
-`nodes.<zone>`. Rates and latency as every node.
+Gauges: `replicas`, `ready`, `pending`, `starting`, `terminating`, `busy`, `queued`, `cpu`, `cpuPods`, `oldPods`, `newPods`
+(pods of the template being rolled out), `crashLooping` (pods in CrashLoopBackOff), `nodes`, `nodesLaunching`,
+`nodesDesired`, `requestedCpu` and `requestedMemory` (requests over allocatable, 0-1), `nodeCpu` (CPU the pods use over
+the nodes' allocatable, 0-1: a busy worker is its share of its pod's request), `ready.<zone>`, `nodes.<zone>`. Rates and
+latency as every node.
+
+The dashboard (`dashboard.ts`) charts them as Container Insights does: pods by status (`pod_status_ready`,
+`pod_status_pending`) against the replicas; `pod_cpu_utilization_over_pod_limit` (taking the limit to be the request)
+and `node_cpu_utilization`; requests and response time as the load balancer counts them; `cluster_node_count` with the
+node autoscaler's desired size; `node_cpu_reserved_capacity` and `node_memory_reserved_capacity`;
+`node_number_of_running_pods` as pods per node; and the rollout with
+`pod_container_status_waiting_reason_crash_loop_back_off`. Not charted, because nothing here models them: memory use,
+network and filesystem metrics, `cluster_failed_node_count` (node conditions are not modelled), container restarts as a
+count, GPU metrics, and the API server's metrics.
 
 Probe: ready, pending, starting, terminating, busy, queued, served, errors, refused, lost, replaced, evicted; `rollout`
 (revision, rolling, old and new pods, progress deadline exceeded); `nodes` (ready, launching, desired, requested CPU and

@@ -4,8 +4,8 @@ import type { Cancel } from "../../Edge.ts"
 import * as Flow from "../../Flow.ts"
 import { type Call, type CallFailure, type Message, Rejected, type Reply } from "../../Message.ts"
 import type * as Aws from "../provider.ts"
-import { type Config, continentOf, MAX_POLICY_RECORDS, MAX_SIMPLE_VALUES, type ports } from "./config.ts"
-import { HealthChecks, type Plan } from "./health.ts"
+import { type Config, continentOf, HEALTHY_SHARE, MAX_POLICY_RECORDS, MAX_SIMPLE_VALUES, type ports } from "./config.ts"
+import { HealthChecks, percentageHealthyOf, type Plan } from "./health.ts"
 import { NONE, ResolverCaches } from "./resolvers.ts"
 import { choose, type Records } from "./routing.ts"
 
@@ -48,9 +48,10 @@ export const makeRuntime = (node: Route53Node, ledger: HealthCheckLedger) => {
   const probes = node.meter.counter("probes")
   const probeFailures = node.meter.counter("probeFailures")
   const healthChanges = node.meter.counter("healthChanges")
+  const checkTime = node.meter.sampler("healthCheckTime")
   const total = { queries: 0, cacheHits: 0, noAnswer: 0 }
 
-  const health = new HealthChecks(fast, links, { probes, probeFailures, healthChanges })
+  const health = new HealthChecks(fast, links, { probes, probeFailures, healthChanges, checkTime })
   const caches = new ResolverCaches()
   const table: Records = {
     n: 0,
@@ -192,9 +193,25 @@ export const makeRuntime = (node: Route53Node, ledger: HealthCheckLedger) => {
     const counted = caches.count(fast.now(), unhealthy)
     return counted.live > 0 ? counted.bad / counted.live : 0
   }
+  /** HealthCheckStatus summed over the records: how many health-checked records are healthy. */
+  const healthyChecks = (): number => {
+    let n = 0
+    for (const e of health.endpoints) if (e.checked && e.healthy) n++
+    return n
+  }
+  /** The lowest HealthCheckPercentageHealthy of the records' health checks (1 when none has one): what to alarm on. */
+  const lowestPercentageHealthy = (): number => {
+    let lowest = 1
+    for (const e of health.endpoints) if (e.checked) lowest = Math.min(lowest, percentageHealthyOf(e))
+    return lowest
+  }
   node.meter.gaugeUnsafe("unhealthyRecords", unhealthyRecords)
   node.meter.gaugeUnsafe("cachedUnhealthy", cachedUnhealthy)
   node.meter.gaugeUnsafe("healthChecks", () => health.active)
+  node.meter.gaugeUnsafe("healthyChecks", healthyChecks)
+  node.meter.gaugeUnsafe("lowestPercentageHealthy", lowestPercentageHealthy)
+  // The line a health check's percentage must stay above for Route 53 to call the endpoint healthy.
+  node.meter.gaugeUnsafe("healthyThreshold", () => HEALTHY_SHARE)
 
   const probe = Effect.sync(() => {
     const c = fast.settings()

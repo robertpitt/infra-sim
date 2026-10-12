@@ -8,6 +8,7 @@ import { type Call, type CallFailure, Failed, type Message, type Reply, Unavaila
 import type { Unit } from "../Protocol.ts"
 import * as Setting from "../Setting.ts"
 import type { TimerHandle } from "../VirtualTime.ts"
+import * as dashboards from "./dashboards.ts"
 
 export const Config = Schema.Struct({
   replicas: Setting.int({
@@ -172,6 +173,7 @@ export const Service = Component.make({
   category: "compute",
   icon: "cpu",
   accent: "#5a9bd5",
+  dashboard: dashboards.service,
   highlights: [
     { gauge: "ready", label: "ready" },
     { gauge: "utilization", label: "busy", format: "percent" },

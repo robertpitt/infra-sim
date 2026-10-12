@@ -4,6 +4,7 @@ import type { Link } from "../../Edge.ts"
 import type { Tally } from "../../kit/Tally.ts"
 import type { Limiter } from "../../Limiter.ts"
 import { type CallFailure, type ItemFailures, type Message, Rejected, Throttled } from "../../Message.ts"
+import type { Counter, Sampler } from "../../Telemetry.ts"
 import type { Account } from "../account.ts"
 import { type Chunk, type Delivery, keyOf, Lane } from "./buffers.ts"
 import {
@@ -68,6 +69,9 @@ export interface EngineEnv {
   readonly transform: Link | undefined
   readonly backup: Link | undefined
   readonly tallies: FirehoseTallies
+  /** Transformation invocations that succeeded (over all of them, ExecuteProcessing.Success) and how long each took (ExecuteProcessing.Duration). */
+  readonly transformSucceeded: Counter
+  readonly transformDuration: Sampler
 }
 
 const DIRECT = "direct-put"
@@ -76,6 +80,10 @@ export class Engine {
   private readonly lanes = new Map<string, Lane>()
   /** Set once the stream has been fed by a Kinesis source: from then on PutRecord is refused. */
   kinesisSource = false
+  /** Set once a Direct PUT has been accepted: the Direct PUT throughput quota applies to this stream. */
+  directPut = false
+  /** The size of the last object (or HTTP request) delivered: deliveries are minutes apart, so a rate of them reads poorly. */
+  lastObjectBytes = 0
   private readonly key: number
 
   constructor(private readonly env: EngineEnv) {
@@ -117,6 +125,7 @@ export class Engine {
         return Throttled({ node: this.env.id, reason: "ServiceUnavailableException: Direct PUT throughput exceeded" })
       }
       tallies.putRequests.add(1)
+      this.directPut = true
       lane = this.lane(DIRECT)
     }
     tallies.incoming.add(records)
@@ -203,12 +212,16 @@ export class Engine {
     if (link === undefined) return this.gather(lane, chunk)
     lane.transformInflight++
     tallies.transformInvocations.add(1)
+    const sentAt = fast.now()
     const message: Message = {
       ...fast.mint({ count: chunk.records, bytes: chunk.bytes, key: this.key, group: lane.name, invocation: "sync", operation: "write" }),
       bornAt: chunk.born,
       batched: true
     }
-    link.send(message, (failure, items) => this.transformed(lane, chunk, attempt, failure, items))
+    link.send(message, (failure, items) => {
+      this.env.transformDuration.add(this.env.fast.now() - sentAt)
+      this.transformed(lane, chunk, attempt, failure, items)
+    })
   }
 
   /**
@@ -233,6 +246,7 @@ export class Engine {
       }
       return this.pumpTransform(lane)
     }
+    this.env.transformSucceeded.n++
     let failed = 0
     if (items !== undefined) for (const i of items.failed) if (i >= 0 && i < chunk.records) failed++
     if (failed > 0) this.failRecords({ ...chunk, records: failed, bytes: (chunk.bytes * failed) / chunk.records })
@@ -346,6 +360,7 @@ export class Engine {
     tallies.objects.add(1)
     tallies.delivered.add(d.records)
     tallies.deliveredBytes.add(d.bytes)
+    this.lastObjectBytes = d.bytes
     lane.head = undefined
     this.pump(lane)
   }

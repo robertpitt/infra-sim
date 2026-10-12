@@ -18,7 +18,8 @@ import {
 } from "./config.ts"
 import type { DataNode } from "./node.ts"
 import { Refresh } from "./refresh.ts"
-import { type Answer, type Context, type Counter, search, write } from "./requests.ts"
+import { dashboard } from "./dashboard.ts"
+import { type Answer, type Context, type Counter, makeMetrics, search, write } from "./requests.ts"
 
 const COUNTERS: ReadonlyArray<Counter> = [
   "writeRequests",
@@ -68,6 +69,7 @@ export const OpenSearch = Aws.component({
     { label: "Shards per node", value: `${MAX_SHARDS_PER_NODE.toLocaleString("en-US")} up to OpenSearch 2.15; from 2.17, 1,000 per 16 GiB of heap up to 4,000`, adjustable: false, source: SOURCES.quotas },
     { label: "Domains per region", value: "500", adjustable: true, source: SOURCES.serviceQuotas, note: "Set in the account quotas." }
   ],
+  dashboard,
   highlights: [
     { rate: "fail.Throttled", label: "429/s" },
     { gauge: "cpuMax", label: "hottest CPU", format: "percent" },
@@ -141,7 +143,7 @@ export const OpenSearch = Aws.component({
       const cluster = new Cluster(fast, zones)
       const refresh = new Refresh(fast)
       const counts = tallies(node.meter, COUNTERS)
-      const ctx: Context = { id: node.id, fast, cluster, refresh, tallies: counts, searchable: node.meter.sampler("searchableAfter") }
+      const ctx: Context = { id: node.id, fast, cluster, refresh, tallies: counts, searchable: node.meter.sampler("searchableAfter"), metrics: makeMetrics(node.meter) }
 
       const apply = (): void => {
         const c = fast.settings()
@@ -219,6 +221,11 @@ export const OpenSearch = Aws.component({
       node.meter.gaugeUnsafe("unrefreshed", () => refresh.unrefreshed)
       node.meter.gaugeUnsafe("refreshLag", () => refresh.lag())
       node.meter.gaugeUnsafe("clusterStatus", () => cluster.status())
+      // CloudWatch publishes the status as three metrics, each 1 while it holds.
+      node.meter.gaugeUnsafe("statusGreen", () => (cluster.status() === 0 ? 1 : 0))
+      node.meter.gaugeUnsafe("statusYellow", () => (cluster.status() === 1 ? 1 : 0))
+      node.meter.gaugeUnsafe("statusRed", () => (cluster.status() === 2 ? 1 : 0))
+      node.meter.gaugeUnsafe("activeShards", () => cluster.shards.length * (fast.settings().replicas + 1) - cluster.unassigned())
       node.meter.gaugeUnsafe("liveNodes", () => cluster.live)
       node.meter.gaugeUnsafe("unassignedShards", () => cluster.unassigned())
       node.meter.gaugeUnsafe("waitingWrites", () => cluster.waiting)

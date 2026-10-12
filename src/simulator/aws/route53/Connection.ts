@@ -4,7 +4,9 @@ import * as Edge from "../../Edge.ts"
 import type { Message } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
 import { docs } from "../docs.ts"
-import { TCP_CONNECT_TIMEOUT_MS } from "./config.ts"
+import { HEALTHY_SHARE, TCP_CONNECT_TIMEOUT_MS } from "./config.ts"
+import { connectionDashboard } from "./dashboard.ts"
+import { endpointOfEdge, percentageHealthyOf, statusOf } from "./health.ts"
 
 /**
  * What a call does once DNS has named the endpoint. A plain link would make every call through it a write (an edge's
@@ -62,16 +64,34 @@ export const Connection = Connector.make({
   description: "The caller's own connection to the endpoint its DNS answer named: what it asked for, with its timeout and retries. Route 53's health checks cross it too.",
   icon: "dns",
   docs: `${docs.route53}welcome-dns-service.html`,
+  dashboard: connectionDashboard,
   from: { protocol: "invoke", component: "aws.route53", port: "out" },
   to: { protocol: "invoke" },
   config: ConnectionPolicy,
   make: (ctx) =>
     Effect.sync(() => {
-      const { fast, sink } = ctx
+      const { fast, sink, meter } = ctx
+      // This record's health check, as CloudWatch reports it per health check: its status, the share of checkers that say
+      // healthy, the checks that crossed this edge and how long they took (TimeToFirstByte; ConnectionTime for TCP).
+      const endpoint = endpointOfEdge.get(ctx.config)
+      if (endpoint !== undefined) {
+        meter.gaugeUnsafe("healthCheckStatus", () => statusOf(endpoint))
+        meter.gaugeUnsafe("healthCheckPercentageHealthy", () => percentageHealthyOf(endpoint))
+        meter.gaugeUnsafe("healthyThreshold", () => HEALTHY_SHARE)
+      }
+      const healthChecks = meter.counter("healthChecks")
+      const healthCheckTime = meter.sampler("healthCheckTime")
       return {
         send: (message, done) => {
           // Only health checks start at the record itself; everything else came from a caller.
-          if (message.origin === ctx.from) return sink.call(message, PROBE, done)
+          if (message.origin === ctx.from) {
+            healthChecks.n++
+            const sentAt = fast.now()
+            return sink.call(message, PROBE, (failure, items) => {
+              healthCheckTime.add(fast.now() - sentAt)
+              done?.(failure, items)
+            })
+          }
           const c = fast.settings()
           return sink.call(shape(message, c), Edge.policyOf(c), done)
         }

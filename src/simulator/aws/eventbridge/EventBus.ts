@@ -21,6 +21,7 @@ import {
   RuleTarget
 } from "./config.ts"
 import { Dispatcher, limitsOf, Pacer } from "./delivery.ts"
+import { dashboard } from "./dashboard.ts"
 import { QUOTAS_PAGE } from "./quotas.ts"
 import { type Rule, Rules } from "./rules.ts"
 
@@ -60,6 +61,7 @@ export const EventBus = Aws.component({
     { label: "API destination", value: `${API_DESTINATION_TIMEOUT_MS / 1000} s per request; ${API_DESTINATION_RATE} invocations/s per destination by default`, adjustable: true, source: `${D}eb-api-destinations.html` },
     { label: "Delivery latency", value: "P99 of 129 ms from ingestion to the first invocation attempt (August 2024)", adjustable: false, source: DELIVERY_LATENCY_SOURCE }
   ],
+  dashboard,
   highlights: [
     { gauge: "pending", label: "delivering" },
     { rate: "dropped", label: "lost/s" },

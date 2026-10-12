@@ -1,6 +1,7 @@
 export const fmtRate = (n: number): string => {
   if (!Number.isFinite(n)) return "—"
-  if (n >= 10_000) return `${(n / 1000).toFixed(0)}k`
+  if (n >= 999_500) return fmtMillions(n)
+  if (n >= 9_950) return `${(n / 1000).toFixed(0)}k`
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   if (n >= 100) return n.toFixed(0)
   if (n >= 10) return n.toFixed(0)
@@ -8,9 +9,16 @@ export const fmtRate = (n: number): string => {
   return n === 0 ? "0" : "<0.1"
 }
 
+/** A million or more: 1.2M, 20M, 3.4B. */
+const fmtMillions = (n: number): string => {
+  const [v, suffix] = n >= 999_500_000 ? [n / 1e9, "B"] : [n / 1e6, "M"]
+  return `${v >= 10 ? v.toFixed(0) : v.toFixed(1)}${suffix}`
+}
+
 export const fmtCount = (n: number): string => {
   if (!Number.isFinite(n)) return "—"
-  if (n >= 100_000) return `${(n / 1000).toFixed(0)}k`
+  if (n >= 999_500) return fmtMillions(n)
+  if (n >= 99_950) return `${(n / 1000).toFixed(0)}k`
   if (n >= 10_000) return `${(n / 1000).toFixed(1)}k`
   return Math.round(n).toLocaleString("en-US")
 }
@@ -51,3 +59,49 @@ export const fmtTime = (ms: number): string => {
 /** A measured value in the unit the engine says it has. */
 export const fmtUnit = (unit: string, value: number): string =>
   unit === "ratio" ? fmtPct(value) : unit === "ms" ? fmtMs(value) : unit === "rate" ? `${fmtRate(value)}/s` : fmtCount(value)
+
+/** A size in bytes, in binary units: 512 B, 4.0 KB, 12 MB. */
+export const fmtBytes = (n: number): string => {
+  if (!Number.isFinite(n)) return "—"
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let v = Math.max(0, n)
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${i === 0 || v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
+}
+
+/** A dashboard value in its unit (see the engine's `Dashboard.Unit`). */
+export const fmtValue = (unit: string, n: number): string => {
+  switch (unit) {
+    case "perSecond":
+      return `${fmtRate(n)}/s`
+    case "perMinute":
+      return `${fmtRate(n)}/min`
+    case "bytesPerSecond":
+      return `${fmtBytes(n)}/s`
+    case "bytes":
+      return fmtBytes(n)
+    case "ms":
+      return fmtMs(n)
+    case "ratio":
+      return fmtPct(n)
+    case "units":
+      return fmtRate(n)
+    default:
+      return fmtCount(n)
+  }
+}
+
+/** The same, shorter, for a chart's axis: the unit is in the chart's legend already, and round ticks need no ".0" (20k, 2 KB). */
+export const fmtAxis = (unit: string, n: number): string =>
+  (n === 0
+    ? "0"
+    : unit === "perSecond" || unit === "perMinute" || unit === "units"
+      ? fmtRate(n)
+      : unit === "bytesPerSecond"
+        ? fmtBytes(n)
+        : fmtValue(unit, n)
+  ).replace(/\.0(?=\D|$)/, "")

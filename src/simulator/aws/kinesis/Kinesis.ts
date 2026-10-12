@@ -8,11 +8,14 @@ import {
   GET_RECORDS_MAX_BYTES,
   GET_RECORDS_MAX_RECORDS,
   PUT_RECORDS_MAX_RECORDS,
+  SHARD_READ_BYTES,
   SHARD_READ_CALLS,
+  SHARD_WRITE_BYTES,
   SHARD_WRITE_RECORDS,
   SOURCES,
   Stream
 } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { StreamPull } from "./pull.ts"
 import { StreamModel } from "./stream.ts"
 
@@ -39,6 +42,7 @@ export const Kinesis = Aws.component({
     { label: "UpdateShardCount", value: "Double or half per step, ten steps in a rolling 24 hours, 10,000 shards a stream", adjustable: true, source: SOURCES.updateShardCount },
     { label: "Hot partition key", value: `One key lives on one shard: ${SHARD_WRITE_RECORDS.toLocaleString("en-US")} records/s and 1 MiB/s at most, in either mode`, adjustable: false, source: SOURCES.modes }
   ],
+  dashboard,
   highlights: [
     { gauge: "shards", label: "shards" },
     { rate: "incoming", label: "rec/s" },
@@ -121,6 +125,34 @@ export const Kinesis = Aws.component({
       node.meter.gaugeUnsafe("iteratorAgeMs", () => model.lag(fast.now()).ageMs)
       node.meter.gaugeUnsafe("backlog", () => model.lag(fast.now()).records)
       node.meter.gaugeUnsafe("retained", () => model.retained())
+      // What the open shards can take and serve, against which IncomingBytes and the rest are read.
+      node.meter.gaugeUnsafe("writeCapacityBytes", () => model.openCount * SHARD_WRITE_BYTES)
+      node.meter.gaugeUnsafe("writeCapacityRecords", () => model.openCount * SHARD_WRITE_RECORDS)
+      node.meter.gaugeUnsafe("readCapacityBytes", () => model.openCount * SHARD_READ_BYTES)
+      node.meter.gaugeUnsafe("readCapacityCalls", () => model.openCount * SHARD_READ_CALLS)
+      // Hot spots: the busiest open shard's load, and the median shard's, as a share of a shard's write limit (in bytes or
+      // records, whichever is nearer). What CloudWatch's shard-level IncomingBytes and IncomingRecords show. The median,
+      // not the mean, so that one hot shard of a few doesn't make the typical one look busy.
+      let loadAt = -1
+      const load = { hottest: 0, median: 0 }
+      let shares = new Float64Array(0)
+      const shardLoad = () => {
+        const now = fast.now()
+        if (now === loadAt) return load
+        loadAt = now
+        const open = model.openShards()
+        if (shares.length < open.length) shares = new Float64Array(open.length * 2)
+        for (let i = 0; i < open.length; i++) {
+          const s = open[i]!
+          shares[i] = Math.max(s.lastBytes / SHARD_WRITE_BYTES, s.lastRecords / SHARD_WRITE_RECORDS)
+        }
+        const sorted = shares.subarray(0, open.length).sort()
+        load.hottest = sorted.length > 0 ? sorted[sorted.length - 1]! : 0
+        load.median = sorted.length > 0 ? sorted[(sorted.length - 1) >> 1]! : 0
+        return load
+      }
+      node.meter.gaugeUnsafe("hottestShardLoad", () => shardLoad().hottest)
+      node.meter.gaugeUnsafe("medianShardLoad", () => shardLoad().median)
 
       return {
         pull: { consumers: pull },

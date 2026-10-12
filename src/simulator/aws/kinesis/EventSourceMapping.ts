@@ -14,6 +14,7 @@ import {
   MIN_RECORD_AGE_S,
   SOURCES
 } from "./config.ts"
+import { mappingDashboard } from "./dashboard.ts"
 import { type Batch, collect, cut, type Lane, lowest, newLanes, oldestIn, poisonIn, type ShardWork } from "./lanes.ts"
 import { laneCount } from "./log.ts"
 import { streamOf } from "./pull.ts"
@@ -56,6 +57,7 @@ export const KinesisMapping = Connector.make({
   from: { protocol: "pull", component: "aws.kinesis", port: "consumers" },
   // Lambda's poller: a fleet (an ECS service, an Auto Scaling group) reads a stream with workers of its own (core.poller).
   to: { protocol: "invoke", fleets: false },
+  dashboard: mappingDashboard,
   config: Mapping,
   state: Schema.Struct({
     /** Shards this mapping is reading now. */
@@ -90,7 +92,10 @@ export const KinesisMapping = Connector.make({
       ctx.meter.gaugeUnsafe("iteratorAge", () => mapping.lag(ctx.fast.now()).ageMs)
       ctx.meter.gaugeUnsafe("backlog", () => mapping.lag(ctx.fast.now()).records)
       ctx.meter.gaugeUnsafe("concurrency", () => mapping.inflight)
+      // The most batches it can have in flight: a lane per shard and parallelization factor.
+      ctx.meter.gaugeUnsafe("maxConcurrency", () => mapping.lanes())
       ctx.meter.gaugeUnsafe("blocked", () => mapping.blocked())
+      ctx.meter.gaugeUnsafe("batchSize", () => ctx.fast.settings().batchSize)
       return { probe: Effect.sync(() => mapping.state()) }
     })
 })
@@ -108,7 +113,12 @@ const counts = (ctx: Context) => {
     itemFailures: c("itemFailures"),
     itemFailuresIgnored: c("itemFailuresIgnored"),
     throttledInvokes: c("throttledInvokes"),
-    poison: c("poisonFailures")
+    poison: c("poisonFailures"),
+    // Lambda's event source mapping metrics: records read from the stream (PolledEventCount), sent to the function (a
+    // batch retried counts again: InvokedEventCount), and in invocations that failed (FailedInvokeEventCount).
+    polled: c("polledEvents"),
+    invoked: c("invokedEvents"),
+    failedInvoke: c("failedInvokeEvents")
   }
 }
 
@@ -132,7 +142,8 @@ class KinesisPoller {
       limit: () => GET_RECORDS_MAX_RECORDS,
       start: (cursor) => ({ lanes: newLanes(cursor.fetched, ctx.fast.settings().parallelization), base: before(cursor), done: 0 }),
       wake: (cursor) => this.drive(cursor),
-      lag: (now) => this.lag(now)
+      lag: (now) => this.lag(now),
+      read: (records) => bump(this.counts.polled, records)
     })
   }
 
@@ -283,6 +294,7 @@ class KinesisPoller {
     lane.inflight = true
     this.inflight++
     bump(this.counts.batches)
+    bump(this.counts.invoked, batch.count)
     const shard = cursor.shard
     const lanes = cursor.local.lanes.length
     const message: Message = {
@@ -324,6 +336,7 @@ class KinesisPoller {
       this.processed(cursor, batch.count)
       return this.drive(cursor)
     }
+    bump(this.counts.failedInvoke, batch.count)
     const now = this.ctx.fast.now()
     if (this.tooOld(batch, now, c)) {
       lane.queue.shift()
@@ -445,6 +458,13 @@ class KinesisPoller {
       if (unread !== undefined && cursor.fetched < shard.sealed && unread.at < oldest) oldest = unread.at
     }
     return { ageMs: now - oldest, records }
+  }
+
+  /** Lanes across the shards it reads: the most batches it can have in flight at once. */
+  lanes(): number {
+    let n = 0
+    for (const cursor of this.sub.active()) n += cursor.local.lanes.length
+    return n
   }
 
   /** Records in batches that have failed at least once. */

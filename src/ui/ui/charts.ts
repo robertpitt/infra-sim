@@ -1,5 +1,5 @@
+import { Dashboard } from "#simulator"
 import type { Frame, Stats } from "../state/types.ts"
-import { fmtCount, fmtMs, fmtRate } from "../lib/format.ts"
 import type { Selection } from "../state/document.ts"
 import type { DocState } from "../state/document.ts"
 import { history } from "../state/run.ts"
@@ -20,174 +20,163 @@ export interface Series {
 export interface ChartSpec {
   readonly id: string
   readonly title: string
-  readonly format: (n: number) => string
+  readonly unit: Dashboard.Unit
   readonly series: ReadonlyArray<Series>
+  /** The CloudWatch metrics the chart stands for. */
+  readonly cloudwatch?: ReadonlyArray<string>
+  readonly help?: string
 }
 
-const C = {
-  in: "#5aa2ff",
+export const TONE: Record<Dashboard.Tone, string> = {
+  primary: "#5aa2ff",
   ok: "#3ecf9a",
-  fail: "#ff6b6b",
+  bad: "#ff6b6b",
   warn: "#f2b84b",
-  violet: "#a478f0",
-  teal: "#35c4d6"
+  accent: "#a478f0",
+  teal: "#35c4d6",
+  muted: "#8995a8"
 }
 
-const MAX_POINTS = 360
+// ---------------------------------------------------------------------------------------------------------
+// Buckets
+// ---------------------------------------------------------------------------------------------------------
 
-/** Reduce to at most MAX_POINTS by averaging blocks, so long windows stay cheap and smooth. */
-const thin = (points: Array<Point>): Array<Point> => {
-  if (points.length <= MAX_POINTS) return points
-  const stride = Math.ceil(points.length / MAX_POINTS)
-  const out: Array<Point> = []
-  for (let i = 0; i < points.length; i += stride) {
-    const block = points.slice(i, i + stride)
-    out.push({ t: block[block.length - 1]!.t, v: block.reduce((s, p) => s + p.v, 0) / block.length })
+/** Points per chart at most: one per pixel or two on a wide screen, and cheap to redraw sixteen times a second. */
+const MAX_POINTS = 300
+const BUCKETS = [1_000, 2_000, 4_000, 5_000, 10_000]
+
+/**
+ * How long one point stands for. Each point is the average of the frames in a stretch of time aligned to the clock (the
+ * second from 1:02 to 1:03, not "the fourth point from the start of the window"), so a point never changes once its
+ * stretch is over, and the lines don't wobble as the window slides. A second is the least: frames are a quarter of a
+ * second, too noisy to read on their own.
+ */
+export const bucketMsFor = (windowMs: number): number => BUCKETS.find((b) => windowMs / b <= MAX_POINTS) ?? BUCKETS[BUCKETS.length - 1]!
+
+/** Frames grouped by bucket, only complete buckets: the one still filling would jump about as its frames arrive. */
+const bucketsOf = (frames: ReadonlyArray<Frame>, bucketMs: number): ReadonlyArray<{ readonly t: number; readonly frames: ReadonlyArray<Frame> }> => {
+  const out: Array<{ t: number; frames: Array<Frame> }> = []
+  const last = frames[frames.length - 1]
+  if (last === undefined) return out
+  // A frame ending at t covers (t - dt, t]: it belongs to the bucket its end falls in, the bucket ending at or after t.
+  const complete = Math.floor(last.t / bucketMs) * bucketMs
+  for (const f of frames) {
+    if (f.t > complete) break
+    const end = Math.ceil(f.t / bucketMs) * bucketMs
+    const tail = out[out.length - 1]
+    if (tail !== undefined && tail.t === end) tail.frames.push(f)
+    else out.push({ t: end, frames: [f] })
   }
   return out
 }
 
-/** Trailing moving average over this many 250ms frames (one second): per-window rates are too noisy to read raw. */
-const SMOOTH = 4
-
-const extract = (frames: ReadonlyArray<Frame>, read: (f: Frame) => number | undefined, smooth = SMOOTH): Array<Point> => {
-  const raw = frames.map((f) => ({ t: f.t, v: read(f) }))
-  const out: Array<Point> = []
-  raw.forEach((p, i) => {
-    if (p.v === undefined) return
-    let sum = 0
-    let n = 0
-    for (let j = Math.max(0, i - smooth + 1); j <= i; j++) {
-      const v = raw[j]!.v
-      if (v !== undefined) {
-        sum += v
-        n++
-      }
-    }
-    out.push({ t: p.t, v: sum / n })
-  })
-  return thin(out)
-}
-
 type Scope = "nodes" | "edges"
-const stat = (f: Frame, scope: Scope, id: string): Stats | undefined => f[scope][id]
-const rate = (scope: Scope, id: string, key: string) => (f: Frame) => stat(f, scope, id)?.rates[key] ?? 0
-const gauge = (scope: Scope, id: string, key: string) => (f: Frame) => stat(f, scope, id)?.gauges[key]
-const dist = (scope: Scope, id: string, key: string, q: "p50" | "p95" | "p99") => (f: Frame) => stat(f, scope, id)?.dist[key]?.[q]
 
-const latencySeries = (frames: ReadonlyArray<Frame>, scope: Scope, id: string): ChartSpec => ({
-  id: "latency",
-  title: "Latency",
-  format: fmtMs,
-  series: [
-    { key: "p50", label: "p50", color: C.in, points: extract(frames, dist(scope, id, "latency", "p50")) },
-    { key: "p95", label: "p95", color: C.warn, points: extract(frames, dist(scope, id, "latency", "p95")) },
-    { key: "p99", label: "p99", color: C.fail, points: extract(frames, dist(scope, id, "latency", "p99")) }
-  ]
-})
-
-const GAUGE_TITLES: Record<string, [string, (n: number) => string]> = {
-  depth: ["Queue depth", fmtCount],
-  oldestAgeMs: ["Oldest message", fmtMs],
-  utilization: ["Worker utilisation", (n) => `${Math.round(n * 100)}%`],
-  waiting: ["Waiting for a worker", fmtCount],
-  busy: ["Busy workers", fmtCount],
-  tokens: ["Burst capacity left", fmtCount],
-  hidden: ["Messages in flight", fmtCount],
-  inflight: ["In flight", fmtCount]
+/**
+ * One line's points: the metric over each bucket. A rate is averaged over the last few buckets too (`smooth`): arrivals
+ * are random, so a second's count wobbles by its square root, and CloudWatch's minute-long periods never show that.
+ */
+const pointsOf = (
+  buckets: ReadonlyArray<{ readonly t: number; readonly frames: ReadonlyArray<Frame> }>,
+  read: (frames: ReadonlyArray<Frame>) => number | undefined,
+  smooth = 1
+): ReadonlyArray<Point> => {
+  const out: Array<Point> = []
+  for (let i = 0; i < buckets.length; i++) {
+    const b = buckets[i]!
+    const v = smooth <= 1 ? read(b.frames) : read(buckets.slice(Math.max(0, i - smooth + 1), i + 1).flatMap((x) => x.frames))
+    if (v !== undefined && Number.isFinite(v)) out.push({ t: b.t, v })
+  }
+  return out
 }
 
-export const chartsFor = (selection: Selection | undefined, doc: DocState, windowMs: number, now: number, sources: ReadonlyArray<string>, highlights: ReadonlyArray<string>): ReadonlyArray<ChartSpec> => {
-  const tMin = Math.max(now, windowMs) - windowMs
-  const frames = history.since((f) => f.t >= tMin)
-  if (frames.length === 0) return []
+/**
+ * Buckets a line is averaged over: three seconds' worth at the finest, one bucket once buckets are long enough. Rates,
+ * shares (utilization, hit rates) and durations wobble from one second to the next; a level (`count`: tasks, messages
+ * visible) is left sharp, so a step shows as a step.
+ */
+const smoothingFor = (unit: Dashboard.Unit, bucketMs: number): number => (unit === "count" ? 1 : Math.max(1, Math.round(3_000 / bucketMs)))
 
-  if (selection?.kind === "edge") {
-    const id = selection.id
-    return [
-      {
-        id: "calls",
-        title: "Calls per second",
-        format: fmtRate,
-        series: [
-          { key: "calls", label: "attempts", color: C.in, points: extract(frames, rate("edges", id, "calls")) },
-          { key: "ok", label: "ok", color: C.ok, points: extract(frames, rate("edges", id, "ok")) },
-          { key: "fail", label: "failed", color: C.fail, points: extract(frames, rate("edges", id, "fail")) },
-          { key: "retries", label: "retries", color: C.warn, points: extract(frames, rate("edges", id, "retries")), dashed: true }
-        ]
-      },
-      {
-        id: "latency",
-        title: "Latency per attempt",
-        format: fmtMs,
-        series: [
-          { key: "p50", label: "p50", color: C.in, points: extract(frames, dist("edges", id, "latency", "p50")) },
-          { key: "p95", label: "p95", color: C.warn, points: extract(frames, dist("edges", id, "latency", "p95")) },
-          { key: "p99", label: "p99", color: C.fail, points: extract(frames, dist("edges", id, "latency", "p99")) }
-        ]
-      },
-      {
-        id: "inflight",
-        title: "In flight",
-        format: fmtCount,
-        series: [{ key: "inflight", label: "in flight", color: C.violet, points: extract(frames, gauge("edges", id, "inflight"), 1) }]
-      }
-    ]
-  }
+const statsOf = (frames: ReadonlyArray<Frame>, scope: Scope, id: string): ReadonlyArray<Stats | undefined> => frames.map((f) => f[scope][id])
 
-  if (selection?.kind === "node") {
-    const id = selection.id
-    const isSource = sources.includes(id)
-    const charts: Array<ChartSpec> = [
-      {
-        id: "rate",
-        title: "Requests per second",
-        format: fmtRate,
-        series: [
-          { key: "in", label: isSource ? "sent" : "arriving", color: C.in, points: extract(frames, rate("nodes", id, isSource ? "sent" : "in")) },
-          { key: "ok", label: "ok", color: C.ok, points: extract(frames, rate("nodes", id, "ok")) },
-          { key: "fail", label: "failed", color: C.fail, points: extract(frames, rate("nodes", id, "fail")) }
-        ]
-      },
-    ]
-    // Components that answer instantly (queues acknowledging a send) would just chart noise below 1ms.
-    const latency = latencySeries(frames, "nodes", id)
-    if (Math.max(0, ...latency.series.flatMap((s) => s.points.map((p) => p.v))) >= 1.5) charts.push(latency)
-    const wanted = highlights.length > 0 ? highlights : ["inflight"]
-    for (const key of wanted.slice(0, 2)) {
-      const [title, format] = GAUGE_TITLES[key] ?? [key, fmtCount]
-      charts.push({ id: key, title, format, series: [{ key, label: title, color: C.violet, points: extract(frames, gauge("nodes", id, key), 1) }] })
+// ---------------------------------------------------------------------------------------------------------
+// Charts
+// ---------------------------------------------------------------------------------------------------------
+
+/** A dashboard's panels as charts of one node or edge. */
+const panelsOf = (
+  panels: ReadonlyArray<Dashboard.Panel>,
+  scope: Scope,
+  id: string,
+  buckets: ReadonlyArray<{ readonly t: number; readonly frames: ReadonlyArray<Frame> }>,
+  bucketMs: number
+): ReadonlyArray<ChartSpec> => {
+  const latest = buckets[buckets.length - 1]?.frames.at(-1)?.[scope][id]
+  return panels.filter((p) => Dashboard.applies(p, latest)).map((p) => ({
+    id: p.id,
+    title: p.title,
+    unit: p.unit,
+    ...(p.cloudwatch === undefined ? {} : { cloudwatch: p.cloudwatch }),
+    ...(p.help === undefined ? {} : { help: p.help }),
+    series: Dashboard.linesFor(p, latest).map((line, i) => ({
+      key: `${i}:${line.label}`,
+      label: line.label,
+      color: TONE[line.tone ?? (["primary", "ok", "bad", "warn", "accent", "teal"] as const)[i % 6]!],
+      points: pointsOf(buckets, (frames) => Dashboard.valueOver(line.metric, statsOf(frames, scope, id), "mean"), smoothingFor(p.unit, bucketMs)),
+      ...(line.dashed ? { dashed: true } : {})
+    }))
+  }))
+}
+
+/** What to chart for what is selected: a node's dashboard, an edge's (transport's and its connector's), or the whole design. */
+export const chartsFor = (
+  selection: Selection | undefined,
+  doc: DocState,
+  windowMs: number,
+  now: number,
+  sources: ReadonlyArray<string>,
+  dashboards: { readonly node: (id: string) => Dashboard.Dashboard | undefined; readonly edge: (id: string) => ReadonlyArray<Dashboard.Panel> }
+): ReadonlyArray<ChartSpec> => {
+  const bucketMs = bucketMsFor(windowMs)
+  const tMin = Math.max(now, windowMs) - windowMs - bucketMs
+  const buckets = bucketsOf(history.since((f) => f.t > tMin), bucketMs)
+  if (buckets.length === 0) return []
+
+  if (selection?.kind === "edge") return panelsOf(dashboards.edge(selection.id), "edges", selection.id, buckets, bucketMs)
+  if (selection?.kind === "node") return panelsOf(dashboards.node(selection.id)?.panels ?? [], "nodes", selection.id, buckets, bucketMs)
+
+  // The whole design: what its clients see, and every queue's backlog.
+  const total = (key: string) => (frames: ReadonlyArray<Frame>) =>
+    frames.reduce((sum, f) => sum + sources.reduce((s, id) => s + (f.nodes[id]?.rates[key] ?? 0), 0), 0) / frames.length
+  const worst = (q: Dashboard.DistStat) => (frames: ReadonlyArray<Frame>) => {
+    let max: number | undefined
+    for (const id of sources) {
+      const v = Dashboard.valueOver(Dashboard.dist("latency", q), statsOf(frames, "nodes", id))
+      if (v !== undefined) max = max === undefined ? v : Math.max(max, v)
     }
-    return charts
+    return max
   }
-
-  // Overview across every traffic source and every queue.
-  const sum = (key: string, ids: ReadonlyArray<string>) => (f: Frame) => ids.reduce((s, id) => s + (f.nodes[id]?.rates[key] ?? 0), 0)
-  const queues = Object.entries(doc.design.nodes).filter(([, n]) => n.type === "queue").map(([id]) => id)
+  const queues = Object.entries(doc.design.nodes).filter(([, n]) => n.type === "aws.sqs").map(([id]) => id)
   const charts: Array<ChartSpec> = []
   if (sources.length > 0) {
     charts.push({
       id: "offered",
-      title: "Client requests per second",
-      format: fmtRate,
+      title: "Client requests",
+      unit: "perSecond",
       series: [
-        { key: "sent", label: "sent", color: C.in, points: extract(frames, sum("sent", sources)) },
-        { key: "ok", label: "ok", color: C.ok, points: extract(frames, sum("ok", sources)) },
-        { key: "fail", label: "failed", color: C.fail, points: extract(frames, sum("fail", sources)) }
+        { key: "sent", label: "sent", color: TONE.primary, points: pointsOf(buckets, total("sent"), smoothingFor("perSecond", bucketMs)) },
+        { key: "ok", label: "ok", color: TONE.ok, points: pointsOf(buckets, total("ok"), smoothingFor("perSecond", bucketMs)) },
+        { key: "fail", label: "failed", color: TONE.bad, points: pointsOf(buckets, total("fail"), smoothingFor("perSecond", bucketMs)) }
       ]
     })
-    const p = (q: "p50" | "p95" | "p99") => (f: Frame) => {
-      const vals = sources.flatMap((id) => (f.nodes[id]?.dist.latency?.[q] === undefined ? [] : [f.nodes[id]!.dist.latency![q]]))
-      return vals.length === 0 ? undefined : Math.max(...vals)
-    }
     charts.push({
       id: "e2e",
       title: "Client latency (worst client)",
-      format: fmtMs,
+      unit: "ms",
       series: [
-        { key: "p50", label: "p50", color: C.in, points: extract(frames, p("p50")) },
-        { key: "p95", label: "p95", color: C.warn, points: extract(frames, p("p95")) },
-        { key: "p99", label: "p99", color: C.fail, points: extract(frames, p("p99")) }
+        { key: "p50", label: "p50", color: TONE.primary, points: pointsOf(buckets, worst("p50"), smoothingFor("ms", bucketMs)) },
+        { key: "p95", label: "p95", color: TONE.warn, points: pointsOf(buckets, worst("p95"), smoothingFor("ms", bucketMs)) },
+        { key: "p99", label: "p99", color: TONE.bad, points: pointsOf(buckets, worst("p99"), smoothingFor("ms", bucketMs)) }
       ]
     })
   }
@@ -195,14 +184,18 @@ export const chartsFor = (selection: Selection | undefined, doc: DocState, windo
     charts.push({
       id: "backlog",
       title: "Queue backlog",
-      format: fmtCount,
-      series: queues.map((id, i) => ({
+      unit: "count",
+      cloudwatch: ["ApproximateNumberOfMessagesVisible"],
+      series: queues.slice(0, 6).map((id, i) => ({
         key: id,
         label: doc.design.nodes[id]?.name ?? id,
-        color: [C.violet, C.teal, C.warn, C.in][i % 4]!,
-        points: extract(frames, gauge("nodes", id, "depth"), 1)
+        color: [TONE.accent, TONE.teal, TONE.warn, TONE.primary, TONE.ok, TONE.muted][i]!,
+        points: pointsOf(buckets, (frames) => Dashboard.valueOver(Dashboard.gauge("depth"), statsOf(frames, "nodes", id), "mean"))
       }))
     })
   }
   return charts
 }
+
+/** The frames a key figure is read over: the last two seconds, so the big numbers are steady enough to read. */
+export const FIGURE_FRAMES = 8

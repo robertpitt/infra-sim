@@ -1,4 +1,4 @@
-import { Connector, Controller, Design } from "#simulator"
+import { Connector, Controller, Dashboard, Design } from "#simulator"
 import { useMemo } from "react"
 import { isContainer, regionOf } from "../canvas/groups.ts"
 import { useStats } from "../canvas/stats.ts"
@@ -22,6 +22,7 @@ import {
 import { accountFields, catalog, connectorOf, registry, zonesOf } from "../state/engine.ts"
 import type { ControllerManifest } from "../state/types.ts"
 import { FaultPanel } from "./FaultPanel.tsx"
+import { Figures } from "./Figures.tsx"
 import { Icon } from "./Icon.tsx"
 import { Metrics } from "./Metrics.tsx"
 import { Diagnostics, Section } from "./Panel.tsx"
@@ -191,7 +192,8 @@ export function NodeSettings({ id }: { id: string }) {
             <Controllers target={id} type={spec.type} />
             <FaultPanel target={{ kind: "node", id }} fleet={manifest?.fleet === true} />
             <Section title="Live metrics">
-              <Metrics stats={stats} />
+              <Figures figures={manifest?.dashboard.figures ?? []} scope="nodes" id={id} compact />
+              <AllMetrics stats={stats} />
             </Section>
           </>
         )}
@@ -345,8 +347,19 @@ export function EdgeSettings({ id }: { id: string }) {
         </Section>
         <FaultPanel target={{ kind: "edge", id }} />
         <Section title="Live metrics">
-          <Metrics stats={stats} />
+          <Figures figures={[...Dashboard.transport.figures, ...(on?.connector.dashboard?.figures ?? [])]} scope="edges" id={id} compact />
+          <AllMetrics stats={stats} />
         </Section>
     </>
+  )
+}
+
+/** Every counter, gauge and distribution the engine reports, folded away under the key figures. */
+function AllMetrics({ stats }: { stats: Parameters<typeof Metrics>[0]["stats"] }) {
+  return (
+    <details className="all-metrics">
+      <summary>All recorded metrics</summary>
+      <Metrics stats={stats} />
+    </details>
   )
 }

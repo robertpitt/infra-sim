@@ -4,14 +4,16 @@ import * as Distribution from "../../Distribution.ts"
 import type { Link } from "../../Edge.ts"
 import { type Cancel, noCancel } from "../../Flow.ts"
 import type { Call, CallFailure, Message } from "../../Message.ts"
+import type { Counter, Sampler } from "../../Telemetry.ts"
 import type { TimerHandle } from "../../VirtualTime.ts"
 import * as Aws from "../provider.ts"
 import { type AlbSettings, AlbConfig } from "./albConfig.ts"
 import { enabledZones, nodeHash, pickByWeight, rehash } from "./balancer.ts"
 import { albCosts, Capacity, type Costs, reservedLcu } from "./capacity.ts"
+import { albDashboard } from "./dashboard.ts"
 import { ALB_LCU, ALB_MIN_ZONES, DNS_TTL_MS, LAMBDA_MAX_BODY_BYTES, LAMBDA_MAX_WAIT_MS, TARGET_GROUPS_PER_ACTION, TICK_MS, URL } from "./config.ts"
 import { ZonalDns } from "./dns.ts"
-import { listenerOf, type Listener } from "./listener.ts"
+import { hostsIn, listenerOf, type Listener } from "./listener.ts"
 import { type AlbFailures, albFailures, badGateway, Outcome, outcomeOf } from "./responses.ts"
 import { AlbState, type Count, count, type TargetKind } from "./state.ts"
 
@@ -21,6 +23,8 @@ interface Host {
   readonly listener: Listener
   readonly f: AlbFailures
   readonly c: Counters
+  /** TargetResponseTime: from the request leaving the load balancer to the target's answer. */
+  readonly targetResponseTime: Sampler
   active: number
 }
 
@@ -40,6 +44,8 @@ interface Counters {
   readonly deadNode: Count
   readonly lambdaUserError: Count
   readonly lambdaInternalError: Count
+  /** ProcessedBytes: the bytes of the requests the load balancer took (requests carry the only sizes there are). */
+  readonly processedBytes: Counter
 }
 
 /**
@@ -50,6 +56,8 @@ class Request {
   open = true
   timer: TimerHandle | undefined = undefined
   private cancelDown: Cancel = noCancel
+  /** When the request left for the target group. */
+  private sentAt = 0
 
   constructor(
     private readonly host: Host,
@@ -64,6 +72,7 @@ class Request {
   /** Through the target group on the edge, with the idle timeout running. The listener tells the edge which node it is. */
   forward(): void {
     this.timer = this.host.fast.after(this.waitMs, onIdle, this)
+    this.sentAt = this.host.fast.now()
     const listener = this.host.listener
     listener.zone = this.zone
     const cancel = this.link.send(this.message, this.answered)
@@ -74,14 +83,20 @@ class Request {
   private readonly answered = (failure: CallFailure | undefined): void => {
     if (!this.open) return
     this.close()
-    if (failure === undefined) return this.resume(Effect.void)
     const { c, f } = this.host
+    // The target answered (well or with its own error): TargetResponseTime. The load balancer's own errors have none.
+    if (failure === undefined) {
+      this.host.targetResponseTime.add(this.host.fast.now() - this.sentAt)
+      return this.resume(Effect.void)
+    }
     switch (outcomeOf(failure, this.lambda)) {
       case Outcome.Target5xx:
         c.target5xx.add()
+        this.host.targetResponseTime.add(this.host.fast.now() - this.sentAt)
         return this.resume(Effect.fail(failure))
       case Outcome.Target4xx:
         c.target4xx.add()
+        this.host.targetResponseTime.add(this.host.fast.now() - this.sentAt)
         return this.resume(Effect.fail(failure))
       case Outcome.Elb503:
         c.elb503.add()
@@ -165,6 +180,7 @@ export const Alb = Aws.component({
   category: "network",
   icon: "balancer",
   accent: "#8c4fff",
+  dashboard: albDashboard,
   limits: [
     { label: "Availability Zones", value: "at least 2", adjustable: false, source: URL.albSubnets },
     { label: "DNS TTL", value: `${DNS_TTL_MS / 1000} seconds`, adjustable: false, source: URL.howItWorks, note: "A zone taken out of DNS still gets requests from clients that cached it, until their answer expires." },
@@ -210,9 +226,10 @@ export const Alb = Aws.component({
         rejected: counter("rejectedConnections"),
         deadNode: counter("deadNode"),
         lambdaUserError: counter("lambda.userError"),
-        lambdaInternalError: counter("lambda.internalError")
+        lambdaInternalError: counter("lambda.internalError"),
+        processedBytes: meter.counter("processedBytes")
       }
-      const host: Host = { fast, listener, f: albFailures(node.id), c, active: 0 }
+      const host: Host = { fast, listener, f: albFailures(node.id), c, targetResponseTime: meter.sampler("targetResponseTime"), active: 0 }
       const capacity = new Capacity(ALB_LCU.active)
       // An empty zone stays in an ALB's DNS: AWS warns that requests entering it get 503s.
       const dns = new ZonalDns(node.zones, listener, fast.now, true)
@@ -256,6 +273,8 @@ export const Alb = Aws.component({
       meter.gaugeUnsafe("reserved.lcu", () => reservedLcu(fast.settings().capacity.reserved))
       meter.gaugeUnsafe("capacityUtilization", () => capacity.utilization)
       meter.gaugeUnsafe("zones.inDns", () => dns.healthyZones)
+      meter.gaugeUnsafe("healthyHosts", () => hostsIn(listener, "healthy"))
+      meter.gaugeUnsafe("unhealthyHosts", () => hostsIn(listener, "unhealthy"))
 
       const fail = (failure: CallFailure) => Effect.fail(failure)
 
@@ -288,6 +307,7 @@ export const Alb = Aws.component({
             return fail(host.f.rejected)
           }
           c.requests.add()
+          c.processedBytes.n += message.bytes
           host.active++
           const waitMs = lambda ? LAMBDA_MAX_WAIT_MS : idleMs
           const delay = Distribution.latencyMs(s.overhead, fast.random)

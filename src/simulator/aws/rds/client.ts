@@ -1,10 +1,12 @@
 import { Duration, Effect, Schema } from "effect"
 import * as Connector from "../../Connector.ts"
+import type * as Dashboard from "../../Dashboard.ts"
 import * as Edge from "../../Edge.ts"
 import type { Message } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
 import type { ClientPolicy } from "./connections.ts"
 import { SOURCES } from "./limits.ts"
+import { databaseClient, proxyClient } from "./dashboard.ts"
 import { asEndpoint, CLIENT_TAG } from "./endpoint.ts"
 
 /**
@@ -89,12 +91,13 @@ const shape = (m: Message, c: Edge.Policy, group: string): Message => ({
   ...(c.request.payload > 0 ? { bytes: c.request.payload * 1024 } : {})
 })
 
-const clientOf = (type: string, component: string, title: string, description: string) =>
+const clientOf = (type: string, component: string, title: string, description: string, dashboard: Dashboard.Dashboard) =>
   Connector.make({
     type,
     provider: "aws",
     title,
     description,
+    dashboard,
     icon: "database",
     docs: SOURCES.proxy,
     from: { protocol: "invoke" },
@@ -105,7 +108,13 @@ const clientOf = (type: string, component: string, title: string, description: s
         const { fast, sink } = ctx
         const key = `${CLIENT_TAG}${ctx.id}`
         // Nodes are made before connectors, so the endpoint, if it is one of ours, is there to be told about this client.
-        asEndpoint(ctx.offer())?.attach(key, () => policyOf(fast.settings().client))
+        // It counts this client's new and refused connections on the edge, and the edge reads its open ones from it.
+        const counters = { opened: ctx.meter.counter("connectionsOpened"), refused: ctx.meter.counter("connectionsRefused") }
+        const connections = asEndpoint(ctx.offer())?.attach(key, () => policyOf(fast.settings().client), counters)
+        if (connections !== undefined) {
+          ctx.meter.gaugeUnsafe("connections", connections.open)
+          ctx.meter.gaugeUnsafe("connectionsInUse", connections.busy)
+        }
         return {
           send: (message, done) => {
             const c = fast.settings()
@@ -119,14 +128,16 @@ export const DatabaseClient = clientOf(
   "aws.rds.client",
   "aws.rds",
   "Database client",
-  "A caller's connections to a database: one per request, or kept open and reused (a pool, or one per Lambda environment), on top of the plain link's timeout and retries."
+  "A caller's connections to a database: one per request, or kept open and reused (a pool, or one per Lambda environment), on top of the plain link's timeout and retries.",
+  databaseClient
 )
 
 export const ProxyClient = clientOf(
   "aws.rds-proxy.client",
   "aws.rds-proxy",
   "Proxy client",
-  "A caller's connections to an RDS Proxy: one per request, or kept open and reused, on top of the plain link's timeout and retries."
+  "A caller's connections to an RDS Proxy: one per request, or kept open and reused, on top of the plain link's timeout and retries.",
+  proxyClient
 )
 
 /**

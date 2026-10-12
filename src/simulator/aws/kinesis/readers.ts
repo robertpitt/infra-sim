@@ -45,6 +45,10 @@ export interface ConsumerSpec<L> {
   readonly sealed?: (cursor: Cursor<L>) => void
   /** How far behind it is: the age of its oldest unprocessed record (ms) and the records it has still to process. */
   readonly lag: (now: number) => Lag
+  /** Records were read for it (a GetRecords call returned them, or they were pushed): for its own metrics. */
+  readonly read?: (records: number, bytes: number) => void
+  /** One of its GetRecords calls was throttled by the shard's read limits: for its own metrics. */
+  readonly readThrottled?: () => void
 }
 
 export interface Lag {
@@ -260,6 +264,7 @@ export class Readers {
     const shard = cursor.shard
     if (!shard.mayRead(now)) {
       tallies.readThrottled.add(1)
+      cursor.sub.spec.readThrottled?.()
       cursor.timer = fast.after(READ_THROTTLE_WAIT_MS, this.onPoll, cursor)
       return
     }
@@ -275,6 +280,7 @@ export class Readers {
     cursor.fetched = to
     tallies.outgoing.add(records)
     tallies.outgoingBytes.add(bytes)
+    cursor.sub.spec.read?.(records, bytes)
     this.deliver(cursor)
   }
 
@@ -296,6 +302,7 @@ export class Readers {
     cursor.fetched = to
     tallies.pushed.add(records)
     tallies.outgoingBytes.add(bytes)
+    cursor.sub.spec.read?.(records, bytes)
     this.deliver(cursor)
   }
 

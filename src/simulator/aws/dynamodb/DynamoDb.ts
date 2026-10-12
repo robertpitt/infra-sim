@@ -4,6 +4,7 @@ import * as Flow from "../../Flow.ts"
 import type { Bucket } from "../../Limiter.ts"
 import { type Call, type CallFailure, type Message, Rejected, Throttled } from "../../Message.ts"
 import * as Aws from "../provider.ts"
+import { dashboard } from "./dashboard.ts"
 import { buildCapacity, type Capacity, indexCount, type Resource, Scalers } from "./capacity.ts"
 import {
   Config,
@@ -58,6 +59,7 @@ export const DynamoDb = Aws.component({
     { label: "Stream readers", value: "at most 2 readers per shard", adjustable: false, source: SOURCES.streams, note: "More may be throttled; not enforced here." },
     { label: "Partition count and split timing", value: "Not published by AWS; modelled from capacity unless you set it", adjustable: false, source: SOURCES.partitionKey }
   ],
+  dashboard,
   highlights: [
     { rate: "fail.Throttled", label: "throttled/s" },
     { gauge: "readTokens", label: "read burst" },
@@ -143,6 +145,18 @@ export const DynamoDb = Aws.component({
       const replicated = node.meter.counter("replicated")
       const replicationFailed = node.meter.counter("replicationFailed")
       const replicationLag = node.meter.sampler("replicationLag")
+      // As CloudWatch counts them: requests by operation, the items and bytes they carried, throttle events by direction,
+      // and the latency of the ones that succeeded (SuccessfulRequestLatency).
+      const readRequests = node.meter.counter("readRequests")
+      const writeRequests = node.meter.counter("writeRequests")
+      const itemsRead = node.meter.counter("itemsRead")
+      const itemsWritten = node.meter.counter("itemsWritten")
+      const bytesRead = node.meter.counter("bytesRead")
+      const bytesWritten = node.meter.counter("bytesWritten")
+      const readThrottleEvents = node.meter.counter("readThrottleEvents")
+      const writeThrottleEvents = node.meter.counter("writeThrottleEvents")
+      const readLatency = node.meter.sampler("readLatency")
+      const writeLatency = node.meter.sampler("writeLatency")
 
       const stream = new Stream({
         fast,
@@ -232,8 +246,13 @@ export const DynamoDb = Aws.component({
       }
 
       const refuse = (reason: string, isRead: boolean, count: number, source: "table" | "partition" | "index"): Call => {
-        if (isRead) throttled.reads += count
-        else throttled.writes += count
+        if (isRead) {
+          throttled.reads += count
+          readThrottleEvents.n++
+        } else {
+          throttled.writes += count
+          writeThrottleEvents.n++
+        }
         if (source === "partition") {
           throttled.partition += count
           throttledPartition.n += count
@@ -343,7 +362,11 @@ export const DynamoDb = Aws.component({
         consumed.indexReads += units
         consumedIndexRead.n += units
         served.reads += count
-        return Flow.wait(fast, Distribution.latencyMs(c.latency, fast.random))
+        itemsRead.n += count
+        bytesRead.n += count * entry
+        const wait = Distribution.latencyMs(c.latency, fast.random)
+        readLatency.add(wait)
+        return Flow.wait(fast, wait)
       }
 
       return {
@@ -353,6 +376,8 @@ export const DynamoDb = Aws.component({
           if (count < 1) return Effect.void
           const now = fast.now()
           const isRead = message.operation === "read"
+          if (isRead) readRequests.n++
+          else writeRequests.n++
           const isReplica = !isRead && message.group === REPLICATED_GROUP
           const itemBytes = message.bytes / count
           if (itemBytes > ITEM_MAX_BYTES) return reject("ValidationException: item size has exceeded the maximum allowed size of 400 KB")
@@ -416,11 +441,15 @@ export const DynamoDb = Aws.component({
             consumed.reads += units
             consumedRead.n += units
             served.reads += count
+            itemsRead.n += count
+            bytesRead.n += message.bytes
           } else {
             scalers.table.write.record(now, units)
             consumed.writes += units
             consumedWrite.n += units
             served.writes += count
+            itemsWritten.n += count
+            bytesWritten.n += message.bytes
             if (!failsCondition) {
               // The write has happened: its change is on the stream and on its way to the replicas.
               if (stream.consumers > 0 && c.stream.view !== "off") stream.append(partition, count, count * recordBytes(c.stream.view, itemBytes), message.bornAt, streamDelay)
@@ -428,7 +457,10 @@ export const DynamoDb = Aws.component({
             }
           }
           const wait = Distribution.latencyMs(c.latency, fast.random)
-          if (!failsCondition) return Flow.wait(fast, wait)
+          if (!failsCondition) {
+            ;(isRead ? readLatency : writeLatency).add(wait)
+            return Flow.wait(fast, wait)
+          }
           conditionFailed++
           conditionFailures.n++
           return Flow.delayed(fast, wait, failCondition)

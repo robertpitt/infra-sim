@@ -1,5 +1,6 @@
 import { Duration, Effect, Schema, Stream, SubscriptionRef } from "effect"
 import * as Connector from "../Connector.ts"
+import { type Dashboard, gauge, rate, ratio } from "../Dashboard.ts"
 import * as Edge from "../Edge.ts"
 import type { CallFailure, ItemFailures } from "../Message.ts"
 import { batchOf, type Lease, type LeasedRecord } from "../Protocol.ts"
@@ -32,6 +33,60 @@ export const Config = Schema.Struct({
   })
 })
 
+/**
+ * The pool's charts, after transport's: how many workers are busy against how many there are, the batches they send and
+ * the records in them, and what failed. A worker pool polling a queue is the self-managed consumer AWS leaves to you, so
+ * nothing here is a CloudWatch metric: it is what you would publish yourself.
+ */
+const dashboard: Dashboard = {
+  figures: [
+    { label: "Busy workers", metric: gauge("busy"), unit: "count" },
+    { label: "Batches", metric: rate("batches"), unit: "perSecond" },
+    { label: "Avg batch", metric: ratio(rate("records"), rate("batches")), unit: "count" }
+  ],
+  panels: [
+    {
+      id: "workers",
+      title: "Workers",
+      unit: "count",
+      help: "Workers waiting on a call, against the pool. All of them busy while the source has a backlog means the pool is the bottleneck.",
+      lines: [
+        { label: "busy", metric: gauge("busy"), tone: "accent" },
+        { label: "workers", metric: gauge("workers"), tone: "muted", dashed: true }
+      ]
+    },
+    {
+      id: "batches",
+      title: "Batches",
+      unit: "perSecond",
+      help: "Batches sent, and those whose call failed (left to the source, to come back when their lease runs out).",
+      lines: [
+        { label: "sent", metric: rate("batches"), tone: "primary" },
+        { label: "failed", metric: rate("batchesFailed"), tone: "bad" }
+      ]
+    },
+    {
+      id: "records",
+      title: "Records",
+      unit: "perSecond",
+      help: "Records sent in batches, and records a successful call reported failed (left to the source on their own).",
+      lines: [
+        { label: "sent", metric: rate("records"), tone: "primary" },
+        { label: "reported failed", metric: rate("recordsFailed"), tone: "warn" }
+      ]
+    },
+    {
+      id: "batch-size",
+      title: "Batch size",
+      unit: "count",
+      lines: [
+        { label: "average", metric: ratio(rate("records"), rate("batches")), tone: "primary" },
+        { label: "batch size", metric: gauge("batchSize"), tone: "muted", dashed: true }
+      ]
+    }
+  ]
+}
+
 interface Worker {
   readonly index: number
   alive: boolean
@@ -58,6 +113,7 @@ export const Poller = Connector.make({
   icon: "reload",
   from: { protocol: "pull" },
   to: { protocol: "invoke" },
+  dashboard,
   config: Config,
   state: Schema.Struct({
     workers: Schema.Number,
@@ -79,6 +135,11 @@ export const Poller = Connector.make({
       let failed = 0
       let recordsFailed = 0
       let pumping = false
+      // The same as rates, on the edge's meter beside transport's own counts.
+      const batchesC = ctx.meter.counter("batches")
+      const recordsC = ctx.meter.counter("records")
+      const batchesFailedC = ctx.meter.counter("batchesFailed")
+      const recordsFailedC = ctx.meter.counter("recordsFailed")
 
       /** Bring the pool to the size the settings ask for. */
       const ensure = (): void => {
@@ -136,6 +197,8 @@ export const Poller = Connector.make({
         if (batch === undefined) return release(w)
         busy++
         batches++
+        batchesC.n++
+        recordsC.n += batch.count
         sink.call(batch, Edge.within(Duration.toMillis(fast.settings().timeout)), w.done)
       }
 
@@ -144,12 +207,16 @@ export const Poller = Connector.make({
         if (failure === undefined) {
           // Records the reply names as failed stay with the source, to come back when their lease runs out.
           const keep = items === undefined ? undefined : new Set(items.failed.flatMap((i) => (w.order[i] === undefined ? [] : [w.order[i]!])))
-          if (keep !== undefined) recordsFailed += keep.size
+          if (keep !== undefined) {
+            recordsFailed += keep.size
+            recordsFailedC.n += keep.size
+          }
           for (const lease of w.held) lease.ack(keep)
           release(w)
           return pump()
         }
         failed++
+        batchesFailedC.n++
         // Leave the batch to the source: its lease runs out and it is handed out again.
         w.held = []
         w.timer = fast.after(Duration.toMillis(fast.settings().backoff), resume, w)
@@ -168,6 +235,7 @@ export const Poller = Connector.make({
 
       ctx.meter.gaugeUnsafe("workers", () => fast.settings().workers)
       ctx.meter.gaugeUnsafe("busy", () => busy)
+      ctx.meter.gaugeUnsafe("batchSize", () => fast.settings().batchSize)
       source.ready(pump)
       fast.after(0, pump, undefined)
       // More workers apply at once, not when the next message happens to arrive.

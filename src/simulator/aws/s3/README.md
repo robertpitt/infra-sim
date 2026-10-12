@@ -229,10 +229,18 @@ Counters (per second in frames). Request counters are per request: a batch count
 The framework also counts `in`, `ok`, `fail` and `fail.<Tag>` per call (a batch is one call).
 
 Distributions: `firstByteLatency` (FirstByteLatency, including a multipart initiate), `totalRequestLatency`
-(TotalRequestLatency), `replicationLag` (time from the write to the replica landing). The framework's `latency` is the node's time per call.
+(TotalRequestLatency), `replicationLag` (time from the write to the replica landing: ReplicationLatency). The framework's
+`latency` is the node's time per call.
 
 Gauges: `transferring` (calls moving bytes), `pending` (notifications not yet delivered), `replicating` (replicas not yet
 landed), `readCeiling` and `writeCeiling` (highest per-prefix rate now: the guarantee, or what scale-up reached).
+
+The dashboard (`dashboard.ts`) charts these under CloudWatch's names: requests (AllRequests, GetRequests, PutRequests),
+4xx and 5xx errors, first-byte and total latency, bytes downloaded and uploaded and per request (their Average
+statistic), the per-prefix ceilings, replication latency, operations pending replication (`replicating`, beside
+`pending` notifications), replicas and event messages delivered or failed (OperationsFailedReplication), and the other
+request kinds. The daily storage metrics (BucketSizeBytes, NumberOfObjects) and BytesPendingReplication have no
+counterpart: the bucket keeps no objects, and replication is counted in operations.
 
 Probe state: `bucketType`, `prefixes`, `served` (`reads`, `writes`, `deletes`, `heads`, `lists`, `copies`, `deleteMarkers`,
 `multipartParts`), `throttled` (`reads`, `writes`: requests), `refused` (`archived`, `tooLarge`), `transferring`, `scaled`

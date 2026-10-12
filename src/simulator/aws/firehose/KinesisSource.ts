@@ -9,6 +9,7 @@ import { streamOf } from "../kinesis/pull.ts"
 import { before, type Cursor, type Lag, type Subscription } from "../kinesis/readers.ts"
 import type { StreamModel } from "../kinesis/stream.ts"
 import { KINESIS_POLL_MS, SOURCES } from "./config.ts"
+import { sourceDashboard } from "./dashboard.ts"
 import { fromKinesis } from "./marker.ts"
 
 /**
@@ -30,6 +31,7 @@ export const KinesisSource = Connector.make({
   docs: SOURCES.kinesisSource,
   from: { protocol: "pull", component: "aws.kinesis", port: "consumers" },
   to: { protocol: "invoke", component: "aws.firehose" },
+  dashboard: sourceDashboard,
   config: Schema.Struct({}),
   state: Schema.Struct({
     /** Shards being read. */
@@ -68,14 +70,16 @@ type Context = Connector.Context<Record<string, never>, "pull">
 
 class Source {
   private readonly sub: Subscription<Place>
-  private readonly counts: { records: Counter; bytes: Counter; refused: Counter }
+  private readonly counts: { records: Counter; bytes: Counter; refused: Counter; throttled: Counter }
   private readonly totals = { records: 0, bytes: 0, refused: 0 }
 
   constructor(private readonly ctx: Context, private readonly stream: StreamModel) {
     this.counts = {
       records: ctx.meter.counter("records"),
       bytes: ctx.meter.counter("bytes"),
-      refused: ctx.meter.counter("refused")
+      refused: ctx.meter.counter("refused"),
+      // ThrottledGetRecords: its GetRecords calls the shard's read limits refused (other consumers share them).
+      throttled: ctx.meter.counter("throttledGetRecords")
     }
     this.sub = stream.subscribe<Place>({
       name: ctx.id,
@@ -85,7 +89,8 @@ class Source {
       limit: () => GET_RECORDS_MAX_RECORDS,
       start: (cursor) => ({ taken: cursor.fetched, sending: false, retry: undefined, base: before(cursor), done: 0 }),
       wake: (cursor) => this.hand(cursor),
-      lag: (now) => this.lag(now)
+      lag: (now) => this.lag(now),
+      readThrottled: () => this.counts.throttled.n++
     })
   }
 

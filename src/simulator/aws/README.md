@@ -138,7 +138,8 @@ Ports (what they are, what they carry), how this component is called and what it
 port mean. What a CloudFormation import maps onto it, if the importer supports it.
 
 ## Metrics and state
-Counters, rates, gauges and distributions this component records (names and meaning), and the probe state.
+Counters, rates, gauges and distributions this component records (names and meaning, and the CloudWatch metric each
+stands for), and the probe state.
 
 ## Not yet simulated
 A prioritised backlog: what is missing, why it matters, and what it would take. Be specific.
@@ -149,6 +150,22 @@ Every number that is not from AWS, and why that value.
 ## References
 The AWS documentation pages used.
 ```
+
+## Dashboard
+
+A component (and a connector that records metrics on its edge) declares a `dashboard` (`../Dashboard.ts`): a few key
+figures and the charts an operator would put on a dashboard for the service, mirroring what AWS publishes for it in
+CloudWatch and names the way AWS does (`ConsumedWriteCapacityUnits`, `ApproximateAgeOfOldestMessage`), with the CloudWatch
+names listed on each panel. It is plain data in the service's folder (`dashboard.ts`); the UI draws it when the node or
+edge is selected. Record what a CloudWatch metric needs (requests by operation, bytes, throttles by direction) where it
+happens, in the fast style. `src/simulator/aws/dynamodb/dashboard.ts` is the reference; `npx tsx
+tools/dashboard-check.ts 60 <type>` lists dashboard metrics that no example records (a typo, or a metric never registered).
+
+A dashboard is the same for every node of a type, so a panel that only some configurations have (a table's stream, an
+ECS cluster's container instances) is hidden for the others: a panel of nothing but gauges is hidden when the node
+registers none of them, and any panel can name the gauge it `requires`. Register such gauges when the node is built, not
+on first use, so a panel doesn't appear halfway through a run. A threshold to read a line against (Route 53's 18%, SES's
+review rate) is a `constant`, not a gauge.
 
 ## Tests
 
@@ -174,5 +191,5 @@ published number, quotas honoured when changed), not just that something ran. Ru
 ## Definition of done for a service
 
 README complete and honest · limits verified and sourced · behaviour tested against the published numbers · hot path in the
-fast style · hardening checklist walked through · `npx tsc -p tsconfig.simulator.json` clean · `npx vitest run
+fast style · a dashboard mirroring CloudWatch · hardening checklist walked through · `npx tsc -p tsconfig.simulator.json` clean · `npx vitest run
 src/simulator/aws/<service>` green · no edits outside the folder (anything needed elsewhere is reported, not made).

@@ -1,8 +1,9 @@
-import { Effect, Schema } from "effect"
+import { Duration, Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
 import { tallies, totals } from "../../kit/Tally.ts"
 import * as Aws from "../provider.ts"
-import { DeliveryStream, Out, SOURCES, TransformEdge } from "./config.ts"
+import { DeliveryStream, MiB, Out, SOURCES, TransformEdge } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { Engine } from "./delivery.ts"
 
 export const Firehose = Aws.component({
@@ -23,6 +24,7 @@ export const Firehose = Aws.component({
     { label: "Undelivered data", value: "Kept 24 hours (Direct PUT); a Kinesis source keeps it in the stream", adjustable: false, source: SOURCES.retry },
     { label: "Transformation", value: "Batches of 0.2-3 MB, up to 5 minutes and 5 outstanding invocations per shard, 3 retries by default", adjustable: false, source: SOURCES.transform }
   ],
+  dashboard,
   highlights: [
     { rate: "incoming", label: "rec/s" },
     { rate: "objects", label: "objects/s" },
@@ -94,16 +96,29 @@ export const Firehose = Aws.component({
         out: node.out("out")[0],
         transform: node.out("transform")[0],
         backup: node.out("backup")[0],
-        tallies: t
+        tallies: t,
+        transformSucceeded: node.meter.counter("transformSucceeded"),
+        transformDuration: node.meter.sampler("transformDuration")
       })
       // Gauges after CloudWatch's: DeliveryToS3.DataFreshness is the one to watch.
       node.meter.gaugeUnsafe("dataFreshness", () => engine.freshness(fast.now()))
       node.meter.gaugeUnsafe("heldRecords", () => engine.held().records)
       node.meter.gaugeUnsafe("heldBytes", () => engine.held().bytes)
+      node.meter.gaugeUnsafe("lastObjectBytes", () => engine.lastObjectBytes)
+      // The buffering interval, which data freshness saw-tooths up to while delivery keeps up.
+      node.meter.gaugeUnsafe("bufferInterval", () => Duration.toMillis(fast.settings().bufferInterval))
+      // BytesPerSecondLimit: the Direct PUT quota, charted once a Direct PUT has been accepted (a stream reading a
+      // Kinesis stream has no Firehose limit of its own).
+      let limitShown = false
+      const showLimit = (): void => {
+        limitShown = true
+        node.meter.gaugeUnsafe("bytesPerSecondLimit", () => (fast.account() as Aws.Account).firehoseDirectPutMiBps * MiB)
+      }
 
       return {
         call: (message) => {
           const failure = engine.accept(message)
+          if (!limitShown && engine.directPut) showLimit()
           return failure === undefined ? Effect.void : Effect.fail(failure)
         },
         probe: Effect.sync(() => ({

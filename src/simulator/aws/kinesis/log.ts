@@ -64,6 +64,9 @@ export class Shard {
   offeredRecords = 0
   rateBytes = 0
   rateRecords = 0
+  /** The traffic offered over the last tick, per second, unsmoothed: what the shard-load gauges read. */
+  lastBytes = 0
+  lastRecords = 0
 
   private segments: Array<Segment> = []
   /** Absolute index of `segments[0]`; positions are absolute, so trimming the front never moves them. */
@@ -231,6 +234,8 @@ export class Shard {
   observe(elapsedMs: number): void {
     if (elapsedMs <= 0) return
     const k = Math.min(1, elapsedMs / ON_DEMAND_WINDOW_MS)
+    this.lastBytes = (this.offeredBytes * 1000) / elapsedMs
+    this.lastRecords = (this.offeredRecords * 1000) / elapsedMs
     this.rateBytes += ((this.offeredBytes * 1000) / elapsedMs - this.rateBytes) * k
     this.rateRecords += ((this.offeredRecords * 1000) / elapsedMs - this.rateRecords) * k
     this.offeredBytes = 0

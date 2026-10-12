@@ -17,6 +17,7 @@ import {
   State,
   WEIGHTED_URL
 } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { HealthCheckLedger, makeRuntime } from "./runtime.ts"
 
 /**
@@ -39,6 +40,7 @@ export const Route53 = Aws.component({
   quietAlarms: ["errors"],
   icon: "dns",
   accent: "#8c4fff",
+  dashboard,
   limits: [
     { label: "Health checks", value: "200 active per account", adjustable: true, source: QUOTAS_URL, note: "The account quota route53HealthChecks. A record that asks for one past it has none, and is always healthy." },
     { label: "Records with the same name and type", value: "100 (weighted, latency, geolocation, multivalue)", adjustable: false, source: QUOTAS_URL, note: "Edges past the 100th are never answered." },

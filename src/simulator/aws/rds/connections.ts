@@ -1,3 +1,5 @@
+import type { Counter } from "../../Telemetry.ts"
+
 /**
  * Connections: what a database (or RDS Proxy) has open, who holds them, and how many it allows.
  *
@@ -26,6 +28,15 @@ export interface ClientPolicy {
   readonly endpoint: "auto" | "writer" | "reader"
   /** How long the client caches the endpoint's DNS name: after a failover it keeps reaching the old primary up to this long. */
   readonly dnsCacheMs: number
+}
+
+/**
+ * What a client's own edge counts of its connections, beside what the endpoint counts of all of them: the new ones its
+ * requests opened, and the ones refused because the endpoint was at its limit.
+ */
+export interface ConnectionCounters {
+  readonly opened: Counter
+  readonly refused: Counter
 }
 
 /** `Pool.acquire` found no room: the server is at its limit. */
@@ -84,7 +95,9 @@ export class Pool {
   constructor(
     readonly server: Server,
     readonly policy: () => ClientPolicy,
-    private readonly onClose?: (tag: number) => void
+    private readonly onClose?: (tag: number) => void,
+    /** The client's edge's counters, when its connector keeps them. */
+    private readonly counters?: ConnectionCounters
   ) {
     server.pools.push(this)
   }
@@ -107,9 +120,13 @@ export class Pool {
         return this.tags.pop()!
       }
     }
-    if (this.server.open >= this.server.limit()) return REFUSED
+    if (this.server.open >= this.server.limit()) {
+      if (this.counters !== undefined) this.counters.refused.n++
+      return REFUSED
+    }
     this.server.open++
     this.busy++
+    if (this.counters !== undefined) this.counters.opened.n++
     return OPENED
   }
 

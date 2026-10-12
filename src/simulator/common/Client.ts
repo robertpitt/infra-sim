@@ -3,6 +3,7 @@ import * as Component from "../Component.ts"
 import * as Edge from "../Edge.ts"
 import { type CallFailure, failureCounter, type Message } from "../Message.ts"
 import * as Setting from "../Setting.ts"
+import * as dashboards from "./dashboards.ts"
 
 /** The key a client's hot share is sent with: one fixed partition key, so it keeps landing on one partition or shard. */
 export const HOT_KEY = 0.1234
@@ -44,7 +45,8 @@ export const Client = Component.make({
   icon: "users",
   accent: "#5aa2ff",
   inputs: false,
-  highlights: [{ gauge: "inflight", label: "in flight" }],
+  dashboard: dashboards.client,
+  highlights: [{ gauge: "outstanding", label: "in flight" }],
   config: Config,
   state: Schema.Struct({ rate: Schema.Number, sent: Schema.Number, inflight: Schema.Number }),
   make: (node) =>
@@ -59,7 +61,9 @@ export const Client = Component.make({
       const failures = new Map<string, { n: number }>()
       let sent = 0
       let inflight = 0
-      node.meter.gaugeUnsafe("inflight", () => inflight)
+      // Requests sent and not yet answered. Not `inflight`: that name is the framework's own gauge on every node (calls
+      // into it, which for a client is always 0), and it would hide this one.
+      node.meter.gaugeUnsafe("outstanding", () => inflight)
 
       const done = (message: Message) => (failure: CallFailure | undefined) => {
         inflight--

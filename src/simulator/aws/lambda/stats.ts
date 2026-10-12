@@ -40,6 +40,22 @@ export interface Stats {
   readonly initDuration: Sampler
   /** Time the handler ran, from the end of the cold start to its return or its timeout, in ms. */
   readonly duration: Sampler
+  /**
+   * Invocations that ended, in success or a function error (timeouts included): what the error rate divides. Counted as
+   * they end, as `errors` is, so the rate stays a share while a timeout storm ends more invocations than start.
+   */
+  readonly completedInvocations: Counter
+  /** Invocations that ran on a provisioned environment (CloudWatch's ProvisionedConcurrencyInvocations). */
+  readonly provisionedInvocations: Counter
+  /**
+   * Invocations of a function with provisioned concurrency that ran on standard concurrency because every provisioned
+   * environment was busy (ProvisionedConcurrencySpilloverInvocations).
+   */
+  readonly spilloverInvocations: Counter
+  /** Asynchronous events accepted onto the function's internal queue (AsyncEventsReceived). */
+  readonly asyncEventsReceived: Counter
+  /** Time from an asynchronous event's acceptance to an invocation of it, retries included, in ms (AsyncEventAge). */
+  readonly asyncEventAge: Sampler
 }
 
 export const makeStats = (meter: Meter): Stats => {
@@ -56,6 +72,11 @@ export const makeStats = (meter: Meter): Stats => {
     asyncFailed: metric("asyncFailed"),
     destinationFailures: metric("destinationFailures"),
     initDuration: meter.sampler("initDuration"),
-    duration: meter.sampler("duration")
+    duration: meter.sampler("duration"),
+    completedInvocations: meter.counter("completedInvocations"),
+    provisionedInvocations: meter.counter("provisionedInvocations"),
+    spilloverInvocations: meter.counter("spilloverInvocations"),
+    asyncEventsReceived: meter.counter("asyncEventsReceived"),
+    asyncEventAge: meter.sampler("asyncEventAge")
   }
 }

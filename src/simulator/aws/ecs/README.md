@@ -169,10 +169,21 @@ terminating instance's tasks are replaced elsewhere first; without it they stop 
 ## Metrics and state
 
 Gauges: `desired`, `running`, `pending` (launching), `provisioning` (waiting for capacity), `draining`, `busy`, `queued`,
-`cpu` (0-1), `cpuTasks` (tasks' worth of CPU in use: target tracking per task divides it), `spot`, `oldTasks` (tasks of an
-older revision during a deployment), `revision` (the revision being deployed or run), `breakerFailures`, `running.<zone>`;
-on EC2 also `instances`, `instancesLaunching`, `instancesDesired`, `capacityReservation` (%), `cpuReservation` and
-`memoryReservation` (0-1). Rates and latency as every node (`in`, `ok`, `fail`, `fail.<Tag>`, `latency`).
+`cpu` (0-1), `cpuTasks` (tasks' worth of CPU in use: target tracking per task divides it), `spot`, `fargate` (tasks on
+Fargate On-Demand; on Fargate only), `oldTasks` (tasks of an older revision during a deployment), `newTasks` (tasks of the revision being
+deployed), `revision` (the revision being deployed or run), `breakerFailures`, `breakerThreshold`, `running.<zone>`; on
+EC2 also `instances`, `instancesLaunching`, `instancesDesired`, `capacityReservation` (%), `capacityProviderReservation`
+and `targetCapacity` (the same and managed scaling's target, 0-1, 1 being 100%), `cpuReservation` and
+`memoryReservation` (0-1). Counters: `taskLaunches`, `taskStops` (tasks that launched and stopped), `taskFailures` (tasks
+that crashed or failed their health checks, once each), `spotInterruptions`. Rates and latency as every node (`in`,
+`ok`, `fail`, `fail.<Tag>`, `latency`).
+
+The dashboard (`dashboard.ts`) charts them as the console, CloudWatch (`AWS/ECS`) and Container Insights do:
+`RunningTaskCount`, `PendingTaskCount` and `DesiredTaskCount`; `CPUUtilization`; requests and response time as the load
+balancer counts them; the deployment (tasks per revision, the circuit breaker); task launches, stops, failures and Spot
+interruptions; tasks per Fargate capacity provider; and on EC2 `ContainerInstanceCount`, `CPUReservation`,
+`MemoryReservation` and `CapacityProviderReservation`. Not charted, because nothing here models them: `MemoryUtilization`
+(tasks use no memory here), network and storage bytes, `RestartCount`, ephemeral storage, and Service Connect's metrics.
 
 Probe: running, pending, provisioning, draining, busy, queued, served, errors, refused, lost, replaced, interrupted, spot,
 onDemand; `deployment` (state COMPLETED, IN_PROGRESS, FAILED or ROLLED_BACK, revision, stable revision, failures and

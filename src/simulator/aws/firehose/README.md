@@ -125,14 +125,23 @@ The CloudFormation importer doesn't read `AWS::KinesisFirehose::DeliveryStream` 
 Rates: `incoming`, `incomingBytes` (IncomingRecords/Bytes), `putRequests` (IncomingPutRequests), `throttled`
 (ThrottledRecords), `rejected`, `refusedFromStream`, `delivered`, `deliveredBytes` (DeliveryToS3.Records/Bytes),
 `objects` (DeliveryToS3.Success: objects or requests delivered), `deliveryFailed` (failed attempts), `transformInvocations`,
-`transformFailed`, `transformedRecords` (SucceedProcessing.Records), `processingFailed`, `backedUp`, `backupFailed`, `lost`.
-Gauges: `dataFreshness` (DeliveryToS3.DataFreshness, in ms), `heldRecords`, `heldBytes`.
+`transformSucceeded` (successful invocations: over `transformInvocations`, ExecuteProcessing.Success), `transformFailed`,
+`transformedRecords` (SucceedProcessing.Records), `processingFailed`, `backedUp`, `backupFailed`, `lost`.
+Distribution: `transformDuration` (ExecuteProcessing.Duration, ms). Gauges: `dataFreshness` (DeliveryToS3.DataFreshness, in
+ms), `heldRecords`, `heldBytes`, `lastObjectBytes` (the last object or request delivered), `bufferInterval` (ms), and `bytesPerSecondLimit` (BytesPerSecondLimit: the Direct PUT
+quota, registered once a Direct PUT has been accepted).
 
 Probe: source (`direct-put` or `kinesis`), buffers in use, what is held (records, bytes, deliveries queued, buffers
 whose delivery is failing), data freshness, totals.
 
-The Kinesis source edge: rates `records`, `bytes` (DataReadFromKinesisStream), `refused`; gauges `millisBehindLatest`
-(KinesisMillisBehindLatest), `backlog`. Its GetRecords calls and throttles are counted on the stream.
+The Kinesis source edge: rates `records`, `bytes` (DataReadFromKinesisStream), `refused`, `throttledGetRecords`
+(ThrottledGetRecords: its GetRecords calls the shard's read limits refused); gauges `millisBehindLatest`
+(KinesisMillisBehindLatest), `backlog`. Its GetRecords calls are counted on the stream too.
+
+The stream's and the source's dashboards (`dashboard.ts`) chart these under CloudWatch's names (DeliveryToS3.* for either
+destination; an HTTP endpoint's are DeliveryToHttpEndpoint.*). Not charted, because not modelled: RecordsPerSecondLimit
+and PutRequestsPerSecondLimit (charted only in bytes, the limit usually met first), PutRecord/PutRecordBatch latency,
+dynamic partitioning, format conversion, decompression, SSE and the BackupToS3 freshness.
 
 ## Not yet simulated
 

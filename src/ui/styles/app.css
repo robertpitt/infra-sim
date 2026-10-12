@@ -430,7 +430,7 @@ select:disabled { opacity: 0.55; }
 .banner .link { color: #ffd0d0; }
 
 /* ---------- Dock & charts ---------- */
-.dock { flex: none; border-top: 1px solid var(--line); background: var(--panel); max-height: 46%; display: flex; flex-direction: column; }
+.dock { position: relative; flex: none; border-top: 1px solid var(--line); background: var(--panel); max-height: 75%; display: flex; flex-direction: column; }
 .dock-head { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px 0 6px; border-bottom: 1px solid var(--line-soft); }
 .dock[data-collapsed] .dock-head { border-bottom: 0; }
 .dock-title { font-weight: 620; font-size: 12px; padding-left: 6px; border-left: 1px solid var(--line); }
@@ -446,18 +446,43 @@ select:disabled { opacity: 0.55; }
 .tab-badge[data-tone="warning"] { background: rgba(242, 184, 75, 0.18); color: var(--amber); }
 .tab-badge[data-tone="ok"] { background: rgba(62, 207, 154, 0.16); color: var(--green); }
 .tab-badge[data-tone="info"] { background: rgba(90, 162, 255, 0.16); color: #8cc0ff; }
-.dock-body { height: 178px; overflow-y: auto; }
+.dock-body { height: var(--dock-h, 260px); overflow-y: auto; }
+/* The dock's top edge: drag it to make the dock taller or shorter. */
+.dock-resize { position: absolute; left: 0; right: 0; top: -4px; height: 8px; cursor: ns-resize; z-index: 6; }
+.dock-resize:hover, .dock-resize[data-dragging] { background: linear-gradient(transparent 3px, color-mix(in srgb, var(--accent-ui, #5aa2ff) 60%, transparent) 3px, color-mix(in srgb, var(--accent-ui, #5aa2ff) 60%, transparent) 5px, transparent 5px); }
 .band-swatch { background: rgba(255, 107, 107, 0.45) !important; }
-.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
-.chart { position: relative; padding: 7px 12px 4px; border-right: 1px solid var(--line-soft); min-width: 0; }
-.chart:last-child { border-right: 0; }
-.chart-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 2px; }
-.chart-title { font-size: 11.5px; font-weight: 650; color: var(--muted); }
-.legend { display: flex; flex-wrap: wrap; gap: 3px 12px; }
-.legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+/* Key figures of what is selected, above its charts. Fixed-width digits, so changing numbers don't move anything. */
+.figures { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); }
+.figure { display: flex; flex-direction: column; gap: 1px; min-width: 104px; padding: 5px 10px 6px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--panel-2); }
+.figure-label { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.figure-value { font: 600 15px var(--mono); font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; }
+.figure[data-alarming] { border-color: color-mix(in srgb, var(--tone) 55%, var(--line-soft)); }
+.figure[data-alarming] .figure-value { color: var(--tone); }
+.figures[data-compact] { padding: 2px 0 8px; border-bottom: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
+.figures[data-compact] .figure { min-width: 0; }
+.figures[data-compact] .figure-value { font-size: 13.5px; }
+.all-metrics > summary { cursor: pointer; font-size: 11.5px; color: var(--muted); padding: 2px 0 6px; }
+.all-metrics > summary:hover { color: var(--text); }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.chart { position: relative; display: flex; flex-direction: column; padding: 7px 12px 4px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); min-width: 0; }
+/*
+ * The head: the title, then the legend, wrapping onto as many lines as its labels need. Each value has a fixed width
+ * for its unit, so how the legend wraps depends on the labels and the chart's width, never on the numbers: a value
+ * changing never moves anything. Charts in a row stretch to the tallest head, and their plots line up at the bottom.
+ */
+.chart-head { display: flex; flex-direction: column; gap: 2px; min-height: 48px; margin-bottom: 2px; }
+.chart-title { font-size: 11.5px; font-weight: 650; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chart-title[title] { cursor: help; }
+.legend { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.legend-item { flex: none; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .legend-item i, .tooltip i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
-.legend-item b { font: 600 11px var(--mono); color: var(--text); margin-left: 2px; }
-.chart svg { display: block; overflow: visible; }
+.legend-item[data-dashed] i { background: transparent !important; border-top: 2px dashed currentColor; height: 0; width: 10px; }
+/* A limit far above the data, left off the chart: an arrow up, in its colour, for a swatch. */
+.legend-item[data-off] { cursor: help; }
+.legend-item[data-off] i { border-top: 0; width: 10px; height: 10px; }
+.legend-item[data-off] i::before { content: "↑"; display: block; font: 700 11px/10px var(--mono); text-align: center; }
+.legend-item b { font: 600 11px var(--mono); font-variant-numeric: tabular-nums; color: var(--text); margin-left: 2px; width: var(--value-w, 6ch); white-space: nowrap; }
+.chart svg { display: block; overflow: visible; margin-top: auto; flex: none; }
 .chart .line { fill: none; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
 .chart .grid { stroke: var(--line-soft); stroke-width: 1; }
 .chart .axis { fill: var(--faint); font: 10px var(--mono); }

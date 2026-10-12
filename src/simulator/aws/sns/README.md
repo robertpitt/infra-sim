@@ -139,6 +139,9 @@ Counters (rates per second, in frames), each next to the CloudWatch metric it co
 
 Gauges: `pending` (deliveries admitted and not finished, across subscriptions), `openGroups` (FIFO lanes with work, summed over subscriptions). The standard `in`, `ok`, `fail`, `latency` and `inflight` are the publish path.
 
+The node's dashboard (`dashboard.ts`) charts these under CloudWatch's names. Not charted, because not modelled: the
+`NumberOfNotificationsFilteredOut-*` breakdown by reason, and the SMS and mobile-push metrics.
+
 Probe state: `published`, `subscribers`, `pending`, `throttled`, `delivered`, `undelivered`, `filteredOut`, `duplicates`, `overflow`, `redriven`, `redriveFailed`, `openGroups` (all totals since the start), `maxMessageSize` (the limit in force, KB) and `backlog` (pending per subscriber).
 
 ## Not yet simulated

@@ -227,8 +227,15 @@ retries), `transitionsThrottled` (`ExecutionThrottled`: transitions that had to 
 down the fallback path), `compensations` (fallback states run), `duplicates`, `historyExceeded` (executions failed at the
 history quota), `iterations` (Map items started), `childExecutions` (Distributed Map children).
 
-Gauges: `running` (this state machine's open executions), `waitingForTransition` (its transitions in the line now).
+Gauges: `running` (this state machine's open executions), `waitingForTransition` (its transitions in the line now),
+`openExecutions` (OpenExecutionCount: Standard executions open in the account and Region), `transitionRefillRate` (the
+StateTransition bucket's ProvisionedRefillRate).
 Distribution: `executionTime` (`ExecutionTime`, ms, from start to end, for every outcome).
+
+The node's dashboard (`dashboard.ts`) charts these under CloudWatch's names; a Task edge's (`aws.stepfunctions.task`)
+breaks its calls down by the error a retrier matches (`fail.Timeout` is ServiceIntegrationsTimedOut). Not charted, because
+not modelled: ExecutionsAborted and the redrive metrics, activities, Express billing metrics, the StateTransition bucket's
+level (ConsumedCapacity against ProvisionedBucketSize), and the API throttling metrics for anything but StartExecution.
 
 Probe state: the gauges, `openInRegion` (Standard executions open in the account and Region, every state machine's), and
 every total above.

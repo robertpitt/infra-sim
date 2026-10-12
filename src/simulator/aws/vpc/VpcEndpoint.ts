@@ -2,6 +2,7 @@ import { Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
 import * as Setting from "../../Setting.ts"
 import * as Aws from "../provider.ts"
+import { vpcEndpointDashboard } from "./dashboard.ts"
 import { hop } from "./Hop.ts"
 import { source } from "./sources.ts"
 
@@ -61,6 +62,7 @@ export const VpcEndpoint = Aws.component({
   icon: "link",
   accent: "#8c4fff",
   docs: source.endpointQuotas,
+  dashboard: vpcEndpointDashboard,
   limits: [
     { label: "Interface endpoint bandwidth", value: "10 Gbps per zone, scaling to 100 Gbps", adjustable: false, source: source.endpointQuotas },
     { label: "Gateway endpoints", value: "S3 and DynamoDB, same Region only", adjustable: false, source: source.gatewayEndpointsS3, note: "Not reachable from on premises, peered VPCs in other Regions or a transit gateway." },

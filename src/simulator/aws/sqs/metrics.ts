@@ -10,6 +10,8 @@ export const makeTallies = (meter: Meter) => {
   return {
     /** NumberOfMessagesSent: messages a caller sent that were accepted. Messages moved by a redrive policy or a redrive aren't included, as in AWS. */
     sent: t("sent"),
+    /** The bytes of those messages: over `sent`, the average SentMessageSize. */
+    sentBytes: t("sentBytes"),
     /** NumberOfMessagesReceived: every message a ReceiveMessage returned, redeliveries included. */
     received: t("received"),
     /** NumberOfMessagesDeleted. */
@@ -33,7 +35,9 @@ export const makeTallies = (meter: Meter) => {
     /** NumberOfEmptyReceives: an estimate (see the README): idle long-poll waits of the mapping's pollers. */
     emptyReceives: t("emptyReceives"),
     /** Everything accepted into the queue, including internal moves. Total only. */
-    enqueued: new Tally(undefined)
+    enqueued: new Tally(undefined),
+    /** SentMessageSize: each sent message's size in bytes, sampled once per send call (a batch's messages share a size). */
+    sentMessageSize: meter.sampler("sentMessageSize")
   }
 }
 

@@ -16,7 +16,17 @@ import {
 } from "./config.ts"
 import { Publisher } from "./events.ts"
 import { decide, type Fate } from "./fate.ts"
-import { HEALTHY, PAUSED, STATUS_NAMES, type Enforcement } from "./reputation.ts"
+import { dashboard } from "./dashboard.ts"
+import {
+  type Enforcement,
+  HEALTHY,
+  PAUSE_BOUNCE_RATE,
+  PAUSE_COMPLAINT_RATE,
+  PAUSED,
+  REVIEW_BOUNCE_RATE,
+  REVIEW_COMPLAINT_RATE,
+  STATUS_NAMES
+} from "./reputation.ts"
 import { sources } from "./sources.ts"
 import { AccountState } from "./standing.ts"
 
@@ -55,6 +65,7 @@ export const Ses = Aws.component({
     { label: "Reputation pause", value: "bounce rate 10% or complaint rate 0.5%, if the review ends unresolved", adjustable: false, source: sources.reputation },
     { label: "Event destinations", value: "10 per configuration set; CloudWatch, Firehose, SNS, EventBridge", adjustable: false, source: sources.quotas }
   ],
+  dashboard,
   highlights: [
     { gauge: "bounceRate", label: "bounce rate", format: "percent" },
     { gauge: "complaintRate", label: "complaint rate", format: "percent" },
@@ -110,6 +121,10 @@ export const Ses = Aws.component({
       const suppressedC = node.meter.counter("suppressed")
       const publishedC = node.meter.counter("events.published")
       const lostC = node.meter.counter("events.lost")
+      // Sends refused by each limit (all are fail.Throttled): the per-second rate, the rolling daily quota, large-message bandwidth.
+      const throttledRateC = node.meter.counter("throttled.rate")
+      const throttledDailyC = node.meter.counter("throttled.daily")
+      const throttledBandwidthC = node.meter.counter("throttled.bandwidth")
 
       const publisher = new Publisher(node.out("events"), (failure) => {
         if (failure === undefined) {
@@ -228,6 +243,17 @@ export const Ses = Aws.component({
       node.meter.gaugeUnsafe("quotaUsed", () => account.daily.used(fast.now()) / dailyQuota(fast.account() as Aws.Account))
       node.meter.gaugeUnsafe("suppressionList", () => account.listed)
       node.meter.gaugeUnsafe("pending", () => publisher.pending)
+      // The account's limits as GetSendQuota reports them (Max24HourSend, MaxSendRate), and the reputation thresholds at
+      // which AWS reviews, then may pause, the account: the lines the dashboard reads the rest against.
+      node.meter.gaugeUnsafe("dailyQuota", () => dailyQuota(fast.account() as Aws.Account))
+      node.meter.gaugeUnsafe("maxSendRate", () => {
+        const q = fast.account() as Aws.Account
+        return q.sesSandbox ? q.sesSandboxSendingRate : q.sesSendingRate
+      })
+      node.meter.gaugeUnsafe("bounceRateReview", () => REVIEW_BOUNCE_RATE)
+      node.meter.gaugeUnsafe("bounceRatePause", () => PAUSE_BOUNCE_RATE)
+      node.meter.gaugeUnsafe("complaintRateReview", () => REVIEW_COMPLAINT_RATE)
+      node.meter.gaugeUnsafe("complaintRatePause", () => PAUSE_COMPLAINT_RATE)
 
       const refuse = (reason: string) => {
         t.refused++
@@ -265,15 +291,18 @@ export const Ses = Aws.component({
           // The rolling daily quota first, then the per-second rate: a throttled send is dropped, not queued, and takes nothing.
           if (account.daily.used(now) + n > dailyQuota(q)) {
             t.throttledDaily++
+            throttledDailyC.n++
             return Effect.fail(Throttled({ node: node.id, reason: "ThrottlingException: Daily message quota exceeded" }))
           }
           const rate = q.sesSandbox ? q.sesSandboxSendingRate : q.sesSendingRate
           if (!node.limiter.takeUnsafe(rateKey, { rate, burst: rate }, n)) {
             t.throttledRate++
+            throttledRateC.n++
             return Effect.fail(Throttled({ node: node.id, reason: "ThrottlingException: Maximum sending rate exceeded" }))
           }
           if (perMessage > LARGE_MESSAGE_BYTES && !node.limiter.takeUnsafe(bandwidthKey, { rate: LARGE_MESSAGE_BANDWIDTH, burst: LARGE_MESSAGE_BANDWIDTH }, encoded)) {
             t.throttledBandwidth++
+            throttledBandwidthC.n++
             return Effect.fail(Throttled({ node: node.id, reason: "ThrottlingException: bandwidth throttling of large messages" }))
           }
 

@@ -177,9 +177,15 @@ CloudWatch's names where there is one. Counters are per-second rates in a frame;
 | `cache.hit`, `cache.miss` | rate | CloudWatch CacheHitCount and CacheMissCount. |
 | `throttled.usagePlan`, `throttled.quota`, `throttled.stage`, `throttled.account` | rate | Which layer threw the 429. |
 | `auth.invocations`, `auth.cacheHit`, `auth.denied`, `auth.failed` | rate | Lambda authorizer calls, cached answers, 403s, and 500s from a failed authorizer. |
+| `dataProcessed` | rate | CloudWatch DataProcessed (HTTP APIs): bytes of the requests the gateway admitted (responses carry no size). |
 | `inflight` | gauge | Requests inside the gateway. |
 | `accountTokens` | gauge | Tokens in the account bucket (shared by the region). |
+| `accountBurst` | gauge | The account bucket's size (its burst), to read `accountTokens` against. |
 | `cacheEntries` | gauge | Entries held in the cache (including ones that have expired but not been replaced). |
+
+The dashboard (`dashboard.ts`) shows Count, 4XXError and 5XXError (and their Average, the error rate), Latency,
+IntegrationLatency, CacheHitCount and CacheMissCount, DataProcessed, and beyond CloudWatch the 429s by throttle layer, the
+gateway's error responses by status, the authorizer's calls and the account's token bucket.
 
 Probe state: `accountTokens`, `stageTokens` (the lowest route bucket; 0 when there is no stage limit), and running totals `served`, `throttled` (all 429s), `quotaExceeded`, `timeouts`, `tooLarge`, `integrationErrors`, `authorizerInvocations`, `authorizerDenied`, `authorizerFailures`, `cacheHits`, `cacheMisses`, `cacheEntries`.
 

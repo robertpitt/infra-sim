@@ -5,7 +5,7 @@ import type { Cancel } from "../../Flow.ts"
 import { type CallFailure, type Message, Rejected, Throttled, Unavailable } from "../../Message.ts"
 import { bodyBytes, records } from "../../kit/Shape.ts"
 import type { Tally } from "../../kit/Tally.ts"
-import type { Sampler } from "../../Telemetry.ts"
+import type { Counter as MeterCounter, Meter, Sampler } from "../../Telemetry.ts"
 import type { Cluster, Shard } from "./cluster.ts"
 import { type Config, heapBytes, INDEXING_PRESSURE_SHARE, INSTANCE_TYPES, payloadBytes, REPLICA_PRESSURE_FACTOR } from "./config.ts"
 import { type DataNode, Task } from "./node.ts"
@@ -40,6 +40,35 @@ export interface Context {
   readonly tallies: Record<Counter, Tally>
   /** From a document's creation to it being searchable, in ms. */
   readonly searchable: Sampler
+  readonly metrics: Metrics
+}
+
+/** What CloudWatch publishes of a domain's shard-level work, beyond the tallies: latencies, and rejections as it counts them. */
+export interface Metrics {
+  /** One shard's query, from a search thread taking it up to its answer (SearchLatency), in ms. */
+  readonly searchLatency: Sampler
+  /** One shard's indexing, on a primary or a replica, from a write thread taking it up to done (IndexingLatency), in ms. */
+  readonly indexingLatency: Sampler
+  /** Shard-level writes refused by a full write queue (ThreadpoolWriteRejected): tasks, where `writeRejected` counts documents. */
+  readonly writeTasksRejected: MeterCounter
+  /** Rejections for indexing pressure: of a request on its coordinating node, of a shard's part on its primary, of a replica's copy. */
+  readonly coordinatingWriteRejected: MeterCounter
+  readonly primaryWriteRejected: MeterCounter
+  readonly replicaWriteRejected: MeterCounter
+}
+
+/** The metrics on `meter`, or ones that count into nothing (a mechanism tested on its own). */
+export const makeMetrics = (meter: Meter | undefined): Metrics => {
+  const counter = (name: string): MeterCounter => meter?.counter(name) ?? { n: 0 }
+  const sampler = (name: string): Sampler => meter?.sampler(name) ?? { add: () => {} }
+  return {
+    searchLatency: sampler("searchLatency"),
+    indexingLatency: sampler("indexingLatency"),
+    writeTasksRejected: counter("writeTasksRejected"),
+    coordinatingWriteRejected: counter("coordinatingWriteRejected"),
+    primaryWriteRejected: counter("primaryWriteRejected"),
+    replicaWriteRejected: counter("replicaWriteRejected")
+  }
 }
 
 /** Answer a call once: `undefined` for success. */
@@ -109,6 +138,7 @@ export const write = (ctx: Context, message: Message, reply: Answer): Cancel | C
   // Coordinating indexing pressure: the whole request's bytes are held on the node that received it.
   if (coordinator.indexingBytes + bytes > pressureLimit(c)) {
     tallies.pressureRejected.add(docs)
+    ctx.metrics.coordinatingWriteRejected.n++
     return Throttled({ node: ctx.id, reason: `${REJECTED}: rejected execution of coordinating operation (indexing pressure: 10% of the heap in flight)` })
   }
   coordinator.indexingBytes += bytes
@@ -152,13 +182,17 @@ const dispatch = (part: WritePart): void => {
   if (node !== part.bulk.coordinator) {
     if (node.indexingBytes + part.bytes > pressureLimit(c)) {
       tallies.pressureRejected.add(part.docs)
+      ctx.metrics.primaryWriteRejected.n++
       return settle(part, "pressure")
     }
     node.indexingBytes += part.bytes
     part.heldOn = node
   }
   const demand = c.indexing.cpuPerRequest + part.docs * c.indexing.cpuPerDocument
-  const task = new Task("write", demand, () => indexed(part, shard, node, demand), () => {
+  const task: Task = new Task("write", demand, () => {
+    ctx.metrics.indexingLatency.add(fast.now() - task.startedAt)
+    indexed(part, shard, node, demand)
+  }, () => {
     // The primary's node failed under it: the coordinating node retries once the shard has a primary again.
     tallies.lostTasks.add(1)
     release(part)
@@ -167,6 +201,7 @@ const dispatch = (part: WritePart): void => {
   if (!node.submit(task)) {
     release(part)
     tallies.writeRejected.add(part.docs)
+    ctx.metrics.writeTasksRejected.n++
     settle(part, "rejected")
   }
 }
@@ -195,11 +230,13 @@ const indexed = (part: WritePart, shard: Shard, primary: DataNode, demand: numbe
     if (node === primary || !node.up) continue
     if (node.replicaBytes + part.bytes > limit) {
       tallies.replicaRejected.add(part.docs)
+      ctx.metrics.replicaWriteRejected.n++
       continue
     }
     node.replicaBytes += part.bytes
     part.replicasLeft++
-    const replica = new Task("write", demand, () => {
+    const replica: Task = new Task("write", demand, () => {
+      ctx.metrics.indexingLatency.add(ctx.fast.now() - replica.startedAt)
       node.replicaBytes -= part.bytes
       tallies.replicated.add(part.docs)
       replicaDone(part)
@@ -305,8 +342,9 @@ const query = (part: SearchPart): void => {
   if (best === undefined) return answered(part, part.wasRejected ? "rejected" : "unavailable")
   part.tried.push(best.index)
   const c = fast.settings()
-  const task = new Task("search", Distribution.latencyMs(c.search.cpuPerShard, fast.random), () => {
+  const task: Task = new Task("search", Distribution.latencyMs(c.search.cpuPerShard, fast.random), () => {
     tallies.searchShards.add(1)
+    ctx.metrics.searchLatency.add(fast.now() - task.startedAt)
     answered(part, "ok")
   }, () => {
     tallies.lostTasks.add(1)

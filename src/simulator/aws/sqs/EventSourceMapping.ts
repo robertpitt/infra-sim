@@ -6,6 +6,7 @@ import { batchOf, type Lease, type LeasedRecord, type Pull } from "../../Protoco
 import type { Counter } from "../../Telemetry.ts"
 import type { TimerHandle } from "../../VirtualTime.ts"
 import { docs } from "../docs.ts"
+import { mappingDashboard } from "./dashboard.ts"
 import {
   Consumer,
   ESM_CEILING,
@@ -40,6 +41,8 @@ interface Poller {
   readonly order: Array<LeasedRecord>
   /** The batching window while gathering, or the wait before a throttled batch is tried again. */
   timer: TimerHandle | undefined
+  /** Records in the invocation in flight (or last sent), for counting what failed. */
+  sent: number
   /** Position in `gathering`, while gathering. */
   slot: number
   readonly done: Edge.Done
@@ -102,6 +105,7 @@ export const EventSourceMapping = Connector.make({
   from: { protocol: "pull", component: "aws.sqs", port: "deliver" },
   // Lambda's poller: a fleet (an ECS service, an Auto Scaling group) drains a queue with workers of its own (core.poller).
   to: { protocol: "invoke", fleets: false },
+  dashboard: mappingDashboard,
   config: Consumer,
   state: Schema.Struct({
     /** Concurrent batches the mapping is running at now. */
@@ -113,11 +117,17 @@ export const EventSourceMapping = Connector.make({
     Effect.sync(() => {
       const mapping = new Mapping(ctx.source, ctx.sink, ctx.fast, {
         itemFailures: ctx.meter.counter("itemFailures"),
-        itemFailuresIgnored: ctx.meter.counter("itemFailuresIgnored")
+        itemFailuresIgnored: ctx.meter.counter("itemFailuresIgnored"),
+        polled: ctx.meter.counter("polled"),
+        batches: ctx.meter.counter("batches"),
+        invoked: ctx.meter.counter("invoked"),
+        failedInvoke: ctx.meter.counter("failedInvoke")
       })
       // On the edge's meter, beside transport's own counts, so a chart of the edge shows the mapping scaling.
       ctx.meter.gaugeUnsafe("concurrency", () => mapping.status().concurrency)
       ctx.meter.gaugeUnsafe("busy", () => mapping.status().busy)
+      // The batch size it gathers to (a FIFO batch is at most ten), to read the average batch against.
+      ctx.meter.gaugeUnsafe("batchSize", () => mapping.batchSize())
       return mapping.start()
     })
 })
@@ -143,6 +153,14 @@ class Mapping {
       readonly itemFailures: Counter
       /** Records a function reported failed while the mapping doesn't act on reports: deleted all the same. */
       readonly itemFailuresIgnored: Counter
+      /** PolledEventCount: records the pollers received from the queue. */
+      readonly polled: Counter
+      /** Invocations sent, a throttled batch's retries included. */
+      readonly batches: Counter
+      /** InvokedEventCount: the records in those invocations (a batch retried after a throttle counts again, as in AWS). */
+      readonly invoked: Counter
+      /** FailedInvokeEventCount: records in invocations that failed (an error, a throttle, a timeout). */
+      readonly failedInvoke: Counter
     }
   ) {
     this.scalingFor = fast.settings()
@@ -158,6 +176,12 @@ class Mapping {
     this.source.ready(this.pump)
     this.fast.after(0, this.pump, undefined)
     return { probe: Effect.sync(() => this.status()) }
+  }
+
+  /** The batch size the pollers gather to. */
+  batchSize(): number {
+    const size = this.fast.settings().batchSize
+    return this.source.traits.ordered ? Math.min(size, this.source.traits.maxTake ?? Infinity) : size
   }
 
   status(): { concurrency: number; busy: number } {
@@ -223,6 +247,7 @@ class Mapping {
       p.held.push(lease)
       p.heldCount += lease.count
       p.heldBytes += lease.bytes
+      this.counts.polled.n += lease.count
       // A FIFO batch is one receive (it is at most ten messages and may span groups).
       if (source.traits.ordered) break
     }
@@ -256,6 +281,9 @@ class Mapping {
     p.order.length = 0
     const batch = batchOf(p.held, MAX_BATCH_BYTES, this.fast.settings().reportBatchItemFailures ? p.order : undefined)
     if (batch === undefined) return this.release(p)
+    p.sent = batch.count
+    this.counts.batches.n++
+    this.counts.invoked.n += batch.count
     this.sink.call(batch, INVOKE, p.done)
   }
 
@@ -275,6 +303,7 @@ class Mapping {
       this.release(p)
       return this.pump()
     }
+    this.counts.failedInvoke.n += p.sent
     // Either way the mapping backs off: it lowers the concurrency it is working up to, but never below where it starts.
     this.ramp = Math.max(this.scaling.initial, this.ramp * 0.9)
     if (failure._tag === "Throttled") {
@@ -335,6 +364,7 @@ class Mapping {
           heldBytes: 0,
           order: [],
           timer: undefined,
+          sent: 0,
           slot: -1,
           done: (failure, items) => this.outcome(created, failure, items)
         }

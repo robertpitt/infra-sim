@@ -5,6 +5,7 @@ import * as Aws from "../provider.ts"
 import { classOf, isMysqlFamily } from "./catalog.ts"
 import { Config } from "./config.ts"
 import { DEFAULT_POLICY } from "./client.ts"
+import { database } from "./dashboard.ts"
 import { REFUSED } from "./connections.ts"
 import { Database, makeStats } from "./database.ts"
 import type { Database as DatabaseOffer } from "./endpoint.ts"
@@ -51,6 +52,7 @@ export const Rds = Aws.component({
     { label: "Multi-AZ standby", value: "Serves no reads (DB instance); two readable standbys (DB cluster)", adjustable: false, source: SOURCES.multiAzInstance },
     { label: "DB instances, clusters, proxies, storage", value: "Per region, in the account quotas", adjustable: true, source: SOURCES.quotas }
   ],
+  dashboard: database,
   highlights: [
     { gauge: "connections", label: "conns" },
     { gauge: "cpu", label: "cpu", format: "percent" },
@@ -121,7 +123,7 @@ export const Rds = Aws.component({
       /** What the connectors on edges into the database, and a proxy in front of it, reach it by. */
       const offer: DatabaseOffer = {
         kind: "rds.database",
-        attach: (key, policy) => db.attach(key, policy),
+        attach: (key, policy, counters) => db.attach(key, policy, counters),
         // Readers are the writer's class, so one instance of either has the same limit.
         maxConnections: () => db.derived().maxConnections,
         connections: (key) => {
@@ -144,9 +146,15 @@ export const Rds = Aws.component({
       node.meter.gaugeUnsafe("cpu", () => db.writer.utilization())
       node.meter.gaugeUnsafe("cpuQueue", () => db.writer.cpu.queued)
       node.meter.gaugeUnsafe("diskQueue", () => db.writer.diskQueue(fast.now()))
+      // The IOPS the writer's volume serves, to read ReadIOPS and WriteIOPS against. Not for Aurora, whose cluster volume
+      // has no such limit (an engine is for life, so this holds for the whole run).
+      if (Number.isFinite(db.writer.iops())) node.meter.gaugeUnsafe("provisionedIops", () => db.writer.iops())
       node.meter.gaugeUnsafe("readerConnections", () => db.reader.server.open)
       node.meter.gaugeUnsafe("readerCpu", () => db.reader.utilization())
       node.meter.gaugeUnsafe("readers", () => db.reader.instances())
+      // CPUUtilization as CloudWatch averages it, over each frame; `cpu` and `readerCpu` are the instant's.
+      node.meter.gaugeUnsafe("cpuUtilization", () => db.writer.cpuSince(fast.now()))
+      node.meter.gaugeUnsafe("readerCpuUtilization", () => db.reader.cpuSince(fast.now()))
       node.meter.gaugeUnsafe("failingOver", () => (db.failover.down(fast.now()) ? 1 : 0))
 
       return {

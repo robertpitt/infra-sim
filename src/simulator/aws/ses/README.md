@@ -218,11 +218,17 @@ Counters (per second in frames; names follow the SES event and metric types):
 | `open`, `click` | engagement events (when subscribed) |
 | `suppressed` | recipients stopped by the suppression list |
 | `events.published`, `events.lost` | events a destination took, and gave up on |
+| `throttled.rate`, `throttled.daily`, `throttled.bandwidth` | sends refused by the maximum send rate, the daily quota, large-message bandwidth |
 | `fail.Throttled`, `fail.Rejected` | recorded for every node: throttles; refusals, paused sends and sandbox refusals |
 
 Gauges: `bounceRate` and `complaintRate` (the `Reputation.BounceRate` and `Reputation.ComplaintRate` metrics, as
 fractions, shown on the node), `reputationStatus` (0 healthy, 1 under review, 2 paused), `dailyUsed`, `quotaUsed` (share of
-the daily quota), `suppressionList` (addresses on it), `pending` (events being delivered).
+the daily quota), `suppressionList` (addresses on it), `pending` (events being delivered), `dailyQuota` and `maxSendRate`
+(GetSendQuota's Max24HourSend and MaxSendRate), and the reputation thresholds as constant lines: `bounceRateReview`,
+`bounceRatePause`, `complaintRateReview`, `complaintRatePause`.
+
+The node's dashboard (`dashboard.ts`) charts these under SES's event and CloudWatch names. Not charted, because not
+modelled: RenderingFailure, Subscription, and the per-configuration-set and per-ISP dimensions.
 
 Probe state: `status`, `sandbox`, `bounceRate`, `complaintRate`, `daily {used, quota}`, `recipients`, `delivered`,
 `bounced {permanent, transient}`, `complaints`, `rejected`, `delayed`, `suppressed`, `suppressionList`, `addresses`,

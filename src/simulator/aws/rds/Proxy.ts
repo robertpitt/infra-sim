@@ -4,6 +4,7 @@ import type { CallFailure, Reply } from "../../Message.ts"
 import { totals } from "../../kit/Tally.ts"
 import * as Aws from "../provider.ts"
 import { forward, makeProxyStats, ProxyRuntime } from "./borrow.ts"
+import { proxy as dashboard } from "./dashboard.ts"
 import { SOURCES } from "./limits.ts"
 import { ProxyConfig } from "./proxyConfig.ts"
 import type { Endpoint } from "./endpoint.ts"
@@ -38,6 +39,7 @@ export const RdsProxy = Aws.component({
     { label: "Failover", value: "Up to 66% faster for Aurora Multi-AZ, by bypassing DNS caches", adjustable: false, source: SOURCES.proxyConcepts },
     { label: "Availability Zones", value: "Runs in a VPC with at least two subnets in different Availability Zones", adjustable: false, source: SOURCES.proxyNetwork, note: "A zone outage doesn't take the proxy down." }
   ],
+  dashboard,
   highlights: [
     { gauge: "borrowed", label: "db conns" },
     { gauge: "waiting", label: "waiting" },
@@ -78,7 +80,7 @@ export const RdsProxy = Aws.component({
       const stats = makeProxyStats(node.meter)
       const proxy: ProxyRuntime = new ProxyRuntime(node.id, fast, node.out("out")[0], stats, (): boolean => proxy.target()?.mysql() ?? true)
       /** What the connectors of its clients reach it by. */
-      const offer: Endpoint = { kind: "rds.proxy", attach: (key, policy) => proxy.attach(key, policy) }
+      const offer: Endpoint = { kind: "rds.proxy", attach: (key, policy, counters) => proxy.attach(key, policy, counters) }
       yield* Effect.addFinalizer(() => Effect.sync(() => proxy.stop()))
 
       // Idle client connections close at the idle timeout whether or not anything calls (a pinned one frees its slot).

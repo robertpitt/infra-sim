@@ -9,6 +9,7 @@ import type { TimerHandle } from "../../VirtualTime.ts"
 import * as Aws from "../provider.ts"
 import { isDenied, identityOf, makeAuthorizerCache, Verdict } from "./authorizer.ts"
 import { cacheKeyOf, makeResponseCache } from "./cache.ts"
+import { dashboard } from "./dashboard.ts"
 import {
   AUTHORIZER_EVENT_BYTES,
   AUTHORIZER_TIMEOUT_MS,
@@ -75,6 +76,7 @@ export const ApiGateway = Aws.component({
     { label: "Gateway responses", value: "429 throttled or quota exceeded, 413 too large, 504 integration timeout, 403 denied, 500 authorizer failure", adjustable: false, source: GATEWAY_RESPONSES_URL },
     { label: "Response cache", value: "0.5 to 237 GB, TTL 0 to 3,600 s (300 default), responses up to 1,048,576 bytes", adjustable: false, source: CACHING_URL, note: "GET methods only unless overridden." }
   ],
+  dashboard,
   highlights: [
     { gauge: "inflight", label: "in flight" },
     { rate: "fail.Throttled", label: "429/s" },
@@ -135,6 +137,8 @@ export const ApiGateway = Aws.component({
       const authFailed = meter.counter("auth.failed")
       const integrationLatency = meter.sampler("integrationLatency")
       const authLatency = meter.sampler("authLatency")
+      // DataProcessed (HTTP APIs): the bytes of the requests the gateway admitted.
+      const dataProcessed = meter.counter("dataProcessed")
 
       // What the settings and quotas mean is worked out again only when either is replaced.
       let planFrom: Settings | undefined
@@ -157,6 +161,7 @@ export const ApiGateway = Aws.component({
       }
       meter.gaugeUnsafe("inflight", () => inflight)
       meter.gaugeUnsafe("accountTokens", () => throttle.accountLevel(planOf(fast.settings())))
+      meter.gaugeUnsafe("accountBurst", () => planOf(fast.settings()).account.burst)
       meter.gaugeUnsafe("cacheEntries", () => responseCache.size())
 
       // ---- One request, as a state machine -------------------------------------------------------------------------
@@ -363,6 +368,7 @@ export const ApiGateway = Aws.component({
             return Effect.fail(Throttled({ node: node.id, reason: THROTTLE_REASON[admission] }))
           }
           inflight++
+          dataProcessed.n += message.bytes
           const overhead = Distribution.latencyMs(c.overhead, fast.random)
           return Effect.callback<void, CallFailure>((resume) => {
             const r = new Request(message, c, plan, resume)

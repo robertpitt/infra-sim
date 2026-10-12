@@ -205,10 +205,18 @@ They are warnings, not errors: the design still runs, the numbers AWS would refu
 
 | Name | Component | Kind | Meaning |
 | --- | --- | --- | --- |
-| `connections` | NAT gateway | gauge | Connections open now, summed over destinations |
-| `ErrorPortAllocation` | NAT gateway | rate | New connections refused for want of a free port |
-| `drops` | NAT gateway, interface endpoint | rate | Calls dropped for want of bandwidth |
-| `bytes` | NAT gateway, endpoint | rate | Bytes carried |
+| `connections` | NAT gateway | gauge | Connections open now, summed over destinations (ActiveConnectionCount) |
+| `connectionAttempts` | NAT gateway | rate | New connections asked for, one per call to a destination (ConnectionAttemptCount) |
+| `connectionsEstablished` | NAT gateway | rate | Of those, the ones given a source port (ConnectionEstablishedCount) |
+| `ErrorPortAllocation` | NAT gateway | rate | New connections refused for want of a free port (ErrorPortAllocation) |
+| `busiestDestination` | NAT gateway | gauge | Connections open to the destination with the most |
+| `portLimit` | NAT gateway | gauge | Simultaneous connections the addresses allow to one destination |
+| `drops` | NAT gateway, interface endpoint | rate | Calls dropped for want of bandwidth (PacketsDropCount, PacketsDropped: calls, not packets) |
+| `bytes` | NAT gateway, endpoint | rate | Bytes carried, requests only (BytesOutToDestination and BytesInFromSource; BytesProcessed) |
+
+The endpoint's `in` and `inflight` (the framework's) stand for an interface endpoint's NewConnections and ActiveConnections.
+AWS publishes no metrics for gateway endpoints. The dashboards (`dashboard.ts`) chart these as CloudWatch does, with the
+NAT gateway's ports used to its busiest destination (`busiestDestination` over `portLimit`) to read them against.
 
 Probe state: **VPC**: `addresses`, `usablePerSubnet`, `subnets`, `usableAddresses`. **NAT gateway**: `connections`,
 `busiest` (the most open to one destination), `limit`, `portAllocationErrors`, `drops`, `bytes`. **VPC endpoint**:

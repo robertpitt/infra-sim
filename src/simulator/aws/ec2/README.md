@@ -204,10 +204,24 @@ deregistration delay).
 Gauges: `desired`, `inService`, `pending` (requested and launching), `draining`, `busy`, `queued`, `utilization` (busy over
 serving workers, 0–1), `cpu` (average over warmed instances, 0–1), `cpuTotal` (`cpu` × instances in service),
 `requestCount` (requests in the last minute), `requestCountPerTarget`, `onDemand`, `spot`, `vcpus` (the group's and its
-pool's), `warm`, `warmPreparing`, `spotNoticed`, `inService.<zone>`.
+pool's), `warm`, `warmPreparing`, `warmDesired` (the size the pool is kept at: `WarmPoolDesiredCapacity`; registered once the
+group has a warm pool), `spotDesired` (the Spot instances the purchase split asks for at the desired capacity; registered
+once the group buys Spot), `spotNoticed`,
+`vcpusOnDemand` and `vcpusSpot` (every instance's in the region, the ledger the quotas are checked against),
+`vcpuQuotaOnDemand` and `vcpuQuotaSpot` (the account's quotas now), `inService.<zone>`.
 
-Counters (rates, or `total.` in assertions): `launches`, `warmStarts`, `launchRefused`, `spotInterruptions`,
-`rebalanceRecommendations`; and the node's own `in`, `ok`, `fail`, `fail.<Tag>`.
+Counters (rates, or `total.` in assertions): `launches`, `warmStarts`, `launchRefused`, `terminations` (instances that
+launched and are now terminated), `spotInterruptions`, `rebalanceRecommendations`; and the node's own `in`, `ok`, `fail`,
+`fail.<Tag>`.
+
+The dashboard (`dashboard.ts`) charts them as the console's Monitoring tab and CloudWatch do: the group metrics
+(`GroupDesiredCapacity`, `GroupInServiceInstances`, `GroupPendingInstances`, `GroupTerminatingInstances`), CPU
+(`CPUUtilization`, and target tracking's `ASGAverageCPUUtilization`), requests and response time as the load balancer
+counts them, `RequestCountPerTarget`, launches and terminations (the activity history), the warm pool
+(`WarmPoolWarmedCapacity`, `WarmPoolPendingCapacity`, `WarmPoolDesiredCapacity`), purchase options, Spot interruption
+notices and rebalance recommendations (EventBridge events, not metrics), and running vCPUs against the quotas (AWS/Usage
+`ResourceCount`). Not charted, because nothing here models them: `GroupStandbyInstances` (standby), the
+`Terminating:Retained` metrics, network, disk and status-check metrics, and CPU credits.
 
 Probe: the gauges' values, the warm pool, totals (`served`, `errors`, `refused`, `lost`, `launched`, `warmStarts`,
 `refusedLaunches`, `replaced`, `spotInterruptions`) and every instance (name, zone, state, phase, purchase option, how it

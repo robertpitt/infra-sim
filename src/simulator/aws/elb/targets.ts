@@ -2,10 +2,12 @@ import { Duration, Effect, Schema } from "effect"
 import * as Connector from "../../Connector.ts"
 import * as Edge from "../../Edge.ts"
 import { shapeCall } from "../../connectors/Link.ts"
+import type { Dashboard } from "../../Dashboard.ts"
 import * as Group from "../../fleet/TargetGroup.ts"
 import type { Message } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
 import { request, URL } from "./config.ts"
+import { albTargetGroupDashboard, lambdaTargetDashboard, nlbTargetGroupDashboard } from "./dashboard.ts"
 import { type Listener, listenerOf } from "./listener.ts"
 
 /**
@@ -199,6 +201,7 @@ const targetGroup = <C extends Connector.Settings>(o: {
   readonly docs: string
   readonly config: C
   readonly settings: (c: C["Type"]) => Group.Settings
+  readonly dashboard: Dashboard
 }) =>
   Connector.make({
     type: o.type,
@@ -207,6 +210,7 @@ const targetGroup = <C extends Connector.Settings>(o: {
     description: o.description,
     icon: "balancer",
     docs: o.docs,
+    dashboard: o.dashboard,
     // Naming the port makes it more specific than the load balancer's IP-target connector, which also fits a fleet.
     from: { protocol: "invoke", component: o.component, port: "out" },
     to: { protocol: "fleet" },
@@ -222,7 +226,12 @@ const targetGroup = <C extends Connector.Settings>(o: {
           shapeCall
         )
         if (attached) {
-          listener.groups.set(ctx.id, { crossZone: () => settings().crossZone, healthyIn: (z) => group.healthyIn(z), registeredIn: (z) => group.registeredIn(z) })
+          listener.groups.set(ctx.id, {
+            crossZone: () => settings().crossZone,
+            healthyIn: (z) => group.healthyIn(z),
+            registeredIn: (z) => group.registeredIn(z),
+            unhealthy: () => group.status().unhealthy
+          })
         }
         let sent = 0
         let lastSent = 0
@@ -245,7 +254,10 @@ const targetGroup = <C extends Connector.Settings>(o: {
       })
   })
 
-/** A target that is one address: an IP target, a Lambda function. One try, the caller's operation, no timeout of its own. */
+/**
+ * A target that is one address: an IP target, a Lambda function. One try, the caller's operation, no timeout of its own.
+ * With `countBytes`, it counts the bytes it carries on its edge (`processedBytes`: LambdaTargetProcessedBytes).
+ */
 const direct = (o: {
   readonly type: string
   readonly component: string
@@ -255,6 +267,8 @@ const direct = (o: {
   readonly to: Connector.ToEnd<"invoke">
   readonly port?: string
   readonly register?: (listener: Listener, edge: string) => void
+  readonly dashboard?: Dashboard
+  readonly countBytes?: boolean
 }) =>
   Connector.make({
     type: o.type,
@@ -263,6 +277,7 @@ const direct = (o: {
     description: o.description,
     icon: "balancer",
     docs: o.docs,
+    ...(o.dashboard === undefined ? {} : { dashboard: o.dashboard }),
     from: { protocol: "invoke", component: o.component, ...(o.port === undefined ? {} : { port: o.port }) },
     to: o.to,
     config: Schema.Struct({ weight: Edge.Policy.fields.weight, request }),
@@ -273,7 +288,15 @@ const direct = (o: {
           if (listener.attached) o.register(listener, ctx.id)
         }
         const { fast, sink } = ctx
-        return { send: (message: Message, done?: Edge.Done) => sink.call(shapeCall(message, fast.settings()), Edge.once, done) }
+        if (o.countBytes !== true) return { send: (message: Message, done?: Edge.Done) => sink.call(shapeCall(message, fast.settings()), Edge.once, done) }
+        const processedBytes = ctx.meter.counter("processedBytes")
+        return {
+          send: (message: Message, done?: Edge.Done) => {
+            const shaped = shapeCall(message, fast.settings())
+            processedBytes.n += shaped.bytes
+            return sink.call(shaped, Edge.once, done)
+          }
+        }
       })
   })
 
@@ -284,7 +307,8 @@ export const AlbTargetGroup = targetGroup({
   description: "An Application Load Balancer's target group into a fleet: registers its units, checks their health every 30 s (5 passes, 2 failures), picks one per request (round robin, least outstanding requests, weighted random), with slow start, sticky sessions, a 300 s deregistration delay and cross-zone on.",
   docs: URL.albTargetGroups,
   config: AlbGroupConfig,
-  settings: albGroupSettings
+  settings: albGroupSettings,
+  dashboard: albTargetGroupDashboard
 })
 
 export const NlbTargetGroup = targetGroup({
@@ -294,7 +318,8 @@ export const NlbTargetGroup = targetGroup({
   description: "A Network Load Balancer's target group into a fleet: registers its units, checks them over TCP every 30 s (10 s timeout, 5 passes, 2 failures), keeps each flow on one target by a hash of its key, with a 300 s deregistration delay and cross-zone off.",
   docs: URL.nlbTargetGroupAttributes,
   config: NlbGroupConfig,
-  settings: nlbGroupSettings
+  settings: nlbGroupSettings,
+  dashboard: nlbTargetGroupDashboard
 })
 
 export const AlbLambdaTarget = direct({
@@ -305,7 +330,9 @@ export const AlbLambdaTarget = direct({
   description: "An Application Load Balancer's target group of type lambda: each request invokes the function synchronously and waits for it (no idle timeout); bodies over 1 MB are refused with 413, and a function error or throttle is a 502.",
   docs: URL.albLambda,
   to: { protocol: "invoke", component: "aws.lambda" },
-  register: (listener, edge) => void listener.lambdas.add(edge)
+  register: (listener, edge) => void listener.lambdas.add(edge),
+  dashboard: lambdaTargetDashboard,
+  countBytes: true
 })
 
 export const AlbIpTarget = direct({

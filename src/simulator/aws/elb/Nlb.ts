@@ -6,6 +6,7 @@ import { isNoTarget } from "../../fleet/TargetGroup.ts"
 import { type Cancel, noCancel } from "../../Flow.ts"
 import { type Call, type CallFailure, type Message, Unavailable } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
+import type { Counter } from "../../Telemetry.ts"
 import type { TimerHandle } from "../../VirtualTime.ts"
 import * as Aws from "../provider.ts"
 import { enabledZones, nodeHash, pickByWeight, rehash } from "./balancer.ts"
@@ -21,8 +22,9 @@ import {
   TICK_MS,
   URL
 } from "./config.ts"
+import { nlbDashboard } from "./dashboard.ts"
 import { ZonalDns } from "./dns.ts"
-import { type Listener, listenerOf } from "./listener.ts"
+import { hostsIn, type Listener, listenerOf } from "./listener.ts"
 import { type Count, count, NlbState, type TargetKind } from "./state.ts"
 
 export const NlbConfig = Schema.Struct({
@@ -66,6 +68,8 @@ interface Counters {
   readonly targetResets: Count
   readonly clientResets: Count
   readonly deadNode: Count
+  /** ProcessedBytes: the bytes of the connections the load balancer took (requests carry the only sizes there are). */
+  readonly processedBytes: Counter
 }
 
 /** One connection's request through the load balancer: the target group's answer raced against the idle timeout. */
@@ -154,6 +158,7 @@ export const Nlb = Aws.component({
   category: "network",
   icon: "balancer",
   accent: "#8c4fff",
+  dashboard: nlbDashboard,
   limits: [
     { label: "DNS TTL", value: `${DNS_TTL_MS / 1000} seconds`, adjustable: false, source: URL.howItWorks },
     { label: "Targets per Availability Zone", value: "500 (500 per load balancer with cross-zone on)", adjustable: true, source: URL.nlbQuotas },
@@ -181,7 +186,8 @@ export const Nlb = Aws.component({
         elbResets: count(meter, "elb.resets"),
         targetResets: count(meter, "target.resets"),
         clientResets: count(meter, "client.resets"),
-        deadNode: count(meter, "deadNode")
+        deadNode: count(meter, "deadNode"),
+        processedBytes: meter.counter("processedBytes")
       }
       const host: Host = {
         fast,
@@ -229,6 +235,8 @@ export const Nlb = Aws.component({
       meter.gaugeUnsafe("consumed.lcu", () => capacity.consumed)
       meter.gaugeUnsafe("peak.lcu", () => capacity.peak)
       meter.gaugeUnsafe("zones.inDns", () => dns.healthyZones)
+      meter.gaugeUnsafe("healthyHosts", () => hostsIn(listener, "healthy"))
+      meter.gaugeUnsafe("unhealthyHosts", () => hostsIn(listener, "unhealthy"))
 
       return {
         call: (message) => {
@@ -248,6 +256,7 @@ export const Nlb = Aws.component({
           const k = costsOf(s)
           capacity.admit(Math.max(k.perRequest, message.bytes * k.perByte), fast.now(), false)
           c.requests.add()
+          c.processedBytes.n += message.bytes
           host.active++
           const delay = Distribution.latencyMs(s.overhead, fast.random)
           return Effect.callback<void, CallFailure>((resume) => {

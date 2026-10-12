@@ -8,6 +8,7 @@ import { handler, type WorkHost } from "../ecs/work.ts"
 import * as Aws from "../provider.ts"
 import { NodeAutoscaler } from "./autoscaler.ts"
 import { Config, type Settings } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { BACKOFF_CAP_S, BACKOFF_FIRST_S, CONTAINER_START_MS, NODES_PER_GROUP, PAGES, PROGRESS_DEADLINE_S } from "./limits.ts"
 import { NodeGroup } from "./nodes.ts"
 
@@ -101,6 +102,7 @@ export const Eks = Aws.component({
     { label: "Managed node groups per cluster", value: "30", adjustable: true, source: PAGES.quotas },
     { label: "Progress deadline", value: `${PROGRESS_DEADLINE_S} s: a stalled rollout is reported, never rolled back`, adjustable: true, source: PAGES.deployment }
   ],
+  dashboard,
   highlights: [
     { gauge: "ready", label: "ready" },
     { gauge: "pending", label: "pending" },
@@ -230,6 +232,18 @@ export const Eks = Aws.component({
       meter.gaugeUnsafe("nodesDesired", () => group.desired)
       meter.gaugeUnsafe("requestedCpu", () => share(nodeTotals(), "cpu"))
       meter.gaugeUnsafe("requestedMemory", () => share(nodeTotals(), "memory"))
+      // As Container Insights reports them: CPU in use over the nodes' allocatable (node_cpu_utilization; a busy worker is
+      // its share of the pod's CPU request), pods of the revision being rolled out, and pods in CrashLoopBackOff.
+      meter.gaugeUnsafe("nodeCpu", () => {
+        const room = nodeTotals().room.cpu
+        return room > 0 ? ((pods.busy / workersPerPod()) * demand().cpu) / room : 0
+      })
+      meter.gaugeUnsafe("newPods", () => rollout.status().fresh)
+      meter.gaugeUnsafe("crashLooping", () => {
+        let n = 0
+        for (const u of pods.units) if (u.state === "starting" && u.phaseName === "CrashLoopBackOff") n++
+        return n
+      })
       gaugeZones()
 
       return {

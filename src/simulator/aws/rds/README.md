@@ -292,19 +292,38 @@ parameter group, `StorageType`/`AllocatedStorage`/`Iops`; a proxy's `ConnectionP
 
 `aws.rds` counters (rates in frames, totals in the probe): `queries`, `reads`, `writes`, `opened` (new connections),
 `refused` (too many connections), `readOnly` (writes to a reader), `stale` (stale DNS), `lost` (queries running when the
-primary failed), `unavailable` (refused while failing over), `failovers`. Samplers: `queryTime` (arrival to answer, in the
-database), `connectTime` (handshakes), `cpuWait`, `ioWait`, `replicaLag`. Gauges: `connections` (the writer's open
-connections, busy and idle: CloudWatch's `DatabaseConnections`), `idleConnections`, `maxConnections`, `cpu` (the
-writer's busy share of vCPUs), `cpuQueue`, `diskQueue`, `readerConnections`, `readerCpu`, `readers` (reader instances
+primary failed), `unavailable` (refused while failing over), `failovers`; and, rates only, `readIops` and `writeIops`
+(storage I/Os the writer's queries ask of its volume: CloudWatch's `ReadIOPS` and `WriteIOPS`). Samplers: `queryTime`
+(arrival to answer, in the database), `selectLatency` and `dmlLatency` (the same, of successful reads and writes: Aurora's
+`SelectLatency` and `DMLLatency`), `connectTime` (handshakes), `cpuWait`, `ioWait`, `replicaLag`. Gauges: `connections`
+(the writer's open connections, busy and idle: CloudWatch's `DatabaseConnections`), `idleConnections`, `maxConnections`,
+`cpu` (the writer's busy share of vCPUs at the instant), `cpuUtilization` (the same averaged over the frame, as
+CloudWatch's `CPUUtilization` averages it over a period), `cpuQueue`, `diskQueue`, `provisionedIops` (what the writer's
+volume serves; 0 for Aurora), `readerConnections`, `readerCpu`, `readerCpuUtilization`, `readers` (reader instances
 serving), `failingOver` (1 while it fails over). The probe reports the engine, class, `max_connections`, the writer's and
 readers' connections, CPU and queues, IOPS, the totals, the failover state, and the writer's zone (`writerZone`, and
 `writerZoneDown`). The `readers` gauge counts the readers serving: one fewer while one is promoted, none in a zone that is
 down.
 
 `aws.rds-proxy` counters: `requests`, `queued` (had to wait), `borrowTimeouts`, `retried` (held through a failover),
-`clientConnects`, `pinnedSessions`. Sampler: `borrowLatency`. Gauges: `borrowed` (database connections in use, pinned
-ones included), `waiting`, `limit`, `pinned`, `clientConnections`, `databaseConnections` (open, as the database counts the
+`clientConnects`, `pinnedSessions`. Samplers: `borrowLatency`, `databaseResponseLatency` (the database's answer to each
+query the proxy sent it: `QueryDatabaseResponseLatency`). Gauges: `borrowed` (database connections in use, pinned ones
+included), `waiting`, `limit`, `pinned`, `clientConnections`, `databaseConnections` (open, as the database counts the
 proxy's), `targetUp`. The probe reports the same.
+
+The client connectors (`aws.rds.client`, `aws.rds-proxy.client`) count their own caller's connections on their edge:
+`connectionsOpened` and `connectionsRefused` (refused at `max_connections`; a proxy refuses none), and the gauges
+`connections` (open, busy and idle) and `connectionsInUse`.
+
+Each has a dashboard (`dashboard.ts`) under CloudWatch's names. The database's: CPUUtilization, DatabaseConnections
+against `max_connections`, Queries (SelectThroughput, DMLThroughput), SelectLatency and DMLLatency, the vCPU and disk
+queues (DiskQueueDepth), ReadIOPS and WriteIOPS against the volume's IOPS, ConnectionAttempts and refusals, failover errors,
+ReplicaLag (AuroraReplicaLag) and the failover itself. The proxy's: QueryRequests, DatabaseConnections,
+DatabaseConnectionsCurrentlyBorrowed, DatabaseConnectionsCurrentlySessionPinned, MaxDatabaseConnectionsAllowed,
+DatabaseConnectionsBorrowLatency, QueryResponseLatency and QueryDatabaseResponseLatency, ClientConnections,
+ClientConnectionsReceived and AvailabilityPercentage. No memory is modelled (FreeableMemory, SwapUsage, BufferCacheHitRatio),
+nor a disk's service time per I/O (ReadLatency, WriteLatency: only the queue past the IOPS), nor TLS or authentication
+(the proxy's TLS and setup-failure metrics, LoginFailures).
 
 ## Not yet simulated
 

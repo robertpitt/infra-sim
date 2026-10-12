@@ -1,4 +1,5 @@
 import { type Effect, Schema, type Scope, type SubscriptionRef } from "effect"
+import type * as Dashboard from "./Dashboard.ts"
 import type { PortDef } from "./Component.ts"
 import * as Describe from "./Describe.ts"
 import * as Edge from "./Edge.ts"
@@ -202,6 +203,8 @@ export interface ConnectorDef<C extends Settings = Settings, S extends Schema.To
   readonly docs: string | undefined
   readonly from: FromEnd<From>
   readonly to: ToEnd<To>
+  /** What it records on its edge, as charts beside transport's (see `Dashboard.ts`). */
+  readonly dashboard: Dashboard.Dashboard | undefined
   /** Its own settings. An edge's full settings add the source port's own before them and transport's after. */
   readonly config: C
   readonly state: S
@@ -217,6 +220,7 @@ export interface Input<C extends Settings, S extends Schema.Top, From extends Pr
   readonly docs?: string
   readonly from: FromEnd<From>
   readonly to?: ToEnd<To>
+  readonly dashboard?: Dashboard.Dashboard
   readonly config: C
   readonly state?: S
   readonly make: ConnectorDef<C, S, From, To>["make"]
@@ -233,6 +237,7 @@ export const make = <const C extends Settings, const From extends Protocol, cons
   docs: input.docs,
   from: input.from,
   to: input.to ?? ({ protocol: "invoke" } as ToEnd<To>),
+  dashboard: input.dashboard,
   config: input.config,
   state: (input.state ?? Schema.Struct({})) as S,
   make: input.make
@@ -285,6 +290,8 @@ export interface Manifest extends Fits {
   readonly docs: string | undefined
   /** Its own settings, without the source port's or transport's. */
   readonly settings: ReadonlyArray<Describe.FieldSpec>
+  /** Its charts, shown after transport's on an edge it sits on. */
+  readonly dashboard?: Dashboard.Dashboard
 }
 
 export const manifestOf = (c: AnyConnector): Manifest => ({
@@ -296,7 +303,8 @@ export const manifestOf = (c: AnyConnector): Manifest => ({
   docs: c.docs,
   from: c.from,
   to: c.to,
-  settings: Describe.fields(c.config)
+  settings: Describe.fields(c.config),
+  ...(c.dashboard === undefined ? {} : { dashboard: c.dashboard })
 })
 
 /** Transport's settings, which every edge has after its port's and its connector's. */

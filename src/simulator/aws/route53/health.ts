@@ -2,7 +2,7 @@ import { Duration, SubscriptionRef } from "effect"
 import type { Fast } from "../../Component.ts"
 import type { Cancel, Config as EdgeConfig, Link } from "../../Edge.ts"
 import type { CallFailure } from "../../Message.ts"
-import type { Counter } from "../../Telemetry.ts"
+import type { Counter, Sampler } from "../../Telemetry.ts"
 import type { TimerHandle } from "../../VirtualTime.ts"
 import { HEALTHY_SHARE, HTTP_CONNECT_TIMEOUT_MS, HTTP_RESPONSE_TIMEOUT_MS, type RecordSettings, TCP_CONNECT_TIMEOUT_MS } from "./config.ts"
 
@@ -20,6 +20,19 @@ export interface Plan {
 
 const samePlan = (a: Plan, b: Plan): boolean =>
   a.tcp === b.tcp && a.intervalMs === b.intervalMs && a.threshold === b.threshold && a.checkers === b.checkers
+
+/**
+ * Each record's endpoint, by the identity of its edge's settings (the same object on the record's link and on the edge's
+ * connector): how the `aws.route53.connection` connector on an edge finds the health check it reports as that edge's
+ * HealthCheckStatus. The record is made before the connectors on its edges, so it is filled by the time they look.
+ */
+export const endpointOfEdge = new WeakMap<object, Endpoint>()
+
+/** HealthCheckStatus: 1 while Route 53 considers the endpoint healthy (a record without a health check always is), else 0. */
+export const statusOf = (e: Endpoint): number => (e.healthy ? 1 : 0)
+
+/** HealthCheckPercentageHealthy, 0 to 1: the share of health checkers that say healthy (1 without a health check). */
+export const percentageHealthyOf = (e: Endpoint): number => (e.checked && e.checkers.length > 0 ? e.up / e.checkers.length : 1)
 
 /** What Route 53 thinks of one record's endpoint. */
 export class Endpoint {
@@ -46,6 +59,8 @@ class Checker {
   cancel: Cancel | undefined
   /** The probe in flight: a later result for an earlier one is ignored. */
   attempt = 0
+  /** When the probe in flight was sent. */
+  sentAt = 0
   constructor(readonly checks: HealthChecks, readonly record: number, readonly generation: number) {}
 }
 
@@ -63,9 +78,16 @@ export class HealthChecks {
   constructor(
     private readonly fast: Pick<Fast<unknown>, "after" | "now" | "random" | "mint">,
     private readonly links: ReadonlyArray<RecordLink>,
-    private readonly counters: { readonly probes: Counter; readonly probeFailures: Counter; readonly healthChanges: Counter }
+    private readonly counters: {
+      readonly probes: Counter
+      readonly probeFailures: Counter
+      readonly healthChanges: Counter
+      /** How long the checks the endpoint answered took (TimeToFirstByte, or ConnectionTime for TCP checks). */
+      readonly checkTime: Sampler
+    }
   ) {
     this.endpoints = links.map(() => new Endpoint())
+    links.forEach((link, i) => endpointOfEdge.set(link.config, this.endpoints[i]!))
   }
 
   /**
@@ -138,9 +160,11 @@ export class HealthChecks {
     const rtt = 2 * Duration.toMillis(SubscriptionRef.getUnsafe(link.config).latency.mean)
     const limit = plan.tcp ? TCP_CONNECT_TIMEOUT_MS : rtt > HTTP_CONNECT_TIMEOUT_MS ? HTTP_CONNECT_TIMEOUT_MS : rtt + HTTP_RESPONSE_TIMEOUT_MS
     c.deadline = this.fast.after(limit, expire, c)
+    c.sentAt = this.fast.now()
     const message = this.fast.mint({ operation: "read", bytes: 0, count: 1, invocation: "sync" })
     c.cancel = link.send(message, (failure) => {
       if (attempt !== c.attempt) return
+      this.counters.checkTime.add(this.fast.now() - c.sentAt)
       this.answered(c, plan.tcp ? passesTcp(failure) : failure === undefined)
     })
   }

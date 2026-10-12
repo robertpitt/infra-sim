@@ -10,6 +10,7 @@ import {
   SWEEP_MS
 } from "./config.ts"
 import { DedupWindow } from "../../kit/Dedup.ts"
+import { dashboard } from "./dashboard.ts"
 import { Deliveries } from "./delivery.ts"
 import { makeTallies } from "./metrics.ts"
 import { QueuePull } from "./pull.ts"
@@ -43,6 +44,7 @@ export const Sqs = Aws.component({
     { label: "Visibility timeout", value: "up to 12 hours from the first receive (changing it per message isn't modelled)", adjustable: false, source: `${D}sqs-visibility-timeout.html` },
     { label: "Redrive velocity", value: "up to 500 messages/s (custom)", adjustable: false, source: `${D}sqs-configure-dead-letter-queue-redrive.html` }
   ],
+  dashboard,
   highlights: [
     { gauge: "depth", label: "waiting" },
     { gauge: "hidden", label: "in flight" },
@@ -187,7 +189,11 @@ export const Sqs = Aws.component({
             consumers.wake()
           }
           tallies.enqueued.add(records)
-          if (!internal) tallies.sent.add(records)
+          if (!internal) {
+            tallies.sent.add(records)
+            tallies.sentBytes.add(bytes * records)
+            tallies.sentMessageSize.add(bytes)
+          }
           return Effect.void
         },
         probe: Effect.sync(() => {

@@ -10,6 +10,7 @@ import { type CallFailure, Failed } from "../../Message.ts"
 import { keyOf } from "../../Provider.ts"
 import * as Aws from "../provider.ts"
 import { Config, Fallback, State } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { Execution, type Outcome, Planner, type Workflow } from "./execution.ts"
 import {
   D,
@@ -76,6 +77,7 @@ export const StepFunctions = Aws.component({
     { label: "Distributed Map concurrency", value: `${DISTRIBUTED_MAP_CONCURRENCY.toLocaleString("en-US")} child executions, started at up to 1,000/s (Express) or 100/s (Standard)`, adjustable: false, source: QUOTAS, note: "Standard workflows only." },
     { label: "Retriers", value: "IntervalSeconds 1, MaxAttempts 3, BackoffRate 2.0, no MaxDelaySeconds, JitterStrategy NONE by default", adjustable: false, source: ERRORS }
   ],
+  dashboard,
   highlights: [
     { gauge: "running", label: "running" },
     { rate: "transitions", label: "transitions/s" },
@@ -128,6 +130,10 @@ export const StepFunctions = Aws.component({
 
       node.meter.gaugeUnsafe("running", () => workflow.running)
       node.meter.gaugeUnsafe("waitingForTransition", () => machine.waiting)
+      // OpenExecutionCount: Standard executions open in the account and Region, every state machine's.
+      node.meter.gaugeUnsafe("openExecutions", () => region.openStandard)
+      // The StateTransition bucket's ProvisionedRefillRate, which Standard transitions are throttled to.
+      node.meter.gaugeUnsafe("transitionRefillRate", () => account().sfnStateTransitionRate)
 
       const refuse = (reason: string) => {
         tally.throttled.add(1)

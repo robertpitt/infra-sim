@@ -10,7 +10,7 @@ import { Config } from "./config.ts"
 import { Cpu } from "./cpu.ts"
 import { Task } from "./node.ts"
 import { Refresh } from "./refresh.ts"
-import { type Context, type Counter, write } from "./requests.ts"
+import { type Context, type Counter, makeMetrics, write } from "./requests.ts"
 
 /** The mechanisms on their own, on a bare virtual-time world: exact numbers, no traffic sources in the way. */
 
@@ -68,7 +68,7 @@ describe("aws.opensearch: replica writes", () => {
     const cluster = new Cluster(fast)
     cluster.reconcile(config)
     const counts = tallies<Counter>(undefined, ["writeRequests", "searchRequests", "indexed", "replicated", "searchShards", "partialSearches", "writeRejected", "searchRejected", "pressureRejected", "replicaRejected", "unavailableDocs", "unavailableShards", "lostTasks"])
-    const ctx: Context = { id: "d", fast, cluster, refresh: new Refresh(fast), tallies: counts, searchable: { add: () => {} } }
+    const ctx: Context = { id: "d", fast, cluster, refresh: new Refresh(fast), tallies: counts, searchable: { add: () => {} }, metrics: makeMetrics(undefined) }
     let id = 0
     const send = (bytes: number, answers: Array<CallFailure | undefined>, count = 1): void => {
       const message: Message = { id: ++id, bornAt: w.nowUnsafe(), origin: "t", attempt: 1, bytes, count, invocation: "sync", operation: "write", key: 0.5 }

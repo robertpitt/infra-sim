@@ -1,3 +1,4 @@
+import type { Counter, Sampler } from "../../Telemetry.ts"
 import type { Derived } from "./derived.ts"
 import { READ_ANY, READ_PRIMARY } from "./derived.ts"
 import { shardOfSlot, slotOf, Store, type Tally } from "./store.ts"
@@ -33,11 +34,23 @@ export class ZoneMap {
 
 const NO_ZONES = new ZoneMap([], 0)
 
-/** How busy the nodes were: the busiest node's share of its busier resource, its shard, and the mean over the nodes. */
+/**
+ * How busy the nodes were: the busiest node's share of its busier resource, its shard, and the mean over the nodes; and
+ * each resource on its own: the busiest engine thread and the mean of them (EngineCPUUtilization), and the busiest network.
+ */
 export interface Utilization {
   readonly hottest: number
   readonly hottestShard: number
   readonly mean: number
+  readonly hottestEngine: number
+  readonly meanEngine: number
+  readonly hottestNetwork: number
+}
+
+/** What the replication stream is counted by: bytes primaries send their replicas (ReplicationBytes), and replica lag. */
+export interface ReplicationMeter {
+  readonly bytes: Counter
+  readonly lag: Sampler
 }
 
 /**
@@ -70,7 +83,13 @@ export class Cluster<W> {
   /** Until when each shard's primary cannot take writes (a failover or a replacement in progress). */
   readonly writesBlockedUntil: Float64Array
 
-  constructor(readonly shards: number, readonly group: number, readonly tally: Tally, readonly zones: ZoneMap = NO_ZONES) {
+  constructor(
+    readonly shards: number,
+    readonly group: number,
+    readonly tally: Tally,
+    readonly zones: ZoneMap = NO_ZONES,
+    readonly replication?: ReplicationMeter
+  ) {
     const nodes = shards * group
     this.engineFree = new Float64Array(nodes)
     this.networkFree = new Float64Array(nodes)
@@ -97,7 +116,7 @@ export class Cluster<W> {
    * resharding, here instantaneous), up to each shard's capacity; the queues and any failover in progress start afresh.
    */
   reshape(shards: number, group: number, d: Derived): Cluster<W> {
-    const next = new Cluster<W>(shards, group, this.tally, this.zones)
+    const next = new Cluster<W>(shards, group, this.tally, this.zones, this.replication)
     for (const store of this.stores) {
       for (const [key, entry] of store.entries) {
         const target = next.stores[shardOfSlot(slotOf(key), shards)]!
@@ -224,25 +243,40 @@ export class Cluster<W> {
   /**
    * A write on a shard's primary reaches every replica: each one's engine applies it, and the primary sends it to each
    * over its network. Nobody waits for it (replication is asynchronous), but it is load all the same.
+   *
+   * The replica lag recorded is how much later than the primary (`appliedAt`) the last replica has the write: once the
+   * primary's network has sent it and the replica's engine has worked through its own queue to it. It grows when a
+   * replica or the primary's network is busier than the primary's engine.
    */
-  replicate(shard: number, now: number, bytes: number, d: Derived): void {
+  replicate(shard: number, now: number, bytes: number, d: Derived, appliedAt: number): void {
     if (this.group === 1) return
     const primary = this.primaryOf(shard, now)
     const base = shard * this.group
     let sent = 0
+    let reached = 0
+    let applied = 0
     for (let r = 0; r < this.group; r++) {
       const n = base + r
       if (n === primary || !this.isUp(n, now)) continue
       const free = this.engineFree[n]!
-      this.engineFree[n] = (free > now ? free : now) + d.commandMs
+      const done = (free > now ? free : now) + d.commandMs
+      this.engineFree[n] = done
       this.engineBusy[n] = this.engineBusy[n]! + d.commandMs
       sent += bytes
+      reached++
+      if (done > applied) applied = done
     }
     if (sent > 0) {
       const transfer = sent * d.msPerByte
       const free = this.networkFree[primary]!
-      this.networkFree[primary] = (free > now ? free : now) + transfer
+      const done = (free > now ? free : now) + transfer
+      this.networkFree[primary] = done
       this.networkBusy[primary] = this.networkBusy[primary]! + transfer
+      if (done > applied) applied = done
+    }
+    if (reached > 0 && this.replication !== undefined) {
+      this.replication.bytes.n += sent
+      this.replication.lag.add(applied > appliedAt ? applied - appliedAt : 0)
     }
   }
 
@@ -293,19 +327,26 @@ export class Cluster<W> {
     let hottest = 0
     let hottestShard = 0
     let all = 0
+    let hottestEngine = 0
+    let allEngine = 0
+    let hottestNetwork = 0
     const nodes = this.nodes
     for (let n = 0; n < nodes; n++) {
-      const busy = Math.max(this.engineBusy[n]!, this.networkBusy[n]!) / periodMs
+      const engine = Math.min(1, this.engineBusy[n]! / periodMs)
+      const network = Math.min(1, this.networkBusy[n]! / periodMs)
       this.engineBusy[n] = 0
       this.networkBusy[n] = 0
-      const used = busy < 1 ? busy : 1
+      const used = engine > network ? engine : network
       all += used
+      allEngine += engine
+      if (engine > hottestEngine) hottestEngine = engine
+      if (network > hottestNetwork) hottestNetwork = network
       if (used > hottest) {
         hottest = used
         hottestShard = Math.floor(n / this.group)
       }
     }
-    return { hottest, hottestShard, mean: nodes > 0 ? all / nodes : 0 }
+    return { hottest, hottestShard, mean: nodes > 0 ? all / nodes : 0, hottestEngine, meanEngine: nodes > 0 ? allEngine / nodes : 0, hottestNetwork }
   }
 
   items(): number {

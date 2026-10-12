@@ -226,19 +226,33 @@ ALB node (CloudWatch name in brackets):
 | `rejectedConnections` | rate | Turned away for lack of capacity [RejectedConnectionCount]. |
 | `deadNode` | rate | Requests that reached a node whose zone is down (no CloudWatch metric: the node is gone). |
 | `lambda.userError`, `lambda.internalError` | rate | Lambda target failures [LambdaUserError, LambdaInternalError]. |
+| `processedBytes` | rate | Bytes of the requests taken (requests carry the only sizes; responses have none) [ProcessedBytes]. |
+| `targetResponseTime` | distribution | From a request leaving the load balancer to its target's answer, good or the target's own error; not the load balancer's 502, 503, 504 [TargetResponseTime]. |
 | `activeConnections` | gauge | Requests in flight [ActiveConnectionCount, approximately]. |
+| `healthyHosts`, `unhealthyHosts` | gauge | Targets passing and failing health checks, summed over the target groups [HealthyHostCount, UnHealthyHostCount]. |
 | `capacity.lcu`, `consumed.lcu`, `peak.lcu`, `reserved.lcu` | gauge | Capacity, last second's demand [ConsumedLCUs], the most so far [PeakLCUs], the reservation [ReservedLCUs]. |
 | `capacityUtilization` | gauge | Demand over capacity, 0-1 [CapacityUtilization]. |
 | `zones.inDns` | gauge | Zones DNS answers with [HealthyStateDNS, roughly]. |
 
-NLB node: `requests`, `elb.resets` [TCP_ELB_Reset_Count], `target.resets` (refused or reset by the target, passed on)
-[TCP_Target_Reset_Count], `client.resets` [TCP_Client_Reset_Count], `deadNode`, gauges `activeFlows` [ActiveFlowCount],
-`consumed.lcu`, `peak.lcu`, `zones.inDns`.
+NLB node: `requests` [NewFlowCount], `elb.resets` [TCP_ELB_Reset_Count], `target.resets` (refused or reset by the target,
+passed on) [TCP_Target_Reset_Count], `client.resets` [TCP_Client_Reset_Count], `deadNode`, `processedBytes`
+[ProcessedBytes], gauges `activeFlows` [ActiveFlowCount], `consumed.lcu` [ConsumedLCUs], `peak.lcu`, `zones.inDns`
+[ZonalHealthStatus, roughly], `healthyHosts`, `unhealthyHosts` [HealthyHostCount, UnHealthyHostCount, summed over the
+target groups].
 
 Target group edge (with the edge's own `calls`, `ok`, `fail`, `latency`, `inflight`): `targets.healthy`, `targets.unhealthy`,
 `targets.initial`, `targets.draining` [HealthyHostCount, UnHealthyHostCount], `noTarget`, and `requestCountPerTarget`
 [RequestCountPerTarget]: requests a minute per healthy target (per registered target when none is healthy), at the
 current rate, in AWS's unit (a target value of 1,000 means 1,000 requests a minute per target).
+
+Lambda target edge: `processedBytes` [LambdaTargetProcessedBytes]; its LambdaUserError and LambdaInternalError are the
+edge's own `fail.*` (an `Unavailable` is internal, anything else the function's). IP target edges record nothing beyond
+transport's.
+
+Dashboards (`dashboard.ts`): the ALB's requests and rejected connections, its own errors and its targets', target response
+time, healthy hosts, LCUs against capacity and reservation, capacity utilization, active connections, processed bytes and
+zones in DNS; the NLB's new and active flows, resets, healthy hosts, bytes, LCUs, zones and connection time; each target
+group's target health (and, for an ALB, RequestCountPerTarget) and requests with no target; a Lambda target's errors and bytes.
 
 **Scaling a fleet on RequestCountPerTarget.** A target-tracking controller reads its own node's metrics, so it watches the
 fleet, not the edge: the requests a fleet receives are the requests its target group sent. `aws.ec2` publishes

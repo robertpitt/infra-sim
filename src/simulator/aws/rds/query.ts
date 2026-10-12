@@ -45,7 +45,9 @@ export const runQuery = (db: Database, role: Role, pool: Pool, got: number, mess
   const finish = (failure: CallFailure | undefined): void => {
     finished = true
     timer = undefined
-    stats.queryTime.add(fast.now() - arrived)
+    const took = fast.now() - arrived
+    stats.queryTime.add(took)
+    if (failure === undefined) (isRead ? stats.selectLatency : stats.dmlLatency).add(took)
     // The caller keeps its connection checked out for the rest of its work (see `ClientPolicy.holdMs`).
     const hold = failure === undefined ? pool.policy().holdMs : 0
     if (hold > 0) fast.after(hold, release, undefined)
@@ -67,9 +69,13 @@ export const runQuery = (db: Database, role: Role, pool: Pool, got: number, mess
   const offCpu = (): void => {
     if (finished) return
     onCpu = false
-    role.cpu.release()
     const now = fast.now()
-    const io = role.ioWait(now, (isRead ? c.query.readIos : c.query.writeIos) * records)
+    role.cpuChanging(now)
+    role.cpu.release()
+    const ios = (isRead ? c.query.readIos : c.query.writeIos) * records
+    // The writer's volume is the one CloudWatch's ReadIOPS and WriteIOPS describe beside its CPU and connections.
+    if (role === db.writer) (isRead ? stats.readIops : stats.writeIops).n += ios
+    const io = role.ioWait(now, ios)
     if (io > 0) stats.ioWait.add(io)
     let wait = Distribution.latencyMs(isRead ? c.query.readWait : c.query.writeWait, random) + io + zone.extraMs
     // A Multi-AZ instance (or cluster) commits a write only once a standby has it; Aurora's quorum write is in its own figure.
@@ -89,6 +95,7 @@ export const runQuery = (db: Database, role: Role, pool: Pool, got: number, mess
     timer = undefined
     if (finished) return
     queuedAt = fast.now()
+    role.cpuChanging(queuedAt)
     const place = role.cpu.acquire(run)
     if (!onCpu) giveUp = place
   }
@@ -104,8 +111,10 @@ export const runQuery = (db: Database, role: Role, pool: Pool, got: number, mess
     if (finished) return
     finished = true
     timer?.cancel()
-    if (onCpu) role.cpu.release()
-    else giveUp?.()
+    if (onCpu) {
+      role.cpuChanging(fast.now())
+      role.cpu.release()
+    } else giveUp?.()
     pool.release(fast.now(), epoch)
   }
 }

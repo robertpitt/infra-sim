@@ -182,11 +182,23 @@ its measurements between the caller's network and the record's Region.
 
 ## Metrics and state
 
-Counters (per second in frames): `queries` (lookups that reached Route 53), `cacheHits` (calls answered from a cache),
-`noAnswer`, `probes` (health check results), `probeFailures`, `healthChanges` (Route 53 changing its verdict on an endpoint).
-Gauges: `unhealthyRecords`, `cachedUnhealthy` (of the caches holding a live answer, the share pointing at an unhealthy
-record: the TTL lag), `healthChecks` (records with a health check). The edges show each record's traffic (`calls`),
-health checks included. The node's own `in`/`ok`/`fail`/`latency` are the callers' calls through it.
+Counters (per second in frames): `queries` (lookups that reached Route 53: DNSQueries), `cacheHits` (calls answered from
+a resolver's cache), `noAnswer`, `probes` (health check results), `probeFailures`, `healthChanges` (Route 53 changing its
+verdict on an endpoint). Sampler `healthCheckTime`: how long the checks an endpoint answered took (TimeToFirstByte for HTTP
+checks, ConnectionTime for TCP). Gauges: `unhealthyRecords`, `healthyChecks` (health-checked records that are healthy:
+HealthCheckStatus summed), `lowestPercentageHealthy` (the lowest HealthCheckPercentageHealthy over the records' health
+checks, 0 to 1; 1 when no record has one), `healthyThreshold` (the 18% a check must stay above, to chart against),
+`cachedUnhealthy` (of the caches holding a live answer, the share pointing at an unhealthy record: the TTL lag),
+`healthChecks` (records with a health check). The node's own `in`/`ok`/`fail`/`latency` are the callers' calls through it.
+
+Each edge (`aws.route53.connection`) shows its record's traffic (`calls`, health checks included) and its own health check
+as CloudWatch reports one: gauges `healthCheckStatus` (HealthCheckStatus, 1 or 0; 1 without a health check, as Route 53
+treats it) and `healthCheckPercentageHealthy` (HealthCheckPercentageHealthy, 0 to 1), `healthyThreshold`, the counter
+`healthChecks` (checks that crossed it) and the sampler `healthCheckTime`. The connector finds its record's health check
+by the identity of the edge's settings, which the record and the connector share.
+
+The dashboards (`dashboard.ts`) chart these: DNS queries and the resolvers' cache, health check status and percentage
+healthy against the threshold, the checkers' requests and time, and the answers still cached to unhealthy records.
 
 Probe state: `policy`, `ttlSeconds`, `records` (per record: edge, endpoint, `healthChecked`, `healthy`, `checkersHealthy` of
 `checkers`, `changedAt`, `cachedShare`), `resolvers`, `cached`, `cachedUnhealthy`, and totals `queries`, `cacheHits`,

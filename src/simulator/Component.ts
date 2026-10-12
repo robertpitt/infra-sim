@@ -1,4 +1,5 @@
 import { Effect, Schema, type Scope, type SubscriptionRef } from "effect"
+import * as Dashboard from "./Dashboard.ts"
 import type { Limiter } from "./Limiter.ts"
 import type { Placement } from "./Provider.ts"
 import * as Describe from "./Describe.ts"
@@ -273,6 +274,11 @@ export interface ComponentDef<
    * out `errors`. What it passes on still alarms where it lands.
    */
   readonly quietAlarms: ReadonlyArray<string>
+  /**
+   * Its metrics as an operator's dashboard: key figures and charts, mirroring what the real service publishes (see
+   * `Dashboard.ts`). Without one, the generic dashboard every node can have.
+   */
+  readonly dashboard: Dashboard.Dashboard | undefined
   /** Set for components that group others rather than handle traffic. */
   readonly container: Container | undefined
   /** Component types this must sit inside, e.g. a VPC only makes sense inside a region. */
@@ -300,6 +306,7 @@ export interface Input<C extends Schema.Top, P extends PortDefs, S extends Schem
   readonly handlesZoneFaults?: boolean
   readonly global?: boolean
   readonly quietAlarms?: ReadonlyArray<string>
+  readonly dashboard?: Dashboard.Dashboard
   readonly container?: Container
   readonly within?: ReadonlyArray<string>
   readonly config: C
@@ -329,6 +336,7 @@ export const make = <
   handlesZoneFaults: input.handlesZoneFaults ?? false,
   global: input.global ?? false,
   quietAlarms: input.quietAlarms ?? [],
+  dashboard: input.dashboard,
   container: input.container,
   within: input.within,
   config: input.config,
@@ -372,6 +380,8 @@ export interface Manifest {
   readonly container?: { readonly accepts: ReadonlyArray<string>; readonly decidesRegion: boolean }
   readonly within?: ReadonlyArray<string>
   readonly highlights: ReadonlyArray<Highlight>
+  /** Its dashboard: its own, or the generic one (requests, latency, the gauges it highlights). */
+  readonly dashboard: Dashboard.Dashboard
   readonly settings: ReadonlyArray<Describe.FieldSpec>
   readonly outputs: ReadonlyArray<{
     readonly port: string
@@ -401,6 +411,7 @@ export const manifestOf = (def: AnyComponent, all: ReadonlyArray<AnyComponent> =
     : { container: { accepts: all.filter((c) => c !== def && def.container!.accepts(c)).map((c) => c.type), decidesRegion: def.container.region !== undefined } }),
   ...(def.within === undefined ? {} : { within: def.within }),
   highlights: def.highlights,
+  dashboard: def.dashboard ?? Dashboard.generic(def.highlights, def.container === undefined && !def.inputs),
   settings: Describe.fields(def.config),
   outputs: Object.entries(def.ports as PortDefs).map(([name, p]) => ({
     port: name,

@@ -178,15 +178,27 @@ Stream node, per-second rates: `incoming`, `incomingBytes` (IncomingRecords, Inc
 (GetRecords.Records, .Bytes; pushed bytes too), `readThrottled` (ReadProvisionedThroughputExceeded, calls), `pushed`
 (SubscribeToShardEvent.Records), `expired` (records a consumer found past retention, once per consumer), `splits`,
 `reshards`, `onFailureSent`, `onFailureFailed`. Gauges: `shards` (open), `iteratorAgeMs` (GetRecords.IteratorAgeMilliseconds
-of the slowest consumer), `backlog` (most records one consumer has still to process), `retained`.
+of the slowest consumer), `backlog` (most records one consumer has still to process), `retained`; what the open shards can
+take and serve, `writeCapacityBytes`, `writeCapacityRecords` (1 MiB/s and 1,000 records/s each), `readCapacityBytes`,
+`readCapacityCalls` (2 MiB/s and five GetRecords a second each, shared by standard consumers); and the hot-spot gauges
+`hottestShardLoad`, `medianShardLoad`: the traffic offered to the busiest open shard and to the median one over the last
+second, as a share of a shard's write limit (bytes or records, whichever is nearer), which is what the shard-level
+IncomingBytes and IncomingRecords show.
 
 Probe: mode, open and closed shards, UpdateShardCount state, IteratorAge, backlog, retained records, totals of the counters,
 each consumer (edge, enhanced fan-out, refused, IteratorAge, backlog) and the ten busiest shards (range, offered bytes and
 records per second averaged over a minute).
 
 Mapping edge, besides transport's `calls`, `ok`, `fail`, `latency`: rates `batches`, `records`, `batchRetries`, `bisected`,
-`discarded`, `expired`, `itemFailures`, `itemFailuresIgnored`, `throttledInvokes`, `poisonFailures`; gauges `iteratorAge`,
-`backlog`, `concurrency` (batches in flight), `blocked` (records in batches that have failed). Probe: shards read, in
+`discarded`, `expired`, `itemFailures`, `itemFailuresIgnored`, `throttledInvokes`, `poisonFailures`, and Lambda's event source
+mapping counts `polledEvents` (PolledEventCount: records read for it), `invokedEvents` (InvokedEventCount: records sent to
+the function, a retried batch again), `failedInvokeEvents` (FailedInvokeEventCount); gauges `iteratorAge`, `backlog`,
+`concurrency` (batches in flight), `maxConcurrency` (its lanes: shards read times the parallelization factor), `blocked`
+(records in batches that have failed), `batchSize`.
+
+The stream's and the mapping's dashboards (`dashboard.ts`) chart these under CloudWatch's names. Not charted, because not
+modelled: GetRecords.Latency, PutRecord(s).Latency (calls are answered at once), PutRecords.FailedRecords (internal
+failures), SubscribeToShard.* subscription events, and per-shard series (the hot-spot gauges summarise them). Probe: shards read, in
 flight, IteratorAge, backlog, blocked, enhanced fan-out and refusal, totals.
 
 ## Not yet simulated

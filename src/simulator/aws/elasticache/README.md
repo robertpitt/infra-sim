@@ -270,10 +270,23 @@ Node network bursts and CPU credits are not modelled. Reshaping the cluster live
 Counters (per second in frames): `reads`, `writes`, `cacheHits`, `cacheMisses`, `collapsed` (reads that waited on another's
 fill), `databaseReads`, `databaseWrites`, `bypassed` (fail-open reads), `fillFailures`, `cacheErrors` (commands the cache
 couldn't run), `refused` (maxclients), `throttled` (serverless), `evictions`, `expired`, `oom`, `failovers`, `flushes`,
-`ecpu`. Gauges: `hitRate` (last ten seconds), `items`, `memoryUsed` (fullest shard's share of its memory), `engineUtilization`
-(busiest node), `meanUtilization`, `shardsWriteBlocked`, `ecpuCeiling`, `nodesDown` (failed, being replaced or resynced,
-or in a zone that is down). The framework adds `in`, `ok`, `fail`,
-`fail.<Kind>`, `latency`, `inflight`.
+`ecpu`, `setTypeCmds` (SETs and DELs the cache ran: fills, write-throughs, invalidations), `networkBytesIn` and
+`networkBytesOut` (values clients wrote and read: client traffic), `replicationBytes` (what primaries sent their
+replicas). Samplers: `readLatency` and `writeLatency` (a successful cache command's own time, queueing at its node
+included and the database's time apart: SuccessfulReadRequestLatency, SuccessfulWriteRequestLatency), `replicationLag`
+(how much later than the primary the last replica has a write: once the primary's network has sent it and the replica's
+engine has reached it). Gauges: `hitRate` (last ten seconds), `items`, `memoryUsed` (fullest shard's share of its memory),
+`engineUtilization` (busiest node's busier resource, engine or network), `meanUtilization`, `engineCpu` and
+`engineCpuMean` (the busiest and the mean engine thread: EngineCPUUtilization), `networkUtilization` (the busiest node's
+network, of its baseline bandwidth), `shardsWriteBlocked`, `ecpuCeiling`, `nodesDown` (failed, being replaced or
+resynced, or in a zone that is down). The framework adds `in`, `ok`, `fail`, `fail.<Kind>`, `latency`, `inflight`.
+
+The dashboard (`dashboard.ts`) charts these under CloudWatch's names: CacheHitRate, CacheHits and CacheMisses with
+SetTypeCmds, EngineCPUUtilization (and serverless's ElastiCacheProcessingUnits as a share of its current ceiling),
+SuccessfulRead/WriteRequestLatency, the cache-aside code's database calls, DatabaseMemoryUsagePercentage, CurrItems,
+Evictions and Reclaimed, NetworkBytesIn/Out and ReplicationBytes, ErrorCount and ThrottledCmds, and ReplicationLag.
+Connections aren't modelled (CurrConnections, NewConnections), nor a host's CPU beside its engine thread
+(CPUUtilization), nor FreeableMemory.
 
 The probe reports the engine and deployment, `shards` and `nodes` running, `nodesDown`, `capacityPerShard` (-1 for no limit), `items`,
 `memoryUsed`, `hitRatio` (since the start), `recentHitRatio`, the read, write, hit, miss, collapsed, database, bypass,

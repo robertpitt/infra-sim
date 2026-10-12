@@ -267,13 +267,29 @@ Frames (per second unless noted; names as in the node's frame):
 | `timeouts` | rate | Invocations killed at the timeout. |
 | `errors` | rate | Function errors, timeouts included. |
 | `itemFailures` | rate | Records successful invocations returned as batch item failures (`batch.errors: report`). |
-| `asyncRetries`, `asyncSucceeded`, `asyncFailed`, `destinationFailures` | rate | Asynchronous outcomes. |
+| `asyncRetries`, `asyncSucceeded`, `asyncFailed`, `destinationFailures` | rate | Asynchronous outcomes. `asyncFailed` is CloudWatch's `AsyncEventsDropped`; `destinationFailures` its `DestinationDeliveryFailures` (and `DeadLetterErrors`: the `onFailure` port is both). |
+| `asyncEventsReceived` | rate | Asynchronous events accepted onto the internal queue (`AsyncEventsReceived`). |
+| `completedInvocations` | rate | Invocations that ended, in success or a function error. The error rate divides by it rather than by `invocations`: errors are counted as invocations end (AWS stamps them with the invocation's start), so a timeout storm would otherwise read over 100%. |
+| `provisionedInvocations` | rate | Invocations that ran on a provisioned environment (`ProvisionedConcurrencyInvocations`). |
+| `spilloverInvocations` | rate | Invocations of a function with provisioned environments that ran on standard concurrency because all of them were busy (`ProvisionedConcurrencySpilloverInvocations`). |
 | `duration` | sampler (ms) | Handler time to return or timeout. |
-| `initDuration` | sampler (ms) | Init (or Restore) time per cold start. |
+| `initDuration` | sampler (ms) | Init (or Restore) time per cold start (Lambda Insights' `init_duration`). |
+| `asyncEventAge` | sampler (ms) | Time from an asynchronous event's acceptance to an invocation of it, retries included; throttled attempts aren't invocations and aren't sampled (`AsyncEventAge`). |
 | `concurrent` | gauge | Executions running now (cold-starting included). |
 | `environments` | gauge | On-demand environments alive. |
 | `provisioned` | gauge | Provisioned environments ready. |
-| `asyncPending` | gauge | Asynchronous events not yet finished. |
+| `provisionedBusy` | gauge | Provisioned environments running a request (`ProvisionedConcurrentExecutions`; over `provisioned`, `ProvisionedConcurrencyUtilization`). Registered once the function has provisioned concurrency. |
+| `unreservedConcurrent` | gauge | Executions on the region's shared, unreserved pool, every function's (`UnreservedConcurrentExecutions`). |
+| `claimedConcurrency` | gauge | That plus what every reservation and provisioned concurrency holds back, as the pool clamps it (`ClaimedAccountConcurrency`). |
+| `accountConcurrency` | gauge | The region's concurrent-executions quota. |
+| `asyncPending` | gauge | Asynchronous events not yet finished. Registered with the function's first asynchronous event. |
+
+The dashboard (`dashboard.ts`) charts them as the Lambda console's Monitor tab and CloudWatch do: invocations with
+errors, throttles and cold starts; the error, timeout and throttle rates; duration (average, p99, max); concurrency and
+environments; the regional concurrency against the quota; init duration; provisioned concurrency utilization and
+spillover; and the asynchronous queue's events and event age. Not charted, because nothing here models them:
+`RecursiveInvocationsDropped`, `PostRuntimeExtensionsDuration`, `SignatureValidationErrors`, and Lambda Insights' memory,
+CPU time, network and `/tmp` metrics. `IteratorAge` belongs to a stream's event source mapping, on its edge.
 
 Probe state: `concurrent`, `environments`, `provisioned`, `limit` (the most it may run now), `invocations`, `coldStarts`,
 `throttles`, `timeouts`, `errors`, `itemFailures`, `asyncPending`, `asyncRetries`, `asyncSucceeded`, `asyncFailed`,

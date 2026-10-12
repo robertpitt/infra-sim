@@ -9,11 +9,11 @@ import { type Tally, tallies } from "../../kit/Tally.ts"
 import type { Meter, Sampler } from "../../Telemetry.ts"
 import type { TimerHandle } from "../../VirtualTime.ts"
 import { DEFAULT_POLICY } from "./client.ts"
-import { type ClientPolicy, OPENED, Pool, Server } from "./connections.ts"
+import { type ClientPolicy, type ConnectionCounters, OPENED, Pool, Server } from "./connections.ts"
 import { PROXY_IDLE_AFTER_MS } from "./limits.ts"
 import type { ProxyConfig } from "./proxyConfig.ts"
 import { CONNECTION_LOST } from "./query.ts"
-import { asDatabase, CLIENT_TAG, type Database } from "./endpoint.ts"
+import { asDatabase, CLIENT_TAG, type ClientConnections, type Database } from "./endpoint.ts"
 
 /** Tags on the proxy's client connections (see `Pool`): a pinned session, and one that holds its database connection. */
 const PLAIN = 0
@@ -30,9 +30,15 @@ export interface ProxyStats {
   readonly count: Record<(typeof COUNTERS)[number], Tally>
   /** Time from asking for a database connection to having one (CloudWatch's `DatabaseConnectionsBorrowLatency`), in ms. */
   readonly borrowLatency: Sampler
+  /** Time the database took to answer a query the proxy sent it (CloudWatch's `QueryDatabaseResponseLatency`), in ms. */
+  readonly databaseResponseLatency: Sampler
 }
 
-export const makeProxyStats = (meter: Meter): ProxyStats => ({ count: tallies(meter, COUNTERS), borrowLatency: meter.sampler("borrowLatency") })
+export const makeProxyStats = (meter: Meter): ProxyStats => ({
+  count: tallies(meter, COUNTERS),
+  borrowLatency: meter.sampler("borrowLatency"),
+  databaseResponseLatency: meter.sampler("databaseResponseLatency")
+})
 
 /**
  * Everything one proxy's requests share: its client connections, its pool of database connections (as slots it may
@@ -111,8 +117,9 @@ export class ProxyRuntime {
     return value
   }
 
-  attach(key: string, policy: () => ClientPolicy): void {
-    if (this.clients.has(key)) return
+  attach(key: string, policy: () => ClientPolicy, counters?: ConnectionCounters): ClientConnections {
+    const known = this.clients.get(key)
+    if (known !== undefined) return viewOf(known)
     // The proxy closes client connections idle past its own timeout, whatever the client would do.
     let memo: { p: ClientPolicy; c: ProxyConfig; value: ClientPolicy } | undefined
     const effective = (): ClientPolicy => {
@@ -123,7 +130,9 @@ export class ProxyRuntime {
       memo = { p, c, value }
       return value
     }
-    this.clients.set(key, new Pool(this.clientServer, effective, this.closed))
+    const pool = new Pool(this.clientServer, effective, this.closed, counters)
+    this.clients.set(key, pool)
+    return viewOf(pool)
   }
 
   /** A client connection closed: one holding a pinned database connection gives it back. */
@@ -170,6 +179,9 @@ export class ProxyRuntime {
     this.probing?.cancel()
   }
 }
+
+/** A client's connections to the proxy, as its edge reads them. */
+const viewOf = (pool: Pool): ClientConnections => ({ open: () => pool.busy + pool.idle, busy: () => pool.busy })
 
 /** The database refused before running anything because it was down: the request can wait and try again. */
 const isTargetDown = (failure: CallFailure): failure is CallFailure & { readonly _tag: "Unavailable"; readonly reason: string } =>
@@ -227,6 +239,7 @@ export const forward = (proxy: ProxyRuntime, message: Message, done: Flow.Done):
   const send = (): void => {
     const target = proxy.link
     if (target === undefined) return finish(Unavailable({ node: proxy.id, reason: "the proxy has no target database" }))
+    const sentAt = fast.now()
     cancelDb = target.send({ ...message, group: proxy.key }, (failure) => {
       cancelDb = undefined
       if (finished) return
@@ -239,6 +252,8 @@ export const forward = (proxy: ProxyRuntime, message: Message, done: Flow.Done):
         slots.release()
         return borrow()
       }
+      // The database answered the query (a refusal for being down, above, answered none).
+      stats.databaseResponseLatency.add(fast.now() - sentAt)
       finish(failure)
     })
   }

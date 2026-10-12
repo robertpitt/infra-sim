@@ -13,6 +13,7 @@ import {
   State,
   TYPES_URL
 } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { makeRuntime } from "./runtime.ts"
 
 /**
@@ -47,6 +48,7 @@ export const ElastiCache = Aws.component({
     { label: "Serverless throughput", value: "30,000 ECPU/s when empty (90,000 from replicas), doubling every 2 to 3 minutes; 30,000 ECPU/s per slot (90,000 from replicas)", adjustable: false, source: SERVERLESS_SCALING_URL },
     { label: "ECPU", value: "1 per KB transferred by a simple GET or SET, at least 1", adjustable: false, source: ECPU_URL }
   ],
+  dashboard,
   highlights: [
     { gauge: "hitRate", label: "hit rate", format: "percent" },
     { rate: "databaseReads", label: "db reads/s" },

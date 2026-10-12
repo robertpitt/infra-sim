@@ -16,6 +16,8 @@ export type PoolKind = "write" | "search"
 /** A shard-level piece of work on a node: indexing on a primary or replica, or one shard's part of a search. */
 export class Task {
   state: "new" | "queued" | "running" | "done" = "new"
+  /** When a thread took it up: its time running, not queued, is what SearchLatency and IndexingLatency measure. */
+  startedAt = 0
   constructor(
     readonly pool: PoolKind,
     /** CPU-milliseconds it needs. */
@@ -80,7 +82,7 @@ export class DataNode {
 
   constructor(
     readonly index: number,
-    fast: Pick<Fast<unknown>, "after" | "now">,
+    private readonly fast: Pick<Fast<unknown>, "after" | "now">,
     vcpu: number,
     writeThreads: () => number,
     searchThreads: () => number,
@@ -138,6 +140,7 @@ export class DataNode {
 
   private start(task: Task, pool: Pool): void {
     task.state = "running"
+    task.startedAt = this.fast.now()
     pool.running++
     this.running.add(task)
     this.cpu.run(task.demand, () => this.finish(task, pool))

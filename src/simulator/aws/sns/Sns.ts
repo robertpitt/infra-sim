@@ -19,6 +19,7 @@ import {
   Subscription,
   Topic
 } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { FanOut } from "./fanout.ts"
 
 const D = Aws.docs.sns
@@ -52,6 +53,7 @@ export const Sns = Aws.component({
     { label: "Delivery retries to SQS and Lambda", value: "100,015 attempts over 23 days (capped at 100 here)", adjustable: false, source: `${D}sns-message-delivery-retries.html` },
     { label: "Delivery retries to HTTP/S", value: "3 retries 20 s apart unless a delivery policy says otherwise; up to 100 retries, 3,600 s in all", adjustable: true, source: `${D}sns-message-delivery-retries.html` }
   ],
+  dashboard,
   highlights: [
     { gauge: "pending", label: "delivering" },
     { rate: "undelivered", label: "lost/s" },

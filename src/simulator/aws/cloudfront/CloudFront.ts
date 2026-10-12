@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import * as Aws from "../provider.ts"
 import { COMPRESSION_URL, Config, DOCS, EXPIRATION_URL, FAILOVER_URL, ORIGIN_URL, PRICE_CLASS_URL, QUOTAS_URL, ports, State } from "./config.ts"
+import { dashboard } from "./dashboard.ts"
 import { makeRuntime } from "./runtime.ts"
 
 /**
@@ -38,6 +39,7 @@ export const CloudFront = Aws.component({
     { label: "Price classes", value: "All, 200 (no South America, Australia/NZ), 100 (US, Mexico, Canada, Europe, Israel, Türkiye)", adjustable: false, source: PRICE_CLASS_URL },
     { label: "Object lifetime", value: "min, default and max TTL; stale-while-revalidate and stale-if-error", adjustable: false, source: EXPIRATION_URL }
   ],
+  dashboard,
   highlights: [
     { gauge: "cacheHitRate", label: "cache hit rate", format: "percent" },
     { rate: "originRequests", label: "origin req/s" },
