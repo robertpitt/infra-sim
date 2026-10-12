@@ -1,0 +1,432 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Three-tier web shop on EC2
+description: |-
+  The classic three-tier web application on EC2, the way most AWS customers have run one: an online shop's web servers in an Auto Scaling group behind an Application Load Balancer, a Valkey cache and a PostgreSQL database, spread over three Availability Zones, with a queue and workers for background jobs and CloudFront for static assets. Thirteen components in one region, the tiers in a VPC. It shows what losing a zone does to each tier and what shoppers see while it lasts, and why an Auto Scaling group can't catch a sudden surge: instances take minutes to launch, a warm pool takes some of that away, and the account's vCPU quota can stop it outright.
+
+  How it is wired: shoppers' page views (280 a second, reads) and their carts and checkouts (20 a second, writes) reach the ALB, which has a node in each zone (DNS spreads clients over them, with a 60-second TTL) and one target group with AWS's default health checks (every 30 seconds, two failures to take a server out) and cross-zone load balancing. Behind it twelve m7i.large web servers, four in each zone, use ELB health checks, and a target-tracking policy keeps their average CPU at 50% (a page takes 40 ms of CPU), between 12 and 40 servers. A server reads through the cache, a Valkey cluster of three shards, each a primary and a replica in two zones, which keeps the shop's 10,000 product and listing pages for an hour (about 93% of reads hit): a miss reads the database, and a write (a cart change, an order) goes to the database and then deletes the page from the cache. The database is RDS for PostgreSQL on a db.r7g.large with a Multi-AZ standby, the primary in us-east-1a and the standby in us-east-1b. One request in twenty hands work to the jobs queue instead (an order to fulfil, a receipt to send), through an SQS interface endpoint; a fixed group of three worker instances takes twelve jobs at a time, each 150 ms of CPU and a database write, and a job that fails five times goes to the dead-letter queue. Browsers fetch scripts, styles and images from CloudFront, with an S3 bucket as its origin. The account's On-Demand vCPU quota is raised to 128 (a new account has 5).
+
+  What the simulator cannot show: browsers that try another of the ALB's addresses when one doesn't answer (a client here stays on the node its DNS answer named until the answer expires), the site's Route 53 alias record (the ALB's own DNS is modelled), a request that does two things (a server calls one of its outputs per request, so a request that queues a job doesn't also read the cache), sessions, deployments (instance refresh and launch template versions), and each web server's own connection pool (the database sees the cache's edges as one pooled client). AWS's target-tracking alarms need three one-minute datapoints to scale out and fifteen to scale in; the policy here averages CPU over two minutes and decides every minute. Launch times (three minutes: 30 s pending, 30 s to boot, 90 s of user data, 30 s to start the application), the CPU a page or a job costs and the database's failover time (about 90 s, within AWS's typical 60 to 120) are assumptions.
+seed: 12
+accounts:
+  aws:us-east-1:
+    ec2OnDemandStandardVcpus: 128
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 324, y: -48 }
+    size: { w: 1948, h: 1052 }
+  shop-vpc:
+    type: aws.vpc
+    name: Shop VPC (three zones)
+    parent: aws-us-east-1
+    position: { x: 352, y: 236 }
+    size: { w: 1892, h: 448 }
+  shoppers:
+    type: common.client
+    name: Shoppers browsing
+    region: us-east
+    settings:
+      rps: 280
+    position: { x: 0, y: 300 }
+  buyers:
+    type: common.client
+    name: Carts and checkouts
+    region: us-east
+    settings:
+      rps: 20
+      payload: 2
+    position: { x: 0, y: 430 }
+  asset-loads:
+    type: common.client
+    name: Browsers loading assets
+    region: us-east
+    settings:
+      rps: 200
+    position: { x: 0, y: 40 }
+  cdn:
+    type: aws.cloudfront
+    name: Static assets CDN
+    parent: aws-us-east-1
+    settings:
+      objects: 3000
+      objectSize: 60
+      popularitySkew: 2
+    position: { x: 380, y: 40 }
+  assets:
+    type: aws.s3
+    name: Static assets bucket
+    parent: aws-us-east-1
+    position: { x: 700, y: 18 }
+  alb:
+    type: aws.alb
+    name: Application Load Balancer
+    parent: shop-vpc
+    position: { x: 380, y: 330 }
+  web:
+    type: aws.ec2
+    name: Web servers (Auto Scaling group)
+    parent: shop-vpc
+    settings:
+      instanceType: m7i.large
+      minSize: 12
+      maxSize: 40
+      desiredCapacity: 12
+      availabilityZones: 3
+      serviceTime: { mean: 40, cv: 0.5 }
+      fanOut: weighted
+      healthCheckType: ELB
+      defaultInstanceWarmup: 2 minutes
+    position: { x: 700, y: 330 }
+  cache:
+    type: aws.elasticache
+    name: Page cache (Valkey, cluster mode)
+    parent: shop-vpc
+    settings:
+      nodeType: cache.r7g.large
+      clusterMode: true
+      shards: 3
+      replicasPerShard: 1
+      keyspace:
+        keys: 10000
+        popularitySkew: 2
+        itemSize: 8
+      caching:
+        ttl: 1 hour
+        ttlJitter: 0.2
+    position: { x: 1020, y: 302 }
+  db:
+    type: aws.rds
+    name: Shop DB (PostgreSQL, Multi-AZ)
+    zone: us-east-1a
+    parent: shop-vpc
+    settings:
+      engine: postgres
+      instanceClass: db.r7g.large
+      multiAz: instance
+    position: { x: 1980, y: 330 }
+  sqs-endpoint:
+    type: aws.vpc-endpoint
+    name: SQS interface endpoint
+    parent: shop-vpc
+    settings:
+      type: interface
+      availabilityZones: 3
+    position: { x: 1020, y: 560 }
+  jobs:
+    type: aws.sqs
+    name: Jobs queue
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 1 minute
+      maxReceives: 5
+    position: { x: 1340, y: 800 }
+  jobs-dlq:
+    type: aws.sqs
+    name: Jobs DLQ
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 1660, y: 800 }
+  workers:
+    type: aws.ec2
+    name: Job workers (Auto Scaling group)
+    parent: shop-vpc
+    settings:
+      instanceType: m7i.large
+      minSize: 3
+      maxSize: 3
+      desiredCapacity: 3
+      availabilityZones: 3
+      serviceTime: { mean: 150, cv: 0.5 }
+    position: { x: 1660, y: 560 }
+edges:
+  asset-loads.out->cdn:
+    from: { node: asset-loads }
+    to: cdn
+    settings:
+      timeout: 10 seconds
+      request: { operation: read }
+  cdn.out->assets:
+    from: { node: cdn }
+    to: assets
+    settings:
+      originType: s3
+      request: { operation: read }
+  shoppers.out->alb:
+    from: { node: shoppers }
+    to: alb
+    settings:
+      timeout: 10 seconds
+      request: { operation: read }
+  buyers.out->alb:
+    from: { node: buyers }
+    to: alb
+    settings:
+      timeout: 10 seconds
+  alb.out->web:
+    from: { node: alb }
+    to: web
+  web.out->cache:
+    from: { node: web }
+    to: cache
+    settings:
+      weight: 19
+      timeout: 3 seconds
+      request: { operation: caller }
+  web.out->sqs-endpoint:
+    from: { node: web }
+    to: sqs-endpoint
+    settings:
+      weight: 1
+      timeout: 2 seconds
+  sqs-endpoint.out->jobs:
+    from: { node: sqs-endpoint }
+    to: jobs
+  cache.misses->db:
+    from: { node: cache, port: misses }
+    to: db
+    settings:
+      timeout: 2 seconds
+  cache.writes->db:
+    from: { node: cache, port: writes }
+    to: db
+    settings:
+      timeout: 5 seconds
+  jobs.deliver->workers:
+    from: { node: jobs, port: deliver }
+    to: workers
+    connector: core.poller
+    settings:
+      workers: 12
+      batchSize: 1
+      timeout: 30 seconds
+  jobs.dlq->jobs-dlq:
+    from: { node: jobs, port: dlq }
+    to: jobs-dlq
+  workers.out->db:
+    from: { node: workers }
+    to: db
+    settings:
+      timeout: 5 seconds
+controllers:
+  web-scaling:
+    type: core.target-tracking
+    target: web
+    name: Average CPU at 50%
+    settings:
+      metric: cpuTotal
+      per: unit
+      targetValue: 0.5
+      setting: desiredCapacity
+      min: 12
+      max: 40
+      window: 2 minutes
+      period: 1 minute
+      tolerance: 0.1
+      scaleOutCooldown: 0
+      scaleInCooldown: 10 minutes
+scenarios:
+  zone-outage:
+    name: Losing us-east-1a
+    description: "At 3m us-east-1a goes down for five minutes, with a third of the web servers and workers, the ALB's node there, the database's primary and one cache shard's primary. Clients still holding the dead node's address fail for a minute (the ALB's DNS TTL), the other nodes send a third of their requests to the dead servers for half a minute (until two health checks have failed), the cache shard promotes its replica in eight seconds, and the database takes a minute and a half to fail over to its standby in us-east-1b, failing checkouts and cache misses meanwhile: over half the pages fail for half a minute, fewer as DNS answers expire, then one in twelve until the database is back, a minute and forty seconds in. After that nobody sees an error, though the zone is still down: the 50% CPU target leaves room for eight servers to carry the load, and Auto Scaling has their replacements serving in the other zones three and a half minutes in, while the workers, on EC2 status checks rather than the load balancer's, run one short for six minutes and the jobs that failed wait in the queue. When the zone is back, its ALB node returns to DNS and Auto Scaling starts moving servers back into it, one at a time."
+    duration: 13m
+    warmup: 2m
+    timeline:
+      - at: 3m
+        note: us-east-1a goes down
+        inject:
+          target: zone:aws:us-east-1:us-east-1a
+          fault: Outage
+          for: 5m
+      - at: 8m
+        note: us-east-1a is back
+    assert:
+      - check: alb.rate.deadNode > 50/s
+        name: Clients holding us-east-1a's DNS answer reach its load balancer node, which is gone
+        from: 3m
+        to: 3m20s
+      - check: alb.rate.elb.502 > 50/s
+        name: Cross-zone, the other nodes send a third of their requests to the dead instances (502)
+        from: 3m
+        to: 3m25s
+      - check: alb.rate.elb.502 == 0
+        name: until two failed health checks, 30 seconds apart, take them out
+        from: 3m50s
+      - check: cache.total.failovers == 1
+        name: The cache shard whose primary was in us-east-1a promotes its replica in another zone
+      - check: buyers.errorRatio > 90%
+        name: Checkouts fail while the database fails over to its standby in us-east-1b
+        from: 3m10s
+        to: 4m
+      - check: system.errorRatio == 0
+        name: Two minutes in nobody sees an error, though the zone is still down
+        from: 5m30s
+      - check: web.gauge.inService:min >= 12
+        name: Auto Scaling replaces the four lost web servers in the other two zones
+        from: 7m
+        to: 8m
+      - check: workers.gauge.inService:max == 2
+        name: The workers, on EC2 status checks, run one short for six minutes
+        from: 3m10s
+        to: 8m40s
+  flash-sale:
+    name: A flash sale outruns launch time
+    description: "At 3m a flash sale triples the traffic for seven minutes: 36 vCPUs of work for the twelve servers' 24. Their queues fill, a third of the requests fail and the rest take two seconds. The policy asks for 19 servers at 4m and 24 at 5m (CPU can't read more than 100%, so it can at most double the group), but they take three minutes to launch, so shoppers see errors for four minutes; then the group grows to 38, the last of them arriving after the sale is over. The three workers can't keep up with three times the orders, and the jobs queue holds a thousand of them until the sale ends."
+    duration: 13m
+    warmup: 2m
+    timeline:
+      - at: 3m
+        note: the sale starts, three times the traffic
+        set:
+          node: shoppers
+          settings:
+            rps: 840
+      - at: 3m
+        set:
+          node: buyers
+          settings:
+            rps: 60
+      - at: 10m
+        note: the sale ends
+        set:
+          node: shoppers
+          settings:
+            rps: 280
+      - at: 10m
+        set:
+          node: buyers
+          settings:
+            rps: 20
+    assert:
+      - check: shoppers.errorRatio > 20%
+        name: Twelve web servers can't serve three times the traffic, and shoppers see errors
+        from: 3m10s
+        to: 6m50s
+      - check: shoppers.latency.p95 > 1500ms
+        name: and pages that take two seconds
+        from: 3m10s
+        to: 6m50s
+      - check: web.gauge.desired:max >= 24
+        name: The policy asks for twice as many servers within two minutes
+        from: 3m
+        to: 5m30s
+      - check: web.gauge.inService:max == 12
+        name: but none of them serves for four minutes
+        from: 3m
+        to: 6m45s
+      - check: shoppers.errorRatio == 0
+        name: Once they do, the errors stop
+        from: 7m30s
+      - check: jobs.gauge.depth:max > 500
+        name: The three workers can't keep up with the sale's orders, and the queue holds them
+        from: 7m
+        to: 10m
+      - check: web.gauge.inService:max >= 36
+        name: The group ends three times its size, still launching after the sale is over
+        from: 11m30s
+  flash-sale-warm-pool:
+    name: The same sale, with a warm pool
+    description: The same sale, with a warm pool of stopped instances whose user data has already run (up to 40 prepared, so 28 waiting, costing only their EBS volumes). The policy reacts no sooner, but its instances start, boot and start the application in 90 seconds instead of three minutes, so the errors stop a minute and a half sooner, and the group, seeing its real CPU sooner, stops at 34.
+    duration: 13m
+    warmup: 2m
+    overrides:
+      nodes:
+        web:
+          warmPool:
+            enabled: true
+            poolState: Stopped
+            maxGroupPreparedCapacity: 40
+    timeline:
+      - at: 3m
+        note: the sale starts, three times the traffic
+        set:
+          node: shoppers
+          settings:
+            rps: 840
+      - at: 3m
+        set:
+          node: buyers
+          settings:
+            rps: 60
+      - at: 10m
+        note: the sale ends
+        set:
+          node: shoppers
+          settings:
+            rps: 280
+      - at: 10m
+        set:
+          node: buyers
+          settings:
+            rps: 20
+    assert:
+      - check: web.gauge.warm:min >= 25
+        name: The pool holds 28 stopped instances, their user data already run
+        to: 3m
+      - check: shoppers.errorRatio > 20%
+        name: The policy still takes a minute or two to react
+        from: 3m10s
+        to: 4m50s
+      - check: shoppers.errorRatio == 0
+        name: but errors stop a minute and a half sooner than without the pool
+        from: 5m45s
+      - check: web.total.warmStarts >= 20
+        name: The scale-out comes from the pool
+      - check: web.gauge.inService:max >= 30
+        name: The group reaches its size before the sale is over
+        from: 9m
+        to: 10m
+  flash-sale-quota:
+    name: The same sale, at the vCPU quota
+    description: "The same sale in an account whose On-Demand vCPU quota is 32: it was raised from the default 5 when the shop launched, and nobody has asked since. The fifteen instances running hold 30 vCPUs, so of the 24 web servers the policy asks for, the group gets one more; EC2 refuses the rest, and the group tries again every 30 seconds, while shoppers see errors until the sale is over. The design check says so in advance (the groups would need 86 vCPUs at their maximum sizes): ask for the increase before the sale."
+    duration: 13m
+    warmup: 2m
+    overrides:
+      accounts:
+        aws:us-east-1:
+          ec2OnDemandStandardVcpus: 32
+    timeline:
+      - at: 3m
+        note: the sale starts, three times the traffic
+        set:
+          node: shoppers
+          settings:
+            rps: 840
+      - at: 3m
+        set:
+          node: buyers
+          settings:
+            rps: 60
+      - at: 10m
+        note: the sale ends
+        set:
+          node: shoppers
+          settings:
+            rps: 280
+      - at: 10m
+        set:
+          node: buyers
+          settings:
+            rps: 20
+    assert:
+      - check: web.gauge.desired:max >= 24
+        name: The policy asks for 24 web servers
+        from: 3m
+        to: 6m
+      - check: web.gauge.inService:max <= 13
+        name: but the quota leaves room for one more
+      - check: web.gauge.vcpus:max <= 26
+        name: The web servers hold 26 of the region's 32 vCPUs, the workers the rest
+      - check: web.total.launchRefused >= 10
+        name: EC2 refuses the other launches, retried every 30 seconds
+      - check: shoppers.errorRatio > 20%
+        name: Shoppers see errors for the whole sale
+        from: 7m
+        to: 10m
+      - check: shoppers.errorRatio == 0
+        name: until it ends
+        from: 10m30s

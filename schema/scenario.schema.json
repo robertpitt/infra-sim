@@ -144,14 +144,14 @@
             "properties": {
               "target": {
                 "type": "string",
-                "description": "What breaks: node:<id>, edge:<id> or region:<placement> (region:aws:us-east-1)."
+                "description": "What breaks: node:<id>, edge:<id>, region:<placement> (region:aws:us-east-1) or zone:<placement>:<zone> (zone:aws:us-east-1:us-east-1a)."
               },
               "fault": {
-                "description": "The fault: Outage (Rejects every call at once, like a connection refused or a stopped service. On a region, the whole region is down.) Errors (A fraction of calls fail with a server error after being processed.) Slow (Adds fixed latency to every call.) Blackhole (Calls vanish without a reply; callers wait out their full timeout.) Loss (A fraction of calls vanish without a reply.) Write it as Outage, Slow(250ms), Errors(20%), Loss(10%), or as an object { type: Slow, extra: 250ms }.",
+                "description": "The fault: Outage (Rejects every call at once, like a connection refused or a stopped service. On a region, the whole region is down; on a zone, everything placed in it and every unit a fleet runs there.) Errors (A fraction of calls fail with a server error after being processed.) Slow (Adds fixed latency to every call.) Blackhole (Calls vanish without a reply; callers wait out their full timeout.) Loss (A fraction of calls vanish without a reply.) Crash (Crashes some of a fleet's units at once (EC2 instances, ECS tasks, EKS pods or nodes): calls on them fail, a load balancer keeps sending them traffic until its health checks catch them, and the fleet replaces them when it notices. It happens in an instant; on a component that isn't a fleet it does nothing.) Write it as Outage, Slow(250ms), Errors(20%), Loss(10%), or as an object { type: Slow, extra: 250ms }.",
                 "anyOf": [
                   {
                     "type": "string",
-                    "pattern": "^\\s*(Outage|Errors|Slow|Blackhole|Loss)\\s*(\\(.*\\))?\\s*$"
+                    "pattern": "^\\s*(Outage|Errors|Slow|Blackhole|Loss|Crash)\\s*(\\(.*\\))?\\s*$"
                   },
                   {
                     "type": "object",
@@ -165,7 +165,8 @@
                           "Errors",
                           "Slow",
                           "Blackhole",
-                          "Loss"
+                          "Loss",
+                          "Crash"
                         ]
                       },
                       "extra": {

@@ -1,8 +1,17 @@
-import { type Provider, type Region, INTERNET } from "./Provider.ts"
+import { type Provider, type Region, INTERNET, zoneNames } from "./Provider.ts"
 import { Schema } from "effect"
 
+/**
+ * A place outside any cloud has three zones, `eu-west-a` to `eu-west-c`: an assumption, so that a fleet run in your own
+ * data centres (a Kubernetes cluster, a team's VMs) can spread over failure domains and lose one, as a cloud region's
+ * can. Three is what most cloud regions have.
+ */
+const ZONES_PER_PLACE = 3
+
+const place = (r: Omit<Region, "zones">): Region => ({ ...r, zones: zoneNames(r.id, ZONES_PER_PLACE, "-") })
+
 /** Places outside any cloud: where end users and third-party services are. */
-const internetRegions: ReadonlyArray<Region> = [
+const internetRegions: ReadonlyArray<Region> = ([
   { id: "us-east", name: "US East", lat: 40.7, lon: -74.0 },
   { id: "us-west", name: "US West", lat: 37.8, lon: -122.4 },
   { id: "south-america", name: "South America", lat: -23.5, lon: -46.6 },
@@ -14,7 +23,7 @@ const internetRegions: ReadonlyArray<Region> = [
   { id: "asia-southeast", name: "South-east Asia", lat: 1.3, lon: 103.8 },
   { id: "asia-northeast", name: "North-east Asia", lat: 35.7, lon: 139.7 },
   { id: "oceania", name: "Oceania", lat: -33.9, lon: 151.2 }
-]
+] as const).map(place)
 
 export const internet: Provider = {
   id: INTERNET,

@@ -25,14 +25,19 @@ export const Link = Connector.make({
       return {
         send: (message, done) => {
           const c = fast.settings()
-          return sink.call(shape(message, c), Edge.policyOf(c), done)
+          return sink.call(shapeCall(message, c), Edge.policyOf(c), done)
         }
       }
     })
 })
 
-/** What the call looks like is a property of the connection: what it does, and how much it carries. */
-const shape = (m: Message, c: Edge.Policy): Message =>
-  m.operation === c.request.operation && c.request.payload === 0
+/**
+ * What the call looks like is a property of the connection: what it does, and how much it carries. `caller` keeps what
+ * the call arrived as, for hops that only pass it on.
+ */
+export const shapeCall = (m: Message, c: Pick<Edge.Policy, "request">): Message => {
+  const operation = c.request.operation === "caller" ? m.operation : c.request.operation
+  return operation === m.operation && c.request.payload === 0
     ? m
-    : { ...m, operation: c.request.operation, ...(c.request.payload > 0 ? { bytes: c.request.payload * 1024 } : {}) }
+    : { ...m, operation, ...(c.request.payload > 0 ? { bytes: c.request.payload * 1024 } : {}) }
+}

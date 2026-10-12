@@ -18,13 +18,16 @@ costs), which quotas you are sharing, and what a regional outage does to a multi
 | Default Region (`us-east-1`) for a component with no box | ✅ | Engine behaviour |
 | **Network** | | |
 | Latency between Regions from distance | 🟡 | Engine estimate (great-circle distance, 200 km/ms, x1.35 route factor); AWS publishes no inter-Region latency. Editable per edge |
-| Latency inside a Region | 🟡 | 1 ms, an estimate. Availability Zones are not modelled, so a cross-zone hop costs the same |
+| Latency inside a Region | 🟡 | 1 ms, an estimate; 0.5 ms more between two nodes placed in different zones (assumed: AWS says zones are up to ~100 km apart with single-digit millisecond latency) |
+| **Availability Zones** | | |
+| Zones of each Region | ✅ | Named `us-east-1a`... as AWS names them, as many as the Regions table lists (`catalog.ts`, engine `Region.zones`) |
+| A node in one zone | ✅ | `zone: us-east-1a` on the node (engine). No AWS component uses it yet; the NAT gateway still has its own `zone` setting |
 | **Quotas** | | |
 | Account quotas shown and edited in the box | ✅ | Each service contributes its own (`../<service>/quotas.ts`); the box is where the panel lives |
 | Quotas differ by Region | 🟡 | Only where a service supplies per-Region defaults (Lambda, API Gateway). Others are one number everywhere |
 | **Failure modes** | | |
 | Regional outage, slowdown, errors | ✅ | Inject a fault on `aws:<region>`: every node inside is affected (engine, `Fault.ts`) |
-| Single Availability Zone failure | ❌ | Zones are not modelled: see Not yet simulated |
+| Single Availability Zone failure | ✅ | Inject a fault on `zone:aws:<region>:<zone>` (`zone:aws:us-east-1:us-east-1a`) (the box's Faults panel, "Where"): nodes placed in that zone and the units fleets run there are affected (engine) |
 | **Account** | | |
 | Opt-in Regions | 🟡 | A design using one of the 17 opt-in Regions gets an info note that the account must enable it. Not enforced |
 | Several accounts, GovCloud, China partitions | ❌ | One account per Region; the other partitions are separate AWS accounts and not offered |
@@ -80,11 +83,11 @@ None: the box is not a traffic node. Diagnostics it contributes (through the aud
 
 ## Not yet simulated
 
-1. **Availability Zones.** The most useful missing piece: it is what multi-AZ designs are about (a NAT gateway or
-   interface endpoint per zone, a function in subnets of several zones, "what if one zone fails"). Needs engine work:
-   a `zone` in `Placement` (so a node can be placed in `aws:us-east-1:a`), a `zone` fault target in `Fault.ts` beside
-   `region`, and `Member` in `Provider.ts` carrying the zone and the parent container so audits can count per zone and
-   per VPC. A VPC's `availabilityZones` setting and a NAT gateway's `zone` are already in the model, waiting for it.
+1. **Availability Zones in the AWS components.** The engine has zones now (a node's `zone`, zone faults, fleets that spread
+   over zones: see `SIMULATOR.md`). What is left is using them: a NAT gateway's `zone` setting (a letter) should become the
+   node's zone, an interface endpoint should have a network interface per zone, a function in a VPC should run in the
+   zones of its subnets, and `Member` in `Provider.ts` should carry the zone and the parent container so audits can count
+   per zone and per VPC.
 2. **Two newer Regions in the provider's list.** `../regions.ts` (outside this folder) lacks `ap-east-2` (Taipei) and
    `ap-southeast-6` (New Zealand). `catalog.ts` has all 34 and exports `regions` in the provider's shape: replacing the
    body of `../regions.ts` with `export { regions } from "./region/catalog.ts"` fixes it and makes the catalog the one

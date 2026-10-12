@@ -2,16 +2,33 @@ import type { AnyComponent } from "../Component.ts"
 import { ApiGateway } from "./apigateway/index.ts"
 import { CloudFront } from "./cloudfront/index.ts"
 import { DynamoDb } from "./dynamodb/index.ts"
+import { Ec2 } from "./ec2/index.ts"
+import { Ecs } from "./ecs/index.ts"
+import { Eks } from "./eks/index.ts"
+import { ElastiCache } from "./elasticache/index.ts"
+import { Alb, Nlb } from "./elb/index.ts"
+import { EventBus } from "./eventbridge/index.ts"
+import { Firehose } from "./firehose/index.ts"
+import { Kinesis } from "./kinesis/index.ts"
 import { Lambda } from "./lambda/index.ts"
+import { OpenSearch } from "./opensearch/index.ts"
+import { Rds, RdsProxy } from "./rds/index.ts"
 import { Region } from "./region/index.ts"
+import { Route53 } from "./route53/index.ts"
 import { S3 } from "./s3/index.ts"
+import { Scheduler } from "./scheduler/index.ts"
 import { Ses } from "./ses/index.ts"
 import { Sns } from "./sns/index.ts"
 import { Sqs } from "./sqs/index.ts"
+import { StepFunctions } from "./stepfunctions/index.ts"
 import { NatGateway, Vpc, VpcEndpoint } from "./vpc/index.ts"
+import { Waf } from "./waf/index.ts"
 
 export { provider } from "./provider.ts"
-export { ApiGateway, CloudFront, DynamoDb, Lambda, NatGateway, Region, S3, Ses, Sns, Sqs, Vpc, VpcEndpoint }
+export { Alb, Nlb } from "./elb/index.ts"
+export { Ecs } from "./ecs/index.ts"
+export { Eks } from "./eks/index.ts"
+export { ApiGateway, CloudFront, DynamoDb, Ec2, ElastiCache, EventBus, Firehose, Kinesis, Lambda, NatGateway, OpenSearch, Rds, RdsProxy, Region, Route53, S3, Scheduler, Ses, Sns, Sqs, Vpc, VpcEndpoint, Waf }
 
 /** Every AWS component, in palette order. */
-export const components: ReadonlyArray<AnyComponent> = [Region, Vpc, NatGateway, VpcEndpoint, ApiGateway, CloudFront, Lambda, Sqs, Sns, DynamoDb, S3, Ses]
+export const components: ReadonlyArray<AnyComponent> = [Region, Vpc, NatGateway, VpcEndpoint, ApiGateway, CloudFront, Route53, Waf, Alb, Nlb, Ec2, Ecs, Eks, Lambda, Sqs, Sns, Kinesis, Firehose, EventBus, Scheduler, StepFunctions, DynamoDb, Rds, RdsProxy, ElastiCache, OpenSearch, S3, Ses]

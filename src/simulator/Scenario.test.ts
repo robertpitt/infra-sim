@@ -51,6 +51,12 @@ describe("assertions", () => {
 })
 
 describe("faults and settings written in a scenario", () => {
+  it("reads Crash(n) as that many units, or hosts", () => {
+    expect(parseFault("Crash(2)")).toEqual({ _tag: "Crash", units: 2, on: "units" })
+    expect(parseFault("Crash(1 host)")).toEqual({ _tag: "Crash", units: 1, on: "hosts" })
+    expect(parseFault("Crash(many)")).toMatch(/number of units/)
+  })
+
   it("reads the short and the object forms of a fault", () => {
     expect(parseFault("Outage")).toEqual({ _tag: "Outage" })
     expect(parseFault("slow(250ms)")).toEqual({ _tag: "Slow", extra: 250 })
@@ -107,6 +113,27 @@ describe("running a scenario", () => {
     expect(Object.keys(result.edges)).toHaveLength(2)
     expect(result.assertions.every((a) => a.passed)).toBe(true)
     expect(result.wallMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it("a timeline set changes only what it names: what an autoscaler decided stays", async () => {
+    // An autoscaler grows the service; then a set on the same service changes its service time. Its replicas must stay.
+    const b = Builder.make("scaled", { seed: 2 })
+    const web = b.add("common.client", { id: "web", settings: { arrival: "constant", rps: 400 } })
+    const svc = b.add("common.service", { id: "svc", settings: { replicas: 2, concurrency: 10, serviceTime: { mean: 50, cv: 0 }, startup: "1 second" } })
+    b.connect(web, svc)
+    const doc: Design.Doc = {
+      ...b.build(),
+      controllers: { scaler: { type: "core.target-tracking", target: "svc", settings: { metric: "busy", per: "unit", targetValue: 5, setting: "replicas", min: 2, max: 20 } } }
+    }
+    const result = await play({
+      duration: "60s",
+      warmup: "5s",
+      timeline: [{ at: "40s", set: { node: "svc", settings: { serviceTime: { mean: 40, cv: 0 } } } }],
+      assert: [
+        { check: "svc.gauge.replicas:min > 2", from: "41s", to: "45s", name: "the autoscaler's replicas stay after the set" }
+      ]
+    }, doc)
+    expect(result.assertions[0]!.passed).toBe(true)
   })
 
   it("is deterministic: the same design and seed give the same result", async () => {

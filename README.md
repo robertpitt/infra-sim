@@ -4,13 +4,13 @@
 
 **[Open the live demo →](https://robertpitt.github.io/infra-sim/)** Nothing to install: the whole simulator runs in your browser. Pick an example from the sidebar, press play, and break something.
 
-Simulate cloud infrastructure under traffic and faults. Draw a design (clients, API Gateway, Lambda, SQS, SNS, DynamoDB, S3, regions, external HTTP services), press play, and watch where it scales, where it pushes back, and where it falls over: throttling cascades, retry storms, redelivery loops, regional outages. AWS first, using AWS's published limits (each one marked **hard**, an adjustable **quota**, or **assumed**), with the structure to add other providers.
+Simulate cloud infrastructure under traffic and faults. Draw a design (load balancers and Auto Scaling groups, containers on ECS and EKS, Lambda, queues, streams and event buses, databases, caches and search, regions and availability zones, outside services), press play, and watch where it scales, where it pushes back, and where it falls over: throttling cascades, retry storms, redelivery loops, scale-out that comes too late, a zone or a region going down. AWS first, using AWS's published limits (each one marked **hard**, an adjustable **quota**, or **assumed**), with the structure to add other providers.
 
 The engine is pure [Effect](https://effect.website) (`src/simulator`, no DOM) and runs in a Web Worker in the browser; the UI (`src/ui`) is a client of it. How it works, and why it is fast: [SIMULATOR.md](SIMULATOR.md). Where every number comes from: [docs/AWS-LIMITS.md](docs/AWS-LIMITS.md).
 
-<a href="https://robertpitt.github.io/infra-sim/"><img src="docs/screenshots/scenario.png" alt="The Multi-region example losing us-east-1: the US stack fails, and so do European orders, through their synchronous ledger write to us-east-1, while the website (CloudFront failing over to the European bucket) and European lookups (the global table's replica) stay up; the header shows 40% errors and thirteen alerts firing, and the scenario panel shows its timeline and checks." width="100%"></a>
+<a href="https://robertpitt.github.io/infra-sim/"><img src="docs/screenshots/scenario.png" alt="The Multi-region example losing us-east-1, 105 seconds in: the US stack is down and European orders fail with it through their synchronous ledger write to us-east-1; Route 53 has noticed and is moving US users to Europe, where their orders fail too; the website (CloudFront failing over to the European bucket) and European lookups (the global table's replica) stay up. The header shows 41% errors and eleven alerts firing, and the scenario panel shows its timeline and checks." width="100%"></a>
 
-<sub>The Multi-region example playing its <em>Lose us-east-1</em> scenario. The US region is down, and European orders fail with it because their handler writes to the US ledger synchronously. What was built for it holds: the website stays up as CloudFront fails over to the European bucket, and European lookups read the global table's European replica. The header shows what the clients see (40% errors, thirteen alerts firing); the scenario panel shows the outage on its timeline and the checks it makes.</sub>
+<sub>The Multi-region example playing its <em>Lose us-east-1</em> scenario, 105 seconds in. The US region is down, and European orders fail with it because their handler writes to the US ledger synchronously. What was built for it holds: the website stays up as CloudFront, a global service, fails over to the European bucket, and European lookups read the global table's European replica. Route 53, global too, has noticed the outage and is moving US users to Europe as resolvers' caches expire, but their orders fail there as well, at the same ledger. The header shows what the clients see (41% errors, eleven alerts firing); the scenario panel shows the outage on its timeline and the checks it makes.</sub>
 
 ## A quick tour
 
@@ -23,6 +23,41 @@ The engine is pure [Effect](https://effect.website) (`src/simulator`, no DOM) an
 **Designs are YAML, checked as you type.** The *Editor* tab shows the design as YAML, with completion, hover help and validation from the design's JSON Schema: the same schema VS Code uses for design files. Edits apply with ⌘S or when you go back to the canvas, as one undoable change.
 
 <img src="docs/screenshots/editor.png" alt="The YAML editor with a completion list inside a Lambda function's settings, offering only the settings a Lambda has that aren't set yet." width="100%">
+
+## What it simulates
+
+Each AWS service has its own README in [`src/simulator/aws/`](src/simulator/aws): what is simulated and what isn't yet, every limit with its source, and what is assumed.
+
+| | |
+| --- | --- |
+| **Network and edge** | Regions and availability zones, VPCs, NAT gateways and VPC endpoints, API Gateway, CloudFront, Route 53, WAF, Application and Network Load Balancers |
+| **Compute** | Lambda, EC2 Auto Scaling, ECS (Fargate and EC2 capacity providers), EKS (managed node groups, the Cluster Autoscaler and Karpenter) |
+| **Integration and streaming** | SQS, SNS, EventBridge and EventBridge Scheduler, Step Functions, Kinesis Data Streams, Amazon Data Firehose, SES |
+| **Data** | DynamoDB, S3, RDS and Aurora with RDS Proxy, ElastiCache (Valkey, Redis OSS, Memcached), OpenSearch |
+| **Anywhere** | Traffic sources, outside HTTP services, plain services and actors (for a system with no cloud at all), and a target-tracking autoscaler for any of them |
+
+Faults: an outage, errors or slowness on a component, an edge, a region or one availability zone; black holes and packet loss on an edge; some of a fleet's instances, tasks or pods crashing.
+
+## Examples
+
+Each is a design in [`examples/`](examples) with scenarios to play, in the app or as `@<id>` on the command line.
+
+| Example | What it shows |
+| --- | --- |
+| Event ingestion platform | A customer-data platform on Kinesis, Firehose and OpenSearch: a launch, a CRM outage only the destinations notice, an under-provisioned profiles table |
+| URL shortener | CloudFront shielding redirects while clicks stream through Kinesis: a viral link, a bulk import using up a partner's quota, a bad deploy of the counter |
+| Order pipeline | A flash sale outrunning a provisioned table, SES at its starting quota, a shipping partner down |
+| Retry storm | Retries three layers deep turning sixty shoppers a second into a thousand calls on a slow provider, and the timeouts that tame them |
+| Multi-region | Losing a region: what CloudFront failover, global tables and Route 53 save, and what one synchronous cross-region write loses |
+| Fan-out | SNS keeping each subscriber's trouble its own: a mail provider down, partner webhooks down, SMS throttled, a search backfill |
+| Autoscaled cluster | No cloud at all: replicas that take time to start, two autoscalers on different metrics, a slow database |
+| Order saga | A Step Functions saga with compensation and an EventBridge fan-out: a payment outage, a loyalty partner down, a flash sale against the workflow quotas |
+| Clickstream analytics | A hot shard more shards can't fix, a poison record blocking a shard, Firehose buffer sizes against object counts |
+| Product catalog and search | A nightly reindex starving search, a celebrity product on one cache shard, an Aurora failover, a lost availability zone |
+| Multi-tenant SaaS API | WAF against credential stuffing, 40,000 tenants' midnight jobs against a flexible time window, RDS Proxy through a failover |
+| Three-tier web shop on EC2 | An Auto Scaling group behind an ALB over three zones: losing a zone, a surge against a warm pool, the vCPU quota |
+| Ticketing on ECS Fargate | Services on Fargate behind an ALB: an on-sale rush against slow image pulls and lazy loading, a bad deploy the circuit breaker rolls back, a Fargate Spot wave on a worker scaled by its queue's backlog |
+| Kubernetes on EKS | Two-level scaling: the Cluster Autoscaler against Karpenter in a flash sale, a lost zone's slow eviction, a rollout that stalls |
 
 ## Quick start
 
@@ -132,7 +167,7 @@ npm run build:cli                                        # dist-cli/infra-sim.mj
 
 A **scenario** is what happens to a design: duration, traffic, setting overrides, a timeline of faults and live changes, and
 assertions (`api.errorRatio < 1%`, `orders-queue.gauge.depth:max < 5000`, `system.latency.p99 < 800ms`). A design carries
-the scenarios written for it under `scenarios` (every example has at least one: a link going viral, a retry storm, a lost region, a provider outage, a
+the scenarios written for it under `scenarios` (every example has some: a link going viral, a retry storm, a lost region or zone, a provider outage, a
 traffic surge), and `--scenario <id>` plays one; a scenario can also be a file of its own that names its design.
 The app plays the open design's scenarios live (the dock's **Scenario** tab): the timeline happens at its times, each check shows whether
 it is holding, and the run stops at the end with a verdict. Every run is also watched by standard **alarms** (errors,

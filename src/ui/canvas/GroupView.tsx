@@ -16,7 +16,10 @@ import { GROUP_HEAD_H } from "./groups.ts"
 export const GroupView = memo(function GroupView({ id, data, selected }: NodeProps<ContainerNode>) {
   const { spec, manifest, placement, detail, level } = data
   const down = useStore(run, (s) => s.faults.some((f) => f.target.kind === "region" && f.target.id === placement && f.fault._tag === "Outage"))
-  const impaired = useStore(run, (s) => s.faults.some((f) => f.target.kind === "region" && f.target.id === placement))
+  const inZone = (f: { readonly target: { readonly kind: string; readonly id: string } }) => placement !== undefined && f.target.kind === "zone" && f.target.id.startsWith(`${placement}:`)
+  const impaired = useStore(run, (s) => s.faults.some((f) => (f.target.kind === "region" && f.target.id === placement) || inZone(f)))
+  // Zones of the region with an outage, named: "us-east-1a, us-east-1b".
+  const zonesDown = useStore(run, (s) => [...new Set(s.faults.filter((f) => inZone(f) && f.fault._tag === "Outage").map((f) => f.target.id.slice(placement!.length + 1)))].join(", "))
   return (
     <div
       className="group-box"
@@ -31,10 +34,13 @@ export const GroupView = memo(function GroupView({ id, data, selected }: NodePro
         </span>
         <span className="group-title">
           <b>{spec.name ?? id}</b>
-          <i>{detail}</i>
+          <i>
+            {detail}
+            {zonesDown !== "" && <span className="zones-down"> · {zonesDown} down</span>}
+          </i>
         </span>
         {impaired && (
-          <span className="node-badge fault" title={down ? "Region outage injected" : "Region fault injected"}>
+          <span className="node-badge fault" title={down ? "Region outage injected" : zonesDown !== "" ? `Zone outage: ${zonesDown}` : "Fault injected on the region or one of its zones"}>
             <Icon name="bolt" size={12} />
           </span>
         )}

@@ -29,8 +29,12 @@ const highlightValue = (h: Highlight, stats: Stats | undefined): string => {
  */
 export const NodeView = memo(function NodeView({ id, data, selected }: NodeProps<ComponentNode>) {
   const { spec, manifest, path, level } = data
-  const faults = useStore(run, (s) => s.faults.filter((f) => f.target.kind === "node" && f.target.id === id).length)
-  const down = useStore(run, (s) => s.faults.some((f) => f.target.kind === "node" && f.target.id === id && f.fault._tag === "Outage"))
+  // A node placed in a zone is reached by that zone's faults too (zone ids end with the zone's name, which names its region).
+  const zone = spec.zone === undefined ? undefined : `:${spec.zone}`
+  const own = (f: { readonly target: { readonly kind: string; readonly id: string } }) =>
+    (f.target.kind === "node" && f.target.id === id) || (zone !== undefined && f.target.kind === "zone" && f.target.id.endsWith(zone))
+  const faults = useStore(run, (s) => s.faults.filter(own).length)
+  const down = useStore(run, (s) => s.faults.some((f) => own(f) && f.fault._tag === "Outage"))
   // Alarms firing on this node: the worst severity, and what they are, for the badge.
   const alerting = useStore(run, (s) => {
     let worst: "critical" | "warning" | undefined
@@ -66,7 +70,10 @@ export const NodeView = memo(function NodeView({ id, data, selected }: NodeProps
         </span>
         <span className="node-title">
           <span className="node-name">{spec.name ?? id}</span>
-          <span className="node-type">{manifest?.title ?? `Unknown: ${spec.type}`}</span>
+          <span className="node-type">
+            {manifest?.title ?? `Unknown: ${spec.type}`}
+            {spec.zone !== undefined && ` · ${spec.zone}`}
+          </span>
         </span>
         {controlled > 0 && (
           <span className="node-badge controlled" title={`${controlled} controller${controlled > 1 ? "s" : ""} change${controlled > 1 ? "" : "s"} this while it runs`}>
@@ -79,7 +86,7 @@ export const NodeView = memo(function NodeView({ id, data, selected }: NodeProps
           </span>
         )}
         {faults > 0 && (
-          <span className="node-badge fault" title={`${faults} fault${faults > 1 ? "s" : ""} injected`}>
+          <span className="node-badge fault" title={down ? "Down: an outage is injected on it or its zone" : `${faults} fault${faults > 1 ? "s" : ""} injected`}>
             <Icon name="bolt" size={12} />
           </span>
         )}

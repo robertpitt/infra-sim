@@ -2,8 +2,8 @@ import { type Example, examples } from "#examples"
 import { Design, type Scenario } from "#simulator"
 import type { Doc, Position } from "./types.ts"
 import { createStore } from "../lib/store.ts"
-import { containerAt, GROUP_DEFAULT, isContainer, rectOf, withDescendants } from "../canvas/groups.ts"
-import { catalog } from "./engine.ts"
+import { containerAt, GROUP_DEFAULT, isContainer, rectOf, regionOf, withDescendants } from "../canvas/groups.ts"
+import { catalog, registry, zonesOf } from "./engine.ts"
 
 export type Selection = { readonly kind: "node" | "edge"; readonly id: string }
 
@@ -181,6 +181,22 @@ const adopt = (design: Doc, id: string): Doc => {
       next = { ...next, nodes: { ...next.nodes, [id]: free } }
     }
   }
+  return withFittingZones(next, withDescendants(next, id))
+}
+
+/** Drop the zone of any of these nodes whose region no longer has it (it moved to another region, or a box changed). */
+const withFittingZones = (design: Doc, ids: ReadonlyArray<string>): Doc => {
+  const manifests = catalog.get().byType
+  let next = design
+  for (const id of ids) {
+    const node = next.nodes[id]
+    const provider = node === undefined ? undefined : manifests[node.type]?.provider
+    if (node?.zone === undefined || provider === undefined) continue
+    const { region } = regionOf(next, manifests, (p) => registry.provider(p)?.defaultRegion, id)
+    if (region !== undefined && zonesOf(provider, region).includes(node.zone)) continue
+    const { zone: _zone, ...rest } = node
+    next = { ...next, nodes: { ...next.nodes, [id]: rest } }
+  }
   return next
 }
 
@@ -219,13 +235,22 @@ export const beginResize = (id: string): ((size: { w: number; h: number }) => vo
     })
 }
 
-/** A node's own region, for nodes no container places. `undefined` falls back to the provider's default. */
+/** A node's own region, for nodes no container places. `undefined` falls back to the provider's default. A zone of the old region goes. */
 export const setNodeRegion = (id: string, region: string | undefined): void =>
   commit((d) => {
     const node = d.nodes[id]
     if (node === undefined) return d
     const { region: _old, ...rest } = node
-    return { ...d, nodes: { ...d.nodes, [id]: region === undefined ? rest : { ...rest, region } } }
+    return withFittingZones({ ...d, nodes: { ...d.nodes, [id]: region === undefined ? rest : { ...rest, region } } }, [id])
+  })
+
+/** The availability zone a node lives in (a single-zone resource), or `undefined` for none. */
+export const setNodeZone = (id: string, zone: string | undefined): void =>
+  commit((d) => {
+    const node = d.nodes[id]
+    if (node === undefined) return d
+    const { zone: _old, ...rest } = node
+    return { ...d, nodes: { ...d.nodes, [id]: zone === undefined ? rest : { ...rest, zone } } }
   })
 
 /** An account-level quota for a placement such as `aws:us-east-1`. */
@@ -243,7 +268,11 @@ export const renameNode = (id: string, name: string): void =>
   commit((d) => Design.patchNode(d, id, { name }), `name:${id}`)
 
 export const setNodeSetting = (id: string, path: ReadonlyArray<string>, value: unknown): void =>
-  commit((d) => Design.setNodeSetting(d, id, path, value), `node:${id}:${path.join(".")}`)
+  commit((d) => {
+    const next = Design.setNodeSetting(d, id, path, value)
+    // A region box moved to another region takes its contents with it: zones of the old one go.
+    return catalog.get().byType[next.nodes[id]?.type ?? ""]?.container?.decidesRegion ? withFittingZones(next, withDescendants(next, id)) : next
+  }, `node:${id}:${path.join(".")}`)
 
 export const setEdgeSetting = (id: string, path: ReadonlyArray<string>, value: unknown): void =>
   commit((d) => Design.setEdgeSetting(d, id, path, value), `edge:${id}:${path.join(".")}`)

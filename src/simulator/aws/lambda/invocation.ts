@@ -59,10 +59,27 @@ const downstream = (fn: FunctionRuntime, message: Message, c: Settings, done: Fl
   const { out, fast } = fn
   const m = unbatched(message)
   if (m.count > 1 && c.batchCalls === "each") {
-    const each = { ...m, count: 1, bytes: Math.max(1, Math.round(m.bytes / m.count)) }
-    return Flow.forEach(m.count, 10, (_, d) => Flow.fanOut(c.fanOut, out, fast.random, each, d), done)
+    const each = recordOf(m, Math.max(1, Math.round(m.bytes / m.count)))
+    return Flow.forEach(m.count, 10, (_, d) => Flow.fanOut(c.fanOut, out, fast.random, keyed(each, m, fast), d), done)
   }
   return Flow.fanOut(c.fanOut, out, fast.random, m, done)
+}
+
+/** One record of a batch, as a call of its own. */
+const recordOf = (m: Message, bytes: number): Message => {
+  const { spread: _, ...record } = m
+  return { ...record, count: 1, bytes }
+}
+
+/**
+ * A record's own key: the batch's shared key for its share of the batch (`1 - spread`), a key of its own for the rest,
+ * so a function writing a record at a time spreads over a table's partitions as its records do. A batch whose records
+ * all share the key needs no copy.
+ */
+const keyed = (record: Message, batch: Message, fast: Pick<Fast<unknown>, "random">): Message => {
+  const spread = batch.spread ?? 1
+  if (spread <= 0 || fast.random.nextDoubleUnsafe() >= spread) return record
+  return { ...record, key: fast.random.nextDoubleUnsafe() }
 }
 
 /**
@@ -85,8 +102,8 @@ const downstreamReporting = (fn: FunctionRuntime, message: Message, c: Settings,
   const plain = unbatched(message)
   const each = Math.max(1, Math.round(plain.bytes / plain.count))
   if (c.batchCalls === "each") {
-    const record = { ...plain, count: 1, bytes: each }
-    return Flow.forEachSettled(rest, 10, (_, d) => Flow.fanOut(c.fanOut, out, fast.random, record, d), (bad) =>
+    const record = recordOf(plain, each)
+    return Flow.forEachSettled(rest, 10, (_, d) => Flow.fanOut(c.fanOut, out, fast.random, keyed(record, plain, fast), d), (bad) =>
       finish(bad.length === 0 ? failed : [...failed, ...bad].sort((a, b) => a - b)))
   }
   // One call for what is left of the batch: if it fails, every record in it failed.

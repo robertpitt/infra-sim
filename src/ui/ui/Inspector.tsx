@@ -16,9 +16,10 @@ import {
   setEdgeConnector,
   setEdgeSetting,
   setNodeRegion,
-  setNodeSetting
+  setNodeSetting,
+  setNodeZone
 } from "../state/document.ts"
-import { accountFields, catalog, connectorOf, registry } from "../state/engine.ts"
+import { accountFields, catalog, connectorOf, registry, zonesOf } from "../state/engine.ts"
 import type { ControllerManifest } from "../state/types.ts"
 import { FaultPanel } from "./FaultPanel.tsx"
 import { Icon } from "./Icon.tsx"
@@ -43,6 +44,7 @@ export function NodeSettings({ id }: { id: string }) {
   const provider = providers.find((p) => p.id === manifest?.provider)
   const { region, decidedBy } = regionOf(design, manifests, (p) => registry.provider(p)?.defaultRegion, id)
   const placement = manifest === undefined || region === undefined ? undefined : `${manifest.provider}:${region}`
+  const zones = manifest === undefined || region === undefined ? [] : zonesOf(manifest.provider, region)
   const inside = Object.entries(design.nodes).filter(([, n]) => n.parent === id)
 
   return (
@@ -92,6 +94,31 @@ export function NodeSettings({ id }: { id: string }) {
               <p className="help">
                 Set by <button className="link" onClick={() => select({ kind: "node", id: decidedBy })}>{design.nodes[decidedBy]?.name ?? decidedBy}</button>. Drag the node out of the box to choose its own.
               </p>
+            )}
+            {zones.length > 0 && (
+              <div className="field row">
+                <span className="field-lead">
+                  <label className="field-label">Zone</label>
+                  <span
+                    className="hint"
+                    title={
+                      manifest?.fleet
+                        ? "Its replicas spread over zones by its own Zones setting. Placing it in one zone puts all of it there: a zone outage then takes the whole of it down."
+                        : "The availability zone it lives in, for a single-zone resource: an outage of that zone takes it down. Regional: no zone fault reaches it."
+                    }
+                  >
+                    <Icon name="info" size={11} />
+                  </span>
+                </span>
+                <select value={spec.zone ?? ""} onChange={(e) => setNodeZone(id, e.target.value === "" ? undefined : e.target.value)} aria-label="Zone">
+                  <option value="">None (regional)</option>
+                  {zones.map((z) => (
+                    <option key={z} value={z}>
+                      {z}
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
           </Section>
         )}
@@ -158,11 +185,11 @@ export function NodeSettings({ id }: { id: string }) {
         )}
 
         {box ? (
-          manifest?.container?.decidesRegion && placement !== undefined && <FaultPanel target={{ kind: "region", id: placement }} />
+          manifest?.container?.decidesRegion && placement !== undefined && <FaultPanel target={{ kind: "region", id: placement }} zones={zones} />
         ) : (
           <>
             <Controllers target={id} type={spec.type} />
-            <FaultPanel target={{ kind: "node", id }} />
+            <FaultPanel target={{ kind: "node", id }} fleet={manifest?.fleet === true} />
             <Section title="Live metrics">
               <Metrics stats={stats} />
             </Section>

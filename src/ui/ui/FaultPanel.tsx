@@ -18,11 +18,20 @@ const DURATIONS: ReadonlyArray<{ label: string; ms: number | undefined }> = [
 const describe = (key: string, value: unknown): string =>
   typeof value !== "number" ? String(value) : key.endsWith("ate") ? `${Math.round(value * 100)}%` : fmtMs(value)
 
-/** Inject and clear faults on a node or an edge. The kinds and their parameters come from the engine's catalogue. */
-export function FaultPanel({ target }: { target: Target }) {
+/**
+ * Inject and clear faults on a node, an edge or a region. The kinds and their parameters come from the engine's
+ * catalogue. A region's panel is given its zones too: a fault then goes on the whole region or on one zone of it.
+ */
+export function FaultPanel({ target: region, zones = [], fleet = false }: { target: Target; zones?: ReadonlyArray<string>; fleet?: boolean }) {
+  const [where, setWhere] = useState<string>("")
+  const zone = region.kind === "region" && zones.includes(where) ? where : undefined
+  const target: Target = zone === undefined ? region : { kind: "zone", id: `${region.id}:${zone}` }
+  /** Faults on this target, and for a region on any of its zones too. */
+  const mine = (f: { readonly target: Target }) =>
+    (f.target.kind === region.kind && f.target.id === region.id) || (region.kind === "region" && f.target.kind === "zone" && f.target.id.startsWith(`${region.id}:`))
   const active = useStore(
     run,
-    (s) => s.faults.filter((f) => f.target.kind === target.kind && f.target.id === target.id),
+    (s) => s.faults.filter(mine),
     (a, b) => a.length === b.length && a.every((f, i) => f.id === b[i]?.id)
   )
   const now = useStore(run, (s) => s.status?.t ?? 0)
@@ -30,7 +39,7 @@ export function FaultPanel({ target }: { target: Target }) {
   const [params, setParams] = useState<Record<string, unknown>>({})
   const [duration, setDuration] = useState<number | undefined>(undefined)
   const all = useStore(catalog, (s) => s.faults)
-  const kinds = all.filter((k) => k.targets.includes(target.kind))
+  const kinds = all.filter((k) => k.targets.includes(target.kind) && (fleet || k.fleetsOnly !== true))
   const choice = kinds.find((k) => k.tag === open)
 
   const inject = () => {
@@ -49,7 +58,10 @@ export function FaultPanel({ target }: { target: Target }) {
         <ul className="fault-list">
           {active.map((f) => (
             <li key={f.id}>
-              <span className="fault-kind">{all.find((k) => k.tag === f.fault._tag)?.label ?? f.fault._tag}</span>
+              <span className="fault-kind">
+                {all.find((k) => k.tag === f.fault._tag)?.label ?? f.fault._tag}
+                {f.target.kind === "zone" && <span className="muted"> · {f.target.id.slice(region.id.length + 1)}</span>}
+              </span>
               <span className="fault-meta">
                 {Object.entries(f.fault)
                   .filter(([key]) => key !== "_tag")
@@ -63,6 +75,24 @@ export function FaultPanel({ target }: { target: Target }) {
             </li>
           ))}
         </ul>
+      )}
+      {region.kind === "region" && zones.length > 0 && (
+        <div className="field row">
+          <span className="field-lead">
+            <label className="field-label">Where</label>
+            <span className="hint" title="A zone fault reaches the nodes placed in that zone and the replicas fleets run there; a region fault reaches everything in the region.">
+              <Icon name="info" size={11} />
+            </span>
+          </span>
+          <select value={where} onChange={(e) => setWhere(e.target.value)} aria-label="Where">
+            <option value="">The whole region</option>
+            {zones.map((z) => (
+              <option key={z} value={z}>
+                Zone {z}
+              </option>
+            ))}
+          </select>
+        </div>
       )}
       <div className="fault-buttons">
         {kinds.map((k) => (
@@ -107,7 +137,7 @@ export function FaultPanel({ target }: { target: Target }) {
           className="btn small ghost"
           onClick={() => active.forEach((f) => client.send({ _tag: "clearFault", id: f.id }))}
         >
-          Clear all on this {target.kind}
+          Clear all on this {region.kind}
         </button>
       )}
     </section>

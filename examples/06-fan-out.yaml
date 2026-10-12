@@ -2,11 +2,11 @@
 version: 1
 name: Fan-out
 description: |-
-  An order event fanned out by SNS to email, SMS and push notifications, partner webhooks, a search index, an audit table and an analytics lake, each through a subscription of its own, so that one subscriber's trouble stays with that subscriber. About two dozen components in one region.
+  An order event fanned out by SNS to email, SMS and push notifications, partner webhooks, an OpenSearch index, an audit table and an analytics lake, each through a subscription of its own, so that one subscriber's trouble stays with that subscriber. About two dozen components in one region, two of them in a VPC.
 
-  How it is wired: the shop invokes the place-order function asynchronously, and an order it still cannot place after Lambda's two retries goes to its on-failure destination, a queue of failed orders. The function publishes to the order-placed topic, whose filter policies decide who hears about what: every order gets an email, a quarter of them a text (the customers who asked for one), orders from the app a push notification and orders from partner channels a webhook. Email, SMS and webhooks are queue-backed, each queue drained by a sender function of its own toward an external provider: the email provider takes 200 calls a second, the SMS gateway only 50. Their retry budgets differ too: an email is tried ten times a minute apart before it goes to the notifications dead-letter queue, a text five times, and a webhook four times thirty seconds apart before it goes to a DLQ of its own, kept for replaying to the partners. The webhook sender reports partial batch failures; the emailer and the SMS sender fail a whole batch when one message in it fails. The push sender and the search indexer are subscribed directly, so Lambda's asynchronous queue and retries stand in for SQS (a push still failing after them is dropped: a late push is worse than none). Every event is written to the audit table, and the analytics loader batches events from its queue into the S3 lake.
+  How it is wired: the shop invokes the place-order function asynchronously, and an order it still cannot place after Lambda's two retries goes to its on-failure destination, a queue of failed orders. The function publishes to the order-placed topic, whose filter policies decide who hears about what: every order gets an email, a quarter of them a text (the customers who asked for one), orders from the app a push notification and orders from partner channels a webhook. Email, SMS and webhooks are queue-backed, each queue drained by a sender function of its own toward an external provider: the email provider takes 200 calls a second, the SMS gateway only 50. Their retry budgets differ too: an email is tried ten times a minute apart before it goes to the notifications dead-letter queue, a text five times, and a webhook four times thirty seconds apart before it goes to a DLQ of its own, kept for replaying to the partners. The webhook sender reports partial batch failures; the emailer and the SMS sender fail a whole batch when one message in it fails. The push sender and the search indexer are subscribed directly, so Lambda's asynchronous queue and retries stand in for SQS (a push still failing after them is dropped: a late push is worse than none). The search indexer runs in the shop's VPC beside the OpenSearch domain it writes to, one order a request: three r6g.large data nodes holding the order index's three primary shards and a replica of each, which index the 120 orders a second with most of their CPU to spare. The indexer's reserved concurrency of 100 caps it at about 1,600 writes a second, which the domain indexes at 80% CPU, and keeps it from taking the concurrency the region's other functions need. A backfill script, idle until a scenario starts it, can invoke the indexer directly to replay orders. Every event is written to the audit table, and the analytics loader batches events from its queue into the S3 lake.
 
-  What the simulator cannot show: filter policies as rules (each subscription lets a share of the events through), SMS and mobile push as SNS protocols (here they are a function calling an external gateway), and the audit table written straight from the topic (in AWS a small function or EventBridge Pipes would do it). The search cluster is an HTTP endpoint standing in for OpenSearch.
+  What the simulator cannot show: filter policies as rules (each subscription lets a share of the events through), SMS and mobile push as SNS protocols (here they are a function calling an external gateway), and the audit table written straight from the topic (in AWS a small function or EventBridge Pipes would do it). The search domain only indexes: the searches that would read it (customer service, the order history in the app) aren't drawn, its storage and its three availability zones aren't modelled, and the CPU an order document costs to index is the simulator's assumption. The backfill script is a client invoking the indexer at a set rate; a real one would read the orders back from the lake.
 seed: 3
 nodes:
   aws-eu-west-1:
@@ -15,7 +15,13 @@ nodes:
     settings:
       region: eu-west-1
     position: { x: 332, y: -66 }
-    size: { w: 1572, h: 1786 }
+    size: { w: 1572, h: 1888 }
+  shop-vpc:
+    type: aws.vpc
+    name: Shop VPC
+    parent: aws-eu-west-1
+    position: { x: 972, y: 1524 }
+    size: { w: 612, h: 270 }
   app:
     type: common.client
     name: Shop (web and app)
@@ -24,6 +30,14 @@ nodes:
       rps: 120
       invocation: async
     position: { x: 0, y: 774 }
+  backfill:
+    type: common.client
+    name: Backfill script (replays orders)
+    region: eu-west
+    settings:
+      rps: 0
+      invocation: async
+    position: { x: 0, y: 1630 }
   place-order:
     type: aws.lambda
     name: Place order
@@ -131,26 +145,29 @@ nodes:
   search-indexer:
     type: aws.lambda
     name: Search indexer
-    parent: aws-eu-west-1
+    parent: shop-vpc
     settings:
       memory: 512
       duration: { mean: 25 }
-    position: { x: 1000, y: 872 }
-  search-cluster:
-    type: common.http-endpoint
-    name: Search cluster (OpenSearch stand-in)
-    region: eu-west
+      reserved: { enabled: true, concurrency: 100 }
+    position: { x: 1000, y: 1590 }
+  order-search:
+    type: aws.opensearch
+    name: Order search (OpenSearch)
+    parent: shop-vpc
     settings:
-      latency: { mean: 20, cv: 0.5 }
-      maxConcurrency: 200
-    position: { x: 2000, y: 936 }
+      instanceType: r6g.large.search
+      dataNodes: 3
+      primaryShards: 3
+      replicas: 1
+    position: { x: 1320, y: 1654 }
   analytics-queue:
     type: aws.sqs
     name: Analytics queue
     parent: aws-eu-west-1
     settings:
       visibilityTimeout: 2 minutes
-    position: { x: 1000, y: 1078 }
+    position: { x: 1000, y: 872 }
   analytics-loader:
     type: aws.lambda
     name: Analytics loader
@@ -160,12 +177,12 @@ nodes:
       timeout: 60 seconds
       duration: { mean: 800 }
       batchCalls: once
-    position: { x: 1320, y: 1102 }
+    position: { x: 1320, y: 896 }
   order-lake:
     type: aws.s3
     name: Order events lake
     parent: aws-eu-west-1
-    position: { x: 1640, y: 1138 }
+    position: { x: 1640, y: 932 }
   webhook-queue:
     type: aws.sqs
     name: Webhook queue
@@ -173,7 +190,7 @@ nodes:
     settings:
       visibilityTimeout: 30 seconds
       maxReceives: 4
-    position: { x: 1000, y: 1284 }
+    position: { x: 1000, y: 1078 }
   webhook-sender:
     type: aws.lambda
     name: Webhook sender
@@ -184,21 +201,21 @@ nodes:
       duration: { mean: 20 }
       batch:
         errors: report
-    position: { x: 1320, y: 1308 }
+    position: { x: 1320, y: 1102 }
   partner-endpoints:
     type: common.http-endpoint
     name: Partner webhook endpoints
     region: us-east
     settings:
       latency: { mean: 300, cv: 1 }
-    position: { x: 2000, y: 1372 }
+    position: { x: 2000, y: 1166 }
   webhook-dlq:
     type: aws.sqs
     name: Webhook DLQ
     parent: aws-eu-west-1
     settings:
       retention: 14 days
-    position: { x: 1320, y: 1516 }
+    position: { x: 1320, y: 1310 }
 edges:
   app.out->place-order:
     from: { node: app }
@@ -265,9 +282,12 @@ edges:
     to: push-service
     settings:
       retry: { maxAttempts: 2 }
-  search-indexer.out->search-cluster:
+  backfill.out->search-indexer:
+    from: { node: backfill }
+    to: search-indexer
+  search-indexer.out->order-search:
     from: { node: search-indexer }
-    to: search-cluster
+    to: order-search
     settings:
       retry: { maxAttempts: 2 }
   analytics-queue.deliver->analytics-loader:
@@ -386,7 +406,7 @@ scenarios:
         name: Pushes go out
         from: 1m
         to: 5m
-      - check: search-cluster.rate.ok > 100/s
+      - check: order-search.rate.indexed > 100/s
         name: The search index keeps up
         from: 1m
         to: 5m
@@ -444,3 +464,48 @@ scenarios:
       - check: partner-endpoints.rate.ok > 20/s
         name: Webhooks go out
         from: 1m
+  search-backfill:
+    name: A backfill floods the search indexer
+    description: "A bug kept a quarter of an hour of orders out of the index, and an engineer replays them: a script invokes the search indexer 2,000 times a second for a minute, on top of the live orders. The indexer's reservation holds it to about 1,600 writes a second, which the domain indexes in milliseconds at 80% CPU; Lambda throttles the rest (429) and retries them from its asynchronous queue, so none is lost, but live and replayed orders alike wait their turn and take up to a minute to become searchable. Nobody else notices. Without the reservation the replay would be indexed sooner, but the indexer would write faster than the domain can index, its waiting writes would hold nearly all of the region's 1,000 concurrent executions, and every other function would be throttled: some 2,700 emails would back up in their queue."
+    duration: 5m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the backfill starts, 2,000 orders a second
+        set:
+          node: backfill
+          settings:
+            rps: 2000
+      - at: 2m
+        note: the backfill has sent its orders
+        set:
+          node: backfill
+          settings:
+            rps: 0
+    assert:
+      - check: app.errorRatio < 0.1%
+        name: Orders keep being placed
+      - check: search-indexer.rate.throttles > 1000/s
+        name: Lambda throttles the indexer at its reservation
+        from: 1m30s
+        to: 2m
+      - check: order-search.rate.indexed > 1400/s
+        name: The domain indexes as fast as the reservation lets the indexer write
+        from: 1m
+        to: 2m
+      - check: order-search.latency.p95 < 50ms
+        name: "The domain keeps up: a write takes milliseconds"
+        from: 1m
+        to: 2m
+      - check: order-search.dist.searchableAfter.p95 > 30s
+        name: Orders take up to a minute to become searchable
+        from: 2m
+        to: 3m
+      - check: search-indexer.total.asyncFailed == 0
+        name: No order is lost
+      - check: email-queue.gauge.depth:max < 100
+        name: Emails don't wait
+        from: 1m
+      - check: order-search.dist.searchableAfter.p95 < 2s
+        name: Search catches up
+        from: 4m

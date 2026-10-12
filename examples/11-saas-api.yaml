@@ -1,0 +1,450 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Multi-tenant SaaS API
+description: |-
+  A multi-tenant B2B SaaS backend: 40,000 customer workspaces share one Aurora PostgreSQL database behind a serverless API. Customers' apps and integrations call a public REST API, people sign in through a sign-in API, and every tenant has a job that runs each night. It shows what a shared relational database has to absorb from every side, and what stands in front of it: a WAF rate-based rule that stops a bot on one IP but not a botnet, RDS Proxy turning hundreds of Lambda environments into a handful of database connections and holding queries through an Aurora failover, and EventBridge Scheduler's flexible time window turning a midnight herd of tenant jobs into a trickle.
+
+  How it is wired: each API has its own regional AWS WAF web ACL with AWS managed rule groups and a rate-based rule, 3,000 requests per IP per 5 minutes on the public API and 100 sign-in attempts (POSTs) per IP on the sign-in API. The public API checks callers' tokens with a cached Lambda authorizer and invokes the API handlers, which read or write (three reads to one write) through RDS Proxy; the sign-in API invokes a log-in function that spends 200 ms hashing the password and looks the user up through the same proxy. EventBridge Scheduler holds a schedule per tenant, cron(0 0 * * ? *) with a 10-minute flexible time window, each sending a message to an SQS queue; a worker function, at most 200 at a time, reads each tenant's day of usage and writes its rollup, and jobs that fail three times go to a dead-letter queue. The functions, the proxy and the database (a db.r7g.xlarge writer with 4 vCPUs and max_connections 3,411, and one Aurora Replica to fail over to) are in the VPC. The account's Lambda concurrency quota is raised to 10,000. The scheduler's clock starts at 23:59, so midnight comes one minute in.
+
+  What the simulator cannot show: a request carries no IP address, URL or credentials, so the WAF derives addresses per traffic source, and the two routes are two APIs with a web ACL each (one web ACL with a rate-based rule per route would be usual). AWS WAF Bot Control, account takeover prevention and CAPTCHA, which are what would catch a distributed credential-stuffing botnet, are not modelled. Queries have no content: every read costs the database 3 ms of CPU and every write 5 ms, whoever sends them, and a tenant's job is one read and one write. All the API's queries go to the writer through the proxy's default endpoint, so the replica only stands by. A function's environments share one pool of connections to the proxy rather than holding one each, and the proxy's own capacity is unlimited.
+seed: 7
+accounts:
+  aws:us-east-1:
+    lambdaConcurrency: 10000
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 332, y: -132 }
+    size: { w: 1600, h: 1326 }
+  saas-vpc:
+    type: aws.vpc
+    name: SaaS VPC
+    parent: aws-us-east-1
+    position: { x: 972, y: -66 }
+    size: { w: 932, h: 1028 }
+  customers:
+    type: common.client
+    name: Customers' apps and integrations
+    region: us-east
+    settings:
+      rps: 300
+      payload: 2
+    position: { x: 0, y: 28 }
+  sign-ins:
+    type: common.client
+    name: People signing in
+    region: us-east
+    settings:
+      rps: 10
+      payload: 1
+    position: { x: 0, y: 360 }
+  bot:
+    type: common.client
+    name: Credential-stuffing bot (one IP)
+    region: eu-west
+    settings:
+      rps: 0
+      payload: 1
+      hotKeys: 1
+    position: { x: 0, y: 490 }
+  botnet:
+    type: common.client
+    name: Credential-stuffing botnet (many IPs)
+    region: eu-west
+    settings:
+      rps: 0
+      payload: 1
+    position: { x: 0, y: 620 }
+  api-acl:
+    type: aws.waf
+    name: API web ACL
+    parent: aws-us-east-1
+    settings:
+      protects: apigateway
+      rateRule:
+        limit: 3000
+        window: "300"
+      traffic:
+        addresses: 5000
+      managed:
+        core: true
+        knownBadInputs: true
+        sqlDatabase: true
+        ipReputation: true
+    position: { x: 360, y: 28 }
+  login-acl:
+    type: aws.waf
+    name: Sign-in web ACL
+    parent: aws-us-east-1
+    settings:
+      protects: apigateway
+      rateRule:
+        limit: 100
+        window: "300"
+        scope: write
+      traffic:
+        addresses: 20000
+      managed:
+        core: true
+        knownBadInputs: true
+        ipReputation: true
+        anonymousIp: true
+    position: { x: 360, y: 490 }
+  public-api:
+    type: aws.apigateway
+    name: Public API (REST)
+    parent: aws-us-east-1
+    settings:
+      apiType: rest
+      authorizer: { type: lambda, ttl: 300 seconds, identities: 3000 }
+    position: { x: 680, y: 0 }
+  token-authorizer:
+    type: aws.lambda
+    name: Token authorizer
+    parent: aws-us-east-1
+    settings:
+      memory: 256
+      duration: { mean: 8 }
+    position: { x: 680, y: 200 }
+  auth-api:
+    type: aws.apigateway
+    name: Sign-in API (REST)
+    parent: aws-us-east-1
+    settings:
+      apiType: rest
+    position: { x: 680, y: 462 }
+  api-handler:
+    type: aws.lambda
+    name: API handlers
+    parent: saas-vpc
+    settings:
+      memory: 1024
+      timeout: 30 seconds
+      duration: { mean: 40, cv: 0.5 }
+      fanOut: weighted
+    position: { x: 1000, y: 0 }
+  login:
+    type: aws.lambda
+    name: Log in
+    parent: saas-vpc
+    settings:
+      memory: 1024
+      timeout: 30 seconds
+      duration: { mean: 200, cv: 0.2 }
+    position: { x: 1000, y: 450 }
+  tenant-jobs:
+    type: aws.scheduler
+    name: Nightly tenant jobs (40,000 schedules)
+    parent: aws-us-east-1
+    settings:
+      expression: cron(0 0 * * ? *)
+      clock: 2026-01-05T23:59:00
+      schedules: 40000
+      flexibleWindow: 10
+    position: { x: 360, y: 770 }
+  scheduler-dlq:
+    type: aws.sqs
+    name: Scheduler DLQ
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 360, y: 980 }
+  jobs-queue:
+    type: aws.sqs
+    name: Tenant jobs queue
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 6 minutes
+      maxReceives: 3
+    position: { x: 680, y: 758 }
+  jobs-dlq:
+    type: aws.sqs
+    name: Failed jobs
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 680, y: 990 }
+  worker:
+    type: aws.lambda
+    name: Tenant job worker
+    parent: saas-vpc
+    settings:
+      memory: 1024
+      timeout: 1 minute
+      duration: { mean: 500, cv: 0.4 }
+      batchCalls: once
+    position: { x: 1000, y: 758 }
+  proxy:
+    type: aws.rds-proxy
+    name: RDS Proxy
+    parent: saas-vpc
+    position: { x: 1320, y: 470 }
+  db:
+    type: aws.rds
+    name: Tenant DB (Aurora PostgreSQL)
+    parent: saas-vpc
+    settings:
+      engine: aurora-postgres
+      instanceClass: db.r7g.xlarge
+      readers: 1
+      query:
+        readCpu:
+          mean: 3
+        writeCpu:
+          mean: 5
+    position: { x: 1640, y: 470 }
+edges:
+  customers.out->api-acl:
+    from: { node: customers }
+    to: api-acl
+    settings:
+      timeout: 30 seconds
+  api-acl.out->public-api:
+    from: { node: api-acl }
+    to: public-api
+    settings:
+      latency: { mean: 0 }
+      request: { operation: caller }
+  public-api.authorizer->token-authorizer:
+    from: { node: public-api, port: authorizer }
+    to: token-authorizer
+  public-api.out->api-handler:
+    from: { node: public-api }
+    to: api-handler
+  api-reads:
+    from: { node: api-handler }
+    to: proxy
+    settings:
+      weight: 3
+      request: { operation: read }
+      client:
+        connections: reused
+        hold: 40 millis
+  api-writes:
+    from: { node: api-handler }
+    to: proxy
+    settings:
+      weight: 1
+      request: { operation: write }
+      client:
+        connections: reused
+        hold: 40 millis
+  sign-ins.out->login-acl:
+    from: { node: sign-ins }
+    to: login-acl
+    settings:
+      timeout: 30 seconds
+  bot.out->login-acl:
+    from: { node: bot }
+    to: login-acl
+    settings:
+      timeout: 30 seconds
+  botnet.out->login-acl:
+    from: { node: botnet }
+    to: login-acl
+    settings:
+      timeout: 30 seconds
+  login-acl.out->auth-api:
+    from: { node: login-acl }
+    to: auth-api
+    settings:
+      latency: { mean: 0 }
+      request: { operation: caller }
+  auth-api.out->login:
+    from: { node: auth-api }
+    to: login
+  login.out->proxy:
+    from: { node: login }
+    to: proxy
+    settings:
+      request: { operation: read }
+      client:
+        connections: reused
+        hold: 200 millis
+  tenant-jobs.out->jobs-queue:
+    from: { node: tenant-jobs }
+    to: jobs-queue
+  tenant-jobs.dlq->scheduler-dlq:
+    from: { node: tenant-jobs, port: dlq }
+    to: scheduler-dlq
+  jobs-queue.deliver->worker:
+    from: { node: jobs-queue, port: deliver }
+    to: worker
+    settings:
+      batchSize: 10
+      maxConcurrency: 200
+  jobs-queue.dlq->jobs-dlq:
+    from: { node: jobs-queue, port: dlq }
+    to: jobs-dlq
+  worker-reads:
+    from: { node: worker }
+    to: proxy
+    settings:
+      request: { operation: read }
+      client:
+        connections: reused
+        hold: 500 millis
+  worker-writes:
+    from: { node: worker }
+    to: proxy
+    settings:
+      request: { operation: write }
+      client:
+        connections: reused
+        hold: 500 millis
+  proxy.out->db:
+    from: { node: proxy }
+    to: db
+scenarios:
+  credential-stuffing:
+    name: Credential stuffing
+    description: At 2m a bot starts trying 200 passwords a second from one IP. It passes the sign-in web ACL's limit of 100 attempts per 5 minutes within a second, the next 10-second check catches it and the block takes effect after the propagation delay, so it is blocked within half a minute and nobody signing in notices. At 4m a botnet tries 700 a second from 20,000 addresses, about ten per address per 5 minutes, so the rate-based rule never fires. The log-in function scales to some 300 environments, which RDS Proxy serves with fewer than 20 database connections in use, but every attempt is still a query, and the writer's CPU, at 40% with the nightly jobs running, goes past 90%.
+    duration: 6m30s
+    warmup: 1m30s
+    timeline:
+      - at: 2m
+        note: a bot starts trying passwords from one IP
+        set:
+          node: bot
+          settings:
+            rps: 200
+      - at: 4m
+        note: a botnet starts, spread over 20,000 IPs
+        set:
+          node: botnet
+          settings:
+            rps: 700
+    assert:
+      - check: login-acl.rate.blocked.rateBased > 180/s
+        name: The bot is blocked within half a minute
+        from: 2m30s
+        to: 4m
+      - check: login-acl.gauge.rateLimitedAddresses:max == 1
+        name: One address is rate limited, never the botnet's
+      - check: sign-ins.errorRatio < 0.1%
+        name: People signing in never notice
+      - check: login.rate.in > 650/s
+        name: The botnet stays under the limit and gets through
+        from: 4m15s
+      - check: login.gauge.concurrent:max > 200
+        name: The log-in function scales to hundreds of environments
+        from: 4m
+      - check: proxy.gauge.borrowed:mean < 40
+        name: Through RDS Proxy they use only a few dozen database connections at a time
+        from: 4m15s
+      - check: db.gauge.cpu < 50%
+        name: With the bot blocked, the writer runs at about 40% CPU
+        from: 2m30s
+        to: 4m
+      - check: db.gauge.cpu > 85%
+        name: The botnet's queries take it past 85%
+        from: 4m15s
+  midnight-herd:
+    name: Every tenant at midnight
+    description: The tenants' schedules were created with the flexible time window off, so all 40,000 come due in the minute after midnight, 667 a second. The queue takes them and 200 workers send their queries as fast as the writer can run them; its four vCPUs saturate for over a minute and a half, the customers' queries wait in line behind the jobs, and their API calls go from 160 ms to over two seconds. Nothing fails (the API handlers waiting on the database reach 800 at a time, within the raised quota), no job is lost, and once the queue is drained the API is back to normal.
+    duration: 5m
+    warmup: 30s
+    overrides:
+      nodes:
+        tenant-jobs:
+          flexibleWindow: 0
+    timeline:
+      - at: 1m
+        note: midnight, every tenant's job is due
+    assert:
+      - check: tenant-jobs.rate.invocations > 600/s
+        name: All 40,000 come due in the minute after midnight
+        from: 1m
+        to: 2m
+      - check: db.gauge.cpu > 95%
+        name: The writer's vCPUs saturate
+        from: 1m10s
+        to: 2m40s
+      - check: db.dist.cpuWait.p95 > 1s
+        name: Queries wait in line for a vCPU
+        from: 1m20s
+        to: 2m40s
+      - check: customers.latency.p95 > 1.5s
+        name: Customers' API calls go from 160 ms to seconds
+        from: 1m20s
+        to: 2m40s
+      - check: api-handler.gauge.concurrent:max > 500
+        name: API handlers waiting on the database pile up
+      - check: customers.errorRatio < 0.1%
+        name: Slow, but nothing fails
+      - check: jobs-dlq.total.in == 0
+        name: No tenant's job is lost
+      - check: customers.latency.p95 < 250ms
+        name: Once the queue is drained the API is back to normal
+        from: 3m30s
+  midnight-spread:
+    name: A ten-minute flexible window
+    description: The same 40,000 schedules with the design's 10-minute flexible time window. Each tenant's job runs at a random moment in the ten minutes after midnight, about 67 a second, so the writer stays at about 40% CPU, customers don't notice, the queue never holds more than a few dozen jobs, and every tenant's job still runs.
+    duration: 12m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: midnight, the jobs spread over ten minutes
+    assert:
+      - check: tenant-jobs.rate.invocations < 80/s
+        name: About 67 jobs a second, for ten minutes
+        from: 1m
+        to: 11m
+      - check: tenant-jobs.total.invocations == 40000
+        name: Every tenant's job still runs
+      - check: db.gauge.cpu < 60%
+        name: The writer keeps its headroom
+        from: 1m
+        to: 11m
+      - check: customers.latency.p95 < 250ms
+        name: Customers don't notice
+      - check: customers.errorRatio < 0.1%
+        name: Nothing fails
+      - check: jobs-queue.gauge.depth:max < 200
+        name: No backlog builds up
+      - check: jobs-dlq.total.in == 0
+        name: No job is lost
+  failover:
+    name: Aurora fails over
+    description: At 2m the writer fails and Aurora promotes the replica, in 30 seconds here (AWS says typically under 60, often under 30). RDS Proxy keeps its clients' connections open and holds their queries until the new writer answers, so the database turns nobody away, but a held query holds the Lambda invocation that sent it. People signing in, ten a second, mostly wait and get in (those who wait past API Gateway's 29 seconds get a 504), and the queue-driven worker loses no job; the API, at 300 a second, cannot wait, because a function adds at most 1,000 execution environments every 10 seconds, so two calls in three during the failover are throttled. When the writer answers, the proxy opens a connection for each query it held, up to max_connections, and the handshakes keep the writer busy for another fifteen seconds.
+    duration: 5m
+    warmup: 1m30s
+    overrides:
+      nodes:
+        db:
+          failover:
+            aurora:
+              mean: 30000
+              cv: 0
+    timeline:
+      - at: 2m
+        note: the writer fails
+        inject:
+          target: node:db
+          fault: Outage
+          for: 1s
+    assert:
+      - check: db.gauge.failingOver:max == 1
+        name: Aurora promotes the replica
+      - check: proxy.gauge.waiting:max > 3000
+        name: RDS Proxy holds thousands of queries until the new writer answers
+      - check: db.total.refused == 0
+        name: The database turns nobody away
+      - check: sign-ins.errorRatio < 15%
+        name: People signing in mostly wait and get in
+        from: 2m
+        to: 3m
+      - check: jobs-dlq.total.in == 0
+        name: The worker's jobs wait, and none is lost
+      - check: api-handler.rate.fail.Throttled > 150/s
+        name: "The API can't wait: Lambda adds environments too slowly, and two calls in three are throttled"
+        from: 2m5s
+        to: 2m25s
+      - check: db.gauge.connections:max > 3000
+        name: When the writer answers, the proxy opens connections for everything it held, up to max_connections
+      - check: customers.latency.p95 < 250ms
+        name: A minute later the API is back to normal
+        from: 3m

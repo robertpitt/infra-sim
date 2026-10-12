@@ -27,6 +27,8 @@ export interface AddOptions {
   readonly name?: string
   /** The provider region it runs in. Defaults to the provider's default. */
   readonly region?: string
+  /** The availability zone it lives in (`us-east-1a`), for a single-zone resource. */
+  readonly zone?: string
   /** The container (an `aws.region`, an `aws.vpc`) it sits inside. */
   readonly parent?: NodeRef
   /** For containers: the size of the box, in canvas units. */
@@ -62,6 +64,7 @@ export const make = (name?: string, options: { readonly seed?: number } = {}): B
         ...(o.id === undefined ? {} : { id: o.id }),
         ...(o.name === undefined ? {} : { name: o.name }),
         ...(o.region === undefined ? {} : { region: o.region }),
+        ...(o.zone === undefined ? {} : { zone: o.zone }),
         ...(o.parent === undefined ? {} : { parent: o.parent.id }),
         ...(o.size === undefined ? {} : { size: o.size }),
         ...(o.at === undefined ? {} : { position: { x: o.at[0], y: o.at[1] } }),

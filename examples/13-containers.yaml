@@ -1,0 +1,521 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Ticketing on ECS Fargate
+description: |-
+  A ticket seller's app on Amazon ECS with AWS Fargate in us-east-1: a Next.js web frontend and a JVM ticketing API behind an Application Load Balancer, a Valkey cache in front of Aurora PostgreSQL, and a fulfilment worker on Fargate Spot that turns each order into a PDF ticket and an email. It shows what containers add to the picture: a task takes most of a minute to start, so scaling out trails a rush, and pulling the image is much of that minute; a broken release is caught by the load balancer's health checks and rolled back by the deployment circuit breaker; and Spot capacity is cheap because it can be taken back.
+
+  How it is wired: fans' browsers and the app call one ALB in three zones, whose listener rules send pages (40% of requests) to the web frontend and API calls (60%) to the API, each through a target group that health-checks every task. Both services spread their tasks (0.5 and 1 vCPU) over the three zones, and service auto scaling keeps them near 50 and 60 requests a second per task (ALBRequestCountPerTarget), about 60% and 50% CPU. The web frontend reads sessions and rendered event pages from the cache. The API reads events and seat maps through it (85% of its calls), writes holds and carts through it to Aurora (10%; the cache drops the key), and puts each checkout (5%) on the orders queue through an SQS interface endpoint. The fulfilment worker takes orders from the queue with a pool of 60 consumers and, for each, writes the order to Aurora, stores the PDF ticket in S3 through a gateway endpoint and emails it through a NAT gateway; an order that fails five times goes to the dead-letter queue. The worker keeps one task On-Demand (its capacity provider strategy's base) and runs the rest on Fargate Spot. It scales on the queue's backlog per task, as AWS advises for queue workers: a task fulfils about 8 orders a second, so 20 waiting per task is two and a half seconds of work. Static assets come from CloudFront and S3, so the containers serve only pages and API calls. The account's Fargate quotas are raised to 120 On-Demand and 40 Spot vCPUs: AWS's default of 6 wouldn't run even the everyday tasks (9.5 On-Demand vCPUs), let alone an on-sale's 27. The ALB has an LCU reservation for on-sales, so the load balancer itself never turns the rush away.
+
+  What the simulator cannot show: how long a pull really takes (an assumed 25 MiB/s, and SOCI a flat 3 s), the images coming from ECR through the NAT gateway or endpoints (a pull costs the network nothing here), container health check settings, ECS's back-off for tasks that keep failing to start, and memory (no task runs out). The listener rules are a share of requests, not paths. The worker's consumers are a fixed pool of 60 that doesn't grow with its tasks, and the orders they have taken wait in the worker's own line, in flight rather than visible, so the backlog the autoscaler sees leaves out up to 60 orders. Target tracking here decides every 30 seconds on a one-minute average; AWS's alarms wait for three one-minute data points, so a real service reacts a little later still.
+seed: 13
+accounts:
+  aws:us-east-1:
+    fargateOnDemandVcpus: 120
+    fargateSpotVcpus: 40
+    elbReservedAlbLcus: 100
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 324, y: -34 }
+    size: { w: 2240, h: 946 }
+  app-vpc:
+    type: aws.vpc
+    name: App VPC (three zones)
+    parent: aws-us-east-1
+    position: { x: 352, y: 304 }
+    size: { w: 1892, h: 580 }
+  fans:
+    type: common.client
+    name: Fans (browsers and the app)
+    region: us-east
+    settings:
+      rps: 600
+      payload: 2
+    position: { x: 0, y: 660 }
+  asset-loads:
+    type: common.client
+    name: Page assets (JS, CSS, images)
+    region: us-east
+    settings:
+      rps: 900
+      payload: 0.5
+    position: { x: 0, y: 60 }
+  assets-cdn:
+    type: aws.cloudfront
+    name: Assets CDN
+    parent: aws-us-east-1
+    settings:
+      objects: 400
+      objectSize: 120
+    position: { x: 380, y: 60 }
+  assets:
+    type: aws.s3
+    name: Static assets bucket
+    parent: aws-us-east-1
+    position: { x: 700, y: 32 }
+  alb:
+    type: aws.alb
+    name: Public ALB
+    parent: app-vpc
+    settings:
+      routing: rules
+      rules: 2
+      capacity:
+        reserved: 100
+    position: { x: 380, y: 660 }
+  web:
+    type: aws.ecs
+    name: Web frontend (Next.js)
+    parent: app-vpc
+    settings:
+      desiredCount: 5
+      zones: 3
+      queueLimit: 50
+      fanOut: sequential
+      task:
+        cpu: "512"
+        memory: 1024
+        requestsPerVcpu: 10
+        serviceTime: { mean: 60, cv: 0.4 }
+        imageSize: 700
+        appStart: 5 seconds
+      deployment:
+        circuitBreaker: true
+        rollback: true
+    position: { x: 700, y: 560 }
+  api:
+    type: aws.ecs
+    name: Ticketing API (JVM)
+    parent: app-vpc
+    settings:
+      desiredCount: 6
+      zones: 3
+      queueLimit: 50
+      fanOut: weighted
+      task:
+        cpu: "1024"
+        memory: 2048
+        requestsPerVcpu: 10
+        serviceTime: { mean: 80, cv: 0.4 }
+        imageSize: 1200
+        appStart: 15 seconds
+      deployment:
+        circuitBreaker: true
+        rollback: true
+    position: { x: 700, y: 760 }
+  cache:
+    type: aws.elasticache
+    name: Valkey cache (sessions, events, seat maps)
+    parent: app-vpc
+    settings:
+      nodeType: cache.r7g.large
+      replicasPerShard: 1
+      keyspace:
+        keys: 20000
+        popularitySkew: 2
+        itemSize: 2
+      caching:
+        ttl: 15 minutes
+        ttlJitter: 0.2
+    position: { x: 1340, y: 640 }
+  db:
+    type: aws.rds
+    name: Tickets DB (Aurora PostgreSQL)
+    parent: app-vpc
+    settings:
+      engine: aurora-postgres
+      instanceClass: db.r7g.large
+      readers: 1
+    position: { x: 1980, y: 680 }
+  sqs-endpoint:
+    type: aws.vpc-endpoint
+    name: SQS interface endpoint
+    parent: app-vpc
+    settings:
+      type: interface
+      availabilityZones: 3
+    position: { x: 1020, y: 440 }
+  orders:
+    type: aws.sqs
+    name: Orders to fulfil
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 2 minutes
+      maxReceives: 5
+    position: { x: 1340, y: 40 }
+  orders-dlq:
+    type: aws.sqs
+    name: Orders DLQ
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 1660, y: 40 }
+  worker:
+    type: aws.ecs
+    name: Fulfilment worker (Fargate Spot)
+    parent: app-vpc
+    settings:
+      desiredCount: 4
+      zones: 3
+      queueLimit: 200
+      fanOut: sequential
+      task:
+        cpu: "1024"
+        memory: 2048
+        requestsPerVcpu: 2
+        serviceTime: { mean: 250, cv: 0.4 }
+        imageSize: 1200
+        appStart: 5 seconds
+      fargate:
+        base: 1
+        weight: 0
+        spotWeight: 1
+    position: { x: 1660, y: 440 }
+  s3-endpoint:
+    type: aws.vpc-endpoint
+    name: S3 gateway endpoint
+    parent: app-vpc
+    settings:
+      type: gateway
+    position: { x: 1980, y: 370 }
+  tickets:
+    type: aws.s3
+    name: Tickets bucket (PDFs)
+    parent: aws-us-east-1
+    position: { x: 2300, y: 340 }
+  nat:
+    type: aws.nat-gateway
+    name: NAT gateway
+    parent: app-vpc
+    position: { x: 1980, y: 510 }
+  email-api:
+    type: common.http-endpoint
+    name: Email delivery API
+    region: us-east
+    settings:
+      latency: { mean: 150, cv: 0.5 }
+      rateLimit: 200
+      burst: 400
+    position: { x: 2700, y: 510 }
+edges:
+  asset-loads.out->assets-cdn:
+    from: { node: asset-loads }
+    to: assets-cdn
+    settings:
+      request: { operation: read }
+  assets-cdn.out->assets:
+    from: { node: assets-cdn }
+    to: assets
+    settings:
+      originType: s3
+      request: { operation: read }
+  fans.out->alb:
+    from: { node: fans }
+    to: alb
+    settings:
+      timeout: 15 seconds
+      request: { operation: read }
+  alb.out->web:
+    from: { node: alb }
+    to: web
+    settings:
+      weight: 40
+      deregistrationDelay: 30 seconds
+  alb.out->api:
+    from: { node: alb }
+    to: api
+    settings:
+      weight: 60
+      deregistrationDelay: 30 seconds
+  web.out->cache:
+    from: { node: web }
+    to: cache
+    settings:
+      timeout: 1 second
+      request: { operation: read }
+  api-reads:
+    from: { node: api }
+    to: cache
+    settings:
+      weight: 85
+      timeout: 1 second
+      request: { operation: read }
+  api-writes:
+    from: { node: api }
+    to: cache
+    settings:
+      weight: 10
+      timeout: 2 seconds
+      request: { operation: write }
+  api.out->sqs-endpoint:
+    from: { node: api }
+    to: sqs-endpoint
+    settings:
+      weight: 5
+      timeout: 2 seconds
+  sqs-endpoint.out->orders:
+    from: { node: sqs-endpoint }
+    to: orders
+  cache.misses->db:
+    from: { node: cache, port: misses }
+    to: db
+    settings:
+      timeout: 2 seconds
+  cache.writes->db:
+    from: { node: cache, port: writes }
+    to: db
+    settings:
+      timeout: 2 seconds
+  orders.deliver->worker:
+    from: { node: orders, port: deliver }
+    to: worker
+    connector: core.poller
+    settings:
+      workers: 60
+      batchSize: 1
+      timeout: 60 seconds
+  orders.dlq->orders-dlq:
+    from: { node: orders, port: dlq }
+    to: orders-dlq
+  worker.out->db:
+    from: { node: worker }
+    to: db
+    settings:
+      timeout: 2 seconds
+  worker.out->s3-endpoint:
+    from: { node: worker }
+    to: s3-endpoint
+  s3-endpoint.out->tickets:
+    from: { node: s3-endpoint }
+    to: tickets
+    settings:
+      request: { operation: write, payload: 200 }
+  worker.out->nat:
+    from: { node: worker }
+    to: nat
+  nat.out->email-api:
+    from: { node: nat }
+    to: email-api
+    settings:
+      timeout: 5 seconds
+controllers:
+  web-scaling:
+    type: core.target-tracking
+    target: web
+    name: 50 requests a second per task (ALBRequestCountPerTarget)
+    settings:
+      metric: in
+      per: unit
+      targetValue: 50
+      setting: desiredCount
+      min: 3
+      max: 40
+      window: 1 minute
+      period: 30 seconds
+      scaleOutCooldown: 60 seconds
+      scaleInCooldown: 5 minutes
+  api-scaling:
+    type: core.target-tracking
+    target: api
+    name: 60 requests a second per task (ALBRequestCountPerTarget)
+    settings:
+      metric: in
+      per: unit
+      targetValue: 60
+      setting: desiredCount
+      min: 6
+      max: 60
+      window: 1 minute
+      period: 30 seconds
+      scaleOutCooldown: 60 seconds
+      scaleInCooldown: 5 minutes
+  worker-scaling:
+    type: core.target-tracking
+    target: worker
+    name: 20 orders waiting per task (backlog per task)
+    settings:
+      source: orders
+      metric: depth
+      per: unit
+      targetValue: 20
+      setting: desiredCount
+      min: 4
+      max: 20
+      window: 1 minute
+      period: 30 seconds
+      scaleOutCooldown: 60 seconds
+      scaleInCooldown: 5 minutes
+scenarios:
+  on-sale:
+    name: Tickets go on sale, with a 1.2 GB image
+    description: A headliner goes on sale at 1m and traffic triples for four minutes. Half a minute later both services' autoscalers ask for twice the tasks (the minute they average is half rush), and a minute after that for three times. But a new API task takes over a minute to start (10 s provisioning, about 48 s pulling its 1.2 GB image, 15 s starting the JVM), so the six old tasks are swamped; a third of fans are turned away at first, and API calls fail until about 2m45. The web frontend, with a 700 MiB image, serves everyone half a minute sooner. Checkouts pile up in the orders queue until the worker, scaling on its backlog, has more tasks running, and none is lost.
+    duration: 8m
+    warmup: 1m
+    timeline:
+      - at: 1m
+        note: a headliner goes on sale
+        set:
+          node: fans
+          settings:
+            rps: 1800
+      - at: 5m
+        note: the rush is over
+        set:
+          node: fans
+          settings:
+            rps: 600
+    assert:
+      - check: api.gauge.desired:max >= 18
+        name: The API's autoscaler asks for three times the tasks
+        from: 1m
+        to: 3m
+      - check: api.gauge.running:max <= 6
+        name: but no new API task serves for over a minute
+        from: 1m
+        to: 2m30s
+      - check: fans.errorRatio > 20%
+        name: Meanwhile a third of fans are turned away
+        from: 1m
+        to: 2m
+      - check: web.errorRatio < 0.5%
+        name: The web frontend's smaller image has it serving everyone half a minute sooner
+        from: 2m20s
+        to: 2m35s
+      - check: fans.errorRatio < 0.5%
+        name: Once the new tasks run, every request is served
+        from: 3m
+        to: 5m
+      - check: orders.gauge.depth:max > 300
+        name: Checkouts queue up for the worker
+        from: 1m
+        to: 5m
+      - check: worker.gauge.desired:max >= 12
+        name: and the worker's autoscaler adds tasks for the backlog
+        from: 1m
+        to: 4m
+      - check: orders-dlq.gauge.depth:max == 0
+        name: None is lost
+  on-sale-lazy-loading:
+    name: The same on-sale, with SOCI lazy loading
+    description: The same on-sale with SOCI lazy loading on both services' images. A task spends about 3 seconds on its image and fetches the rest as it runs, so a new API task serves about half a minute after it is asked for, and the rush is served from 2m, three quarters of a minute sooner. The first half minute is still lost, to the autoscaler waiting for its average to see the rush; for an on-sale you know is coming, scheduled scaling beforehand is the fix for that.
+    duration: 8m
+    warmup: 1m
+    overrides:
+      nodes:
+        web:
+          task:
+            lazyLoading: true
+        api:
+          task:
+            lazyLoading: true
+    timeline:
+      - at: 1m
+        note: a headliner goes on sale
+        set:
+          node: fans
+          settings:
+            rps: 1800
+      - at: 5m
+        note: the rush is over
+        set:
+          node: fans
+          settings:
+            rps: 600
+    assert:
+      - check: fans.errorRatio > 20%
+        name: The first half minute is lost while the autoscaler decides
+        from: 1m
+        to: 1m30s
+      - check: api.gauge.running:min >= 12
+        name: New API tasks serve about half a minute after they are asked for
+        from: 2m5s
+        to: 2m30s
+      - check: web.gauge.running:min >= 10
+        name: and the web frontend's sooner still
+        from: 1m55s
+        to: 2m30s
+      - check: fans.errorRatio < 0.5%
+        name: The rush is served from about 2m, three quarters of a minute sooner
+        from: 2m5s
+        to: 5m
+  bad-deploy:
+    name: A release that fails its health checks
+    description: Revision 2 of the API is deployed at 1m; it starts, but answers 500. ECS starts six new tasks beside the six old ones (maximum 200%), and the ALB's first health check fails them, so no fan's request ever reaches one. After the second check, 30 s later, the target group reports them unhealthy; six failures are past the deployment circuit breaker's threshold of 3, so the deployment fails and rolls back to revision 1, whose tasks never stopped (minimum healthy 100%). Fans never notice.
+    duration: 6m
+    warmup: 1m
+    timeline:
+      - at: 1m
+        note: revision 2 of the API is deployed
+        set:
+          node: api
+          settings:
+            task:
+              revision: 2
+              failure: unhealthy
+    assert:
+      - check: api.gauge.revision:max == 2
+        name: Revision 2 is deployed
+      - check: api.gauge.running:max >= 12
+        name: Its tasks start beside the old ones
+        from: 2m20s
+        to: 2m35s
+      - check: api.gauge.revision:max == 1
+        name: The circuit breaker rolls back to revision 1 within two minutes
+        from: 3m
+      - check: api.gauge.running:max <= 6
+        name: and the broken tasks are stopped
+        from: 3m
+      - check: edge:alb.out->api.gauge.targets.healthy:min >= 6
+        name: The old tasks stay healthy throughout
+      - check: fans.errorRatio < 0.1%
+        name: Fans never notice
+  spot-wave:
+    name: A wave of Fargate Spot interruptions
+    description: For 45 seconds Fargate takes Spot capacity back in a hurry, and every Spot task of the worker is interrupted. Each gets SIGTERM with its two-minute warning, finishes the orders it holds and stops; its replacement starts at once, on Spot again, but spends most of a minute pulling its 1.2 GB image (a headless browser renders the PDFs), so meanwhile the On-Demand base task works alone and orders wait in the queue. None fails or is dead-lettered, and fans, whose checkout only queued the order, never notice. The autoscaler, seeing the backlog, asks for many more tasks, but they start after the replacements have cleared it and sit idle until the scale-in cooldown is over, for scaling on a backlog trails it by the minute it averages and the minute a task takes to start.
+    duration: 8m
+    warmup: 1m
+    timeline:
+      - at: 1m
+        note: Fargate takes Spot capacity back
+        set:
+          node: worker
+          settings:
+            fargate:
+              spotInterruptionsPerTaskHour: 600
+      - at: 1m45s
+        note: the wave passes
+        set:
+          node: worker
+          settings:
+            fargate:
+              spotInterruptionsPerTaskHour: 0
+    assert:
+      - check: worker.gauge.running:min == 1
+        name: Every Spot task is interrupted, and the On-Demand base task works alone
+        from: 1m
+        to: 2m30s
+      - check: orders.gauge.depth:max > 100
+        name: Orders wait in the queue
+        from: 1m
+        to: 3m
+      - check: worker.gauge.desired:max >= 8
+        name: The autoscaler asks for more tasks for the backlog
+        from: 1m
+        to: 3m
+      - check: orders.gauge.oldestAgeMs:max < 5s
+        name: The replacements clear the backlog
+        from: 3m10s
+      - check: worker.gauge.running:min >= 8
+        name: The autoscaler's extra tasks arrive too late to help, and stay for the scale-in cooldown
+        from: 5m
+        to: 6m30s
+      - check: worker.gauge.spot:min >= 3
+        name: Replacements and new tasks go back to Spot
+        from: 3m
+      - check: orders-dlq.gauge.depth:max == 0
+        name: No order is lost
+      - check: fans.errorRatio < 0.1%
+        name: Fans never notice

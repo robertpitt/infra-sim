@@ -1,0 +1,490 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Kubernetes on EKS
+description: |-
+  A shop's platform team runs its storefront, checkout API and recommendations service as Kubernetes Deployments on an Amazon EKS cluster in us-east-1, spread over three Availability Zones, each on a managed node group of its own. It teaches two-level scaling: the Horizontal Pod Autoscaler adds pods in seconds when a node has room for them, but pods no node has room for wait as Pending while a node autoscaler (the Cluster Autoscaler, or Karpenter) launches nodes, which takes minutes; and nodes stay long after the pods have gone. The scenarios also show why Kubernetes takes almost six minutes to act on a lost zone and what spreading pods over zones buys you, and a rollout that crash-loops and is never rolled back.
+
+  How it is wired: shoppers reach the storefront (a server-rendered web app) through the web ALB, and buyers (the web checkout and the mobile app) reach the checkout API through the API ALB: two Ingresses of the AWS Load Balancer Controller, sending to pods as IP targets and leaving pod replacement to Kubernetes. A product page reads the product from a Valkey cache, whose misses go to the Aurora PostgreSQL readers, and at the same time asks the recommendations service, over its in-cluster Service, for related products, which it reads from DynamoDB through a gateway endpoint. Checkout charges the card with the payment provider through a NAT gateway, then writes the order to the Aurora writer (its JVM caches DNS for 30 seconds). Storefront pods ask for 500m CPU and 1 GiB and spend 80 ms of CPU on a page, three to an m7i.large node; recommendations pods ask for a vCPU and 2 GiB, three to a c7i.xlarge; checkout pods 500m and 1.5 GiB. Each workload has an HPA (CPU per pod against 60% of the request, every 15 s, scaling in 5 minutes after its last change): six storefront pods run at about 53%, and three of each of the others at 20%. The Cluster Autoscaler grows each node group from three nodes. Auto Scaling replaces a dead instance only after 20 minutes, because a node cut off with its zone still passes its own status checks, so it is Kubernetes' eviction that moves pods.
+
+  What the simulator cannot show: workloads sharing nodes (each has a node group of its own here, and no DaemonSets take room on them); the HPA's exact algorithm (it is target tracking that averages CPU over 15 s and waits 5 minutes after its last change, rather than a 5-minute stabilization window), and pods bursting past their CPU request; Karpenter choosing instance types (every node is the node group's type) and honouring topology spread when it consolidates underused nodes (it doesn't here, so the Karpenter scenario consolidates only empty nodes); a page that renders without its recommendations when they fail (here the page fails); a NAT gateway in each zone (one gateway stands for them, and no zone outage reaches it); PodDisruptionBudgets; and the EKS control plane.
+seed: 23
+accounts:
+  aws:us-east-1:
+    ec2OnDemandStandardVcpus: 128
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 324, y: -132 }
+    size: { w: 1640, h: 964 }
+  cluster-vpc:
+    type: aws.vpc
+    name: Cluster VPC (EKS)
+    parent: aws-us-east-1
+    position: { x: 352, y: -66 }
+    size: { w: 1252, h: 870 }
+  shoppers:
+    type: common.client
+    name: Shoppers (product pages)
+    region: us-east
+    settings:
+      rps: 200
+      payload: 1
+    position: { x: 0, y: 140 }
+  buyers:
+    type: common.client
+    name: Buyers (web and app checkout)
+    region: us-east
+    settings:
+      rps: 30
+      payload: 3
+    position: { x: 0, y: 560 }
+  web-alb:
+    type: aws.alb
+    name: Web ALB (storefront Ingress)
+    parent: cluster-vpc
+    position: { x: 380, y: 140 }
+  api-alb:
+    type: aws.alb
+    name: API ALB (checkout Ingress)
+    parent: cluster-vpc
+    position: { x: 380, y: 560 }
+  storefront:
+    type: aws.eks
+    name: Storefront (SSR web)
+    parent: cluster-vpc
+    settings:
+      replicas: 6
+      zones: 3
+      queueLimit: 50
+      fanOut: parallel
+      pod:
+        cpu: 500
+        memory: 1024
+        requestsPerCore: 10
+        serviceTime: { mean: 80, cv: 0.5 }
+        imageSize: 400
+        appStart: 8 seconds
+      nodes:
+        instanceType: m7i.large
+        minSize: 3
+        maxSize: 12
+        desiredSize: 3
+        replaceAfter: 20 minutes
+    position: { x: 700, y: 140 }
+  recommendations:
+    type: aws.eks
+    name: Recommendations
+    parent: cluster-vpc
+    settings:
+      replicas: 3
+      zones: 3
+      queueLimit: 50
+      pod:
+        cpu: 1000
+        memory: 2048
+        requestsPerCore: 10
+        serviceTime: { mean: 30, cv: 0.5 }
+        imageSize: 900
+        appStart: 20 seconds
+      nodes:
+        instanceType: c7i.xlarge
+        minSize: 3
+        maxSize: 9
+        desiredSize: 3
+        replaceAfter: 20 minutes
+    position: { x: 1020, y: 260 }
+  checkout:
+    type: aws.eks
+    name: Checkout API
+    parent: cluster-vpc
+    settings:
+      replicas: 3
+      zones: 3
+      queueLimit: 50
+      pod:
+        cpu: 500
+        memory: 1536
+        requestsPerCore: 10
+        serviceTime: { mean: 100, cv: 0.4 }
+        imageSize: 500
+        appStart: 25 seconds
+      nodes:
+        instanceType: m7i.large
+        minSize: 3
+        maxSize: 9
+        desiredSize: 3
+        replaceAfter: 20 minutes
+    position: { x: 700, y: 560 }
+  product-cache:
+    type: aws.elasticache
+    name: Product cache (Valkey)
+    parent: cluster-vpc
+    settings:
+      nodeType: cache.r7g.large
+      replicasPerShard: 1
+      keyspace:
+        keys: 5000
+        popularitySkew: 2
+        itemSize: 6
+      caching:
+        ttl: 1 hour
+    position: { x: 1020, y: 0 }
+  shop-db:
+    type: aws.rds
+    name: Shop DB (Aurora PostgreSQL)
+    parent: cluster-vpc
+    settings:
+      engine: aurora-postgres
+      instanceClass: db.r7g.large
+      readers: 2
+    position: { x: 1340, y: 440 }
+  dynamodb-endpoint:
+    type: aws.vpc-endpoint
+    name: DynamoDB gateway endpoint
+    parent: cluster-vpc
+    settings:
+      type: gateway
+    position: { x: 1340, y: 260 }
+  nat:
+    type: aws.nat-gateway
+    name: NAT gateway
+    parent: cluster-vpc
+    position: { x: 1020, y: 680 }
+  recs-table:
+    type: aws.dynamodb
+    name: Precomputed recommendations
+    parent: aws-us-east-1
+    settings:
+      mode: on-demand
+    position: { x: 1700, y: 208 }
+  payments:
+    type: common.http-endpoint
+    name: Payment provider API
+    region: us-east
+    settings:
+      latency: { mean: 250, cv: 0.4 }
+    position: { x: 2060, y: 680 }
+edges:
+  shoppers.out->web-alb:
+    from: { node: shoppers }
+    to: web-alb
+    settings:
+      timeout: 10 seconds
+      request: { operation: read }
+  web-alb.out->storefront:
+    from: { node: web-alb }
+    to: storefront
+    settings:
+      replaceUnhealthy: false
+  storefront.out->product-cache:
+    from: { node: storefront }
+    to: product-cache
+    settings:
+      timeout: 1 second
+      request: { operation: read }
+  storefront.out->recommendations:
+    from: { node: storefront }
+    to: recommendations
+    settings:
+      timeout: 2 seconds
+      request: { operation: read }
+  product-cache.misses->shop-db:
+    from: { node: product-cache, port: misses }
+    to: shop-db
+    settings:
+      timeout: 2 seconds
+  recommendations.out->dynamodb-endpoint:
+    from: { node: recommendations }
+    to: dynamodb-endpoint
+    settings:
+      request: { operation: read }
+  dynamodb-endpoint.out->recs-table:
+    from: { node: dynamodb-endpoint }
+    to: recs-table
+    settings:
+      request: { operation: read }
+  buyers.out->api-alb:
+    from: { node: buyers }
+    to: api-alb
+    settings:
+      timeout: 15 seconds
+  api-alb.out->checkout:
+    from: { node: api-alb }
+    to: checkout
+    settings:
+      replaceUnhealthy: false
+  checkout.out->nat:
+    from: { node: checkout }
+    to: nat
+    settings:
+      timeout: 5 seconds
+  nat.out->payments:
+    from: { node: nat }
+    to: payments
+    settings:
+      timeout: 5 seconds
+  checkout.out->shop-db:
+    from: { node: checkout }
+    to: shop-db
+    settings:
+      timeout: 3 seconds
+      request: { operation: write }
+      client:
+        connections: reused
+        dnsCache: 30 seconds
+controllers:
+  storefront-hpa:
+    type: core.target-tracking
+    target: storefront
+    name: Storefront HPA (CPU 60%)
+    settings:
+      metric: cpuPods
+      per: unit
+      targetValue: 0.6
+      setting: replicas
+      min: 6
+      max: 40
+      window: 15 seconds
+      period: 15 seconds
+      tolerance: 0.1
+      scaleOutCooldown: 0
+      scaleInCooldown: 5 minutes
+  recommendations-hpa:
+    type: core.target-tracking
+    target: recommendations
+    name: Recommendations HPA (CPU 60%)
+    settings:
+      metric: cpuPods
+      per: unit
+      targetValue: 0.6
+      setting: replicas
+      min: 3
+      max: 20
+      window: 15 seconds
+      period: 15 seconds
+      tolerance: 0.1
+      scaleOutCooldown: 0
+      scaleInCooldown: 5 minutes
+  checkout-hpa:
+    type: core.target-tracking
+    target: checkout
+    name: Checkout HPA (CPU 60%)
+    settings:
+      metric: cpuPods
+      per: unit
+      targetValue: 0.6
+      setting: replicas
+      min: 3
+      max: 20
+      window: 15 seconds
+      period: 15 seconds
+      tolerance: 0.1
+      scaleOutCooldown: 0
+      scaleInCooldown: 5 minutes
+scenarios:
+  flash-sale:
+    name: A flash sale, with the Cluster Autoscaler
+    description: A flash sale at 1m brings four times the shoppers and buyers for four minutes. The HPA adds storefront pods every 15 s; three fit on the nodes there and are ready in seconds, but the rest are Pending until the Cluster Autoscaler's new nodes join a minute and a half later, and meanwhile a third of product pages fail. Recommendations and checkout had room on their nodes, so their extra pods are ready within half a minute. After the sale the HPA takes the storefront back to six pods, but the Cluster Autoscaler waits 10 minutes after its last scale-up and then 10 more for a node to be unneeded, so the five extra nodes stay (and are paid for) until about 24m.
+    duration: 12m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the flash sale starts
+        set:
+          node: shoppers
+          settings:
+            rps: 800
+      - at: 1m
+        set:
+          node: buyers
+          settings:
+            rps: 120
+      - at: 5m
+        note: the sale is over
+        set:
+          node: shoppers
+          settings:
+            rps: 200
+      - at: 5m
+        set:
+          node: buyers
+          settings:
+            rps: 30
+    assert:
+      - check: storefront.gauge.pending:max >= 5
+        name: The storefront's nodes are full, so the HPA's new pods are Pending
+        from: 1m
+        to: 2m30s
+      - check: storefront.gauge.nodes:max == 3
+        name: The Cluster Autoscaler's nodes take a minute and a half to join
+        from: 1m
+        to: 2m30s
+      - check: shoppers.errorRatio > 20%
+        name: Shoppers are still turned away two minutes in
+        from: 2m30s
+        to: 3m15s
+      - check: shoppers.errorRatio < 1%
+        name: Once the pods on the new nodes are ready, every page is served
+        from: 4m15s
+      - check: recommendations.gauge.ready:max >= 4
+        name: Recommendations had room for another pod
+        from: 1m
+        to: 5m
+      - check: recommendations.gauge.nodes:max == 3
+        name: so it needed no new node
+      - check: storefront.gauge.replicas:max <= 6
+        name: After the sale the HPA takes the storefront back to six pods
+        from: 9m30s
+      - check: storefront.gauge.nodes:min >= 8
+        name: but the eight nodes stay
+        from: 6m
+  flash-sale-karpenter:
+    name: The same flash sale, with Karpenter
+    description: The same sale, with Karpenter in place of the Cluster Autoscaler on all three workloads. It batches the Pending pods for a second and launches nodes itself, ready in under a minute rather than a minute and a half, so the overload is over about 45 seconds sooner and a quarter fewer pages fail; pods still wait for nodes. After the sale its consolidation (WhenEmpty here) removes each node as soon as the HPA's scale-in has emptied it, so the storefront is back to three nodes within a minute of its pods.
+    duration: 12m
+    warmup: 30s
+    overrides:
+      nodes:
+        storefront:
+          nodes:
+            autoscaler: karpenter
+          karpenter:
+            consolidation: WhenEmpty
+        recommendations:
+          nodes:
+            autoscaler: karpenter
+          karpenter:
+            consolidation: WhenEmpty
+        checkout:
+          nodes:
+            autoscaler: karpenter
+          karpenter:
+            consolidation: WhenEmpty
+    timeline:
+      - at: 1m
+        note: the flash sale starts
+        set:
+          node: shoppers
+          settings:
+            rps: 800
+      - at: 1m
+        set:
+          node: buyers
+          settings:
+            rps: 120
+      - at: 5m
+        note: the sale is over
+        set:
+          node: shoppers
+          settings:
+            rps: 200
+      - at: 5m
+        set:
+          node: buyers
+          settings:
+            rps: 30
+    assert:
+      - check: storefront.gauge.pending:max >= 5
+        name: Pods are Pending as before
+        from: 1m
+        to: 2m30s
+      - check: storefront.gauge.nodes:max >= 4
+        name: Karpenter's first nodes are ready in under a minute
+        from: 1m
+        to: 2m20s
+      - check: shoppers.errorRatio < 10%
+        name: so two minutes in the overload is nearly over
+        from: 2m30s
+        to: 3m15s
+      - check: shoppers.errorRatio < 1%
+        name: and every page is served from 3m15s
+        from: 3m15s
+      - check: storefront.gauge.nodes:max >= 8
+        name: It launched as many nodes as the Cluster Autoscaler
+        from: 5m
+        to: 8m
+      - check: storefront.gauge.nodes:max <= 3
+        name: but removes them as soon as the HPA has emptied them
+        from: 9m30s
+  zone-outage:
+    name: An Availability Zone outage
+    description: us-east-1a is cut off at 1m. In this scenario the recommendations team has switched its node group to bin-packing (MostAllocated scoring) and dropped its zone spread to save nodes, so all three of its pods sit on one node in us-east-1a. Aurora and ElastiCache fail over to other zones in seconds, and the ALBs' health checks stop sending requests to the zone's storefront and checkout pods within a minute, so checkout, spread over three zones, is whole again by 2m. But Kubernetes marks the zone's nodes NotReady only after 50 s and evicts their pods 300 s later; until 6m50s nothing replaces recommendations, and every product page, which waits for its recommendations, fails.
+    duration: 10m
+    warmup: 30s
+    overrides:
+      nodes:
+        recommendations:
+          topologySpread: none
+          nodes:
+            scheduling: binpack
+    timeline:
+      - at: 1m
+        note: us-east-1a is cut off
+        inject:
+          target: zone:aws:us-east-1:us-east-1a
+          fault: Outage
+    assert:
+      - check: recommendations.gauge.ready:max == 0
+        name: Recommendations' pods, all on one node in us-east-1a, are lost
+        from: 1m15s
+        to: 6m45s
+      - check: shoppers.errorRatio > 95%
+        name: Every product page fails, because it waits for its recommendations
+        from: 1m15s
+        to: 6m45s
+      - check: shop-db.gauge.failingOver:max == 1
+        name: Aurora promotes a reader in another zone
+        from: 1m
+        to: 1m30s
+      - check: buyers.errorRatio < 1%
+        name: Checkout, spread over three zones, is whole again within a minute
+        from: 2m
+      - check: storefront.gauge.ready:max <= 4
+        name: The storefront's lost pods are not replaced until Kubernetes evicts them
+        from: 1m15s
+        to: 6m45s
+      - check: storefront.gauge.ready:min >= 6
+        name: Evicted at 6m50s, they are replaced in the zones that are up
+        from: 7m30s
+      - check: recommendations.gauge.ready:min >= 3
+        name: Recommendations is back a minute later, its 900 MiB image pulled onto other nodes
+        from: 8m
+      - check: shoppers.errorRatio < 1%
+        name: and so are the product pages
+        from: 8m
+  bad-rollout:
+    name: A rollout that crash-loops
+    description: Storefront v2, rolled out at 1m, crashes as it starts. The rolling update (25% surge, 25% unavailable) stops one old pod and starts three new ones, which go into CrashLoopBackOff and never become ready, so it stalls there with five of six pods serving. Kubernetes reports it after the 10-minute progress deadline but never rolls it back, unlike an ECS deployment's circuit breaker. Shoppers don't notice, but the old pods run hotter and the crashing ones hold room on the nodes until someone runs kubectl rollout undo.
+    duration: 12m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: storefront v2 rolls out
+        set:
+          node: storefront
+          settings:
+            pod:
+              revision: 2
+              failure: crash
+      - at: 11m
+        note: the 10-minute progress deadline passes
+    assert:
+      - check: storefront.gauge.starting:last == 3
+        name: Three new pods crash-loop, never ready
+      - check: storefront.gauge.ready:min >= 5
+        name: Five old pods keep serving
+        from: 1m30s
+      - check: shoppers.errorRatio < 0.1%
+        name: Shoppers don't notice
+      - check: storefront.gauge.cpu > 58%
+        name: but each pod works harder
+        from: 1m30s
+      - check: storefront.gauge.requestedCpu > 65%
+        name: and the crash-looping pods hold room on the nodes
+        from: 1m30s
+      - check: storefront.gauge.oldPods:min == 5
+        name: Past the progress deadline nothing rolls it back
+        from: 11m

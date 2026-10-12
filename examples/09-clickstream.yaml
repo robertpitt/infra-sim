@@ -1,0 +1,484 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Clickstream analytics
+description: |-
+  A real-time clickstream pipeline for a busy content site, on Kinesis Data Streams and Amazon Data Firehose. Web and app SDKs send about a thousand events a second, 2 KB each, through an HTTP API straight into a Kinesis data stream, and four consumers read every event on their own: a per-page counter behind a trending-now widget, a bot detector, a search index for analysts, and Firehose landing the raw events in an S3 data lake. The scenarios show what a shard can take and why a hot partition key is not a capacity problem, what one record the code can't parse does to a Lambda event source mapping, and what Firehose's buffer hints trade between fresh data and small files.
+
+  How it is wired: the collect API is an HTTP API with a Kinesis PutRecord integration, so no function sits in the write path, and the partition key is the page. The stream is provisioned with three shards, each taking 1 MiB/s or 1,000 records a second; the 2 MB/s of clicks use about two thirds of that, and are kept for seven days. The three functions read through enhanced fan-out, each with its own 2 MiB/s per shard pushed to it, so none of them slows another or Firehose, which reads the shared way (GetRecords once a second per shard). The aggregator's mapping takes up to 500 records within a second, runs two batches per shard at once (parallelization factor 2, still in order per page), bisects a failing batch, retries it twice, skips records over an hour old, and notes what it gives up on in an SQS queue, the stream's on-failure destination. It adds to per-page counters in an on-demand DynamoDB table, which a cached REST API reads for the widget. The bot detector keeps per-session counters in Valkey and the search indexer bulk-loads an OpenSearch domain, both in a VPC. Firehose passes 1 MB batches through an enrichment function that drops the raw headers (a quarter of the bytes), buffers up to 128 MiB or five minutes per shard, and writes each buffer to the lake as one object.
+
+  What the simulator cannot show: partition keys as values. A viral page is the web SDK's hot-key share, salting the key is setting that share back to zero, and the SDKs send one event per PutRecord, because a PutRecords batch's records are spread as if their keys were independent. Records have no contents, so a parse failure is a share of records set on the mapping, and the aggregator can't collapse a batch into per-page updates: it writes an item per click, and the table is pre-warmed for that. A raised parallelization factor applies only once all of a shard's lanes are idle, which a mapping that has fallen behind never is, so it can't be shown rescuing one. Firehose falling far behind: a large catch-up read would reach the enrichment function as one batch over its 6 MB limit, where AWS cuts batches at the processor's buffer size, so no scenario puts Firehose behind (enhanced fan-out keeps the functions' catch-up reads off its share). Not modelled: Athena and the Glue catalog over the lake, Parquet conversion and dynamic partitioning, what the bot detector decides, and the VPN analysts use to reach OpenSearch Dashboards (they query the domain directly here).
+seed: 9
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 352, y: -38 }
+    size: { w: 1280, h: 1800 }
+  analytics-vpc:
+    type: aws.vpc
+    name: Analytics VPC
+    parent: aws-us-east-1
+    position: { x: 992, y: 1104 }
+    size: { w: 612, h: 630 }
+  trending-widget:
+    type: common.client
+    name: Trending-now widget
+    region: us-east
+    settings:
+      rps: 40
+      payload: 1
+    position: { x: 0, y: 60 }
+  web-sdk:
+    type: common.client
+    name: Web SDK (browsers)
+    region: us-east
+    settings:
+      rps: 700
+      payload: 2
+    position: { x: 0, y: 600 }
+  app-sdk:
+    type: common.client
+    name: Mobile app SDK
+    region: us-east
+    settings:
+      rps: 300
+      payload: 2
+    position: { x: 0, y: 730 }
+  analysts:
+    type: common.client
+    name: Analysts (OpenSearch Dashboards)
+    region: us-east
+    settings:
+      rps: 4
+      payload: 1
+    position: { x: 0, y: 1600 }
+  trending-api:
+    type: aws.apigateway
+    name: Trending API (cached)
+    parent: aws-us-east-1
+    settings:
+      apiType: rest
+      cache: { enabled: true, ttl: 10 seconds, keys: 20 }
+    position: { x: 380, y: 40 }
+  trending-fn:
+    type: aws.lambda
+    name: Top pages
+    parent: aws-us-east-1
+    settings:
+      memory: 512
+      duration: { mean: 25 }
+    position: { x: 700, y: 28 }
+  collect-api:
+    type: aws.apigateway
+    name: Collect API (PutRecord integration)
+    parent: aws-us-east-1
+    settings:
+      apiType: http
+      overhead:
+        mean: 8
+    position: { x: 380, y: 610 }
+  clickstream:
+    type: aws.kinesis
+    name: Clickstream
+    parent: aws-us-east-1
+    settings:
+      shards: 3
+      retention: 7 days
+    position: { x: 700, y: 610 }
+  aggregator:
+    type: aws.lambda
+    name: Page-count aggregator
+    parent: aws-us-east-1
+    settings:
+      memory: 1024
+      timeout: 1 minute
+      duration: { mean: 1, cv: 0.3 }
+      batch:
+        duration: record
+      batchCalls: once
+    position: { x: 1020, y: 250 }
+  page-counts:
+    type: aws.dynamodb
+    name: Page counts
+    parent: aws-us-east-1
+    settings:
+      mode: on-demand
+      onDemand:
+        warmWriteUnits: 10000
+    position: { x: 1340, y: 130 }
+  failed-batches:
+    type: aws.sqs
+    name: Failed batches (on-failure)
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 1020, y: 460 }
+  lake-feed:
+    type: aws.firehose
+    name: Lake delivery stream
+    parent: aws-us-east-1
+    settings:
+      bufferSize: 128
+      bufferInterval: 300 seconds
+      transform:
+        bufferSize: 1
+        outputRatio: 0.75
+    position: { x: 1020, y: 690 }
+  enrich:
+    type: aws.lambda
+    name: Enrich and compact
+    parent: aws-us-east-1
+    settings:
+      memory: 1024
+      timeout: 1 minute
+      duration: { mean: 180, cv: 0.3 }
+    position: { x: 1340, y: 880 }
+  lake:
+    type: aws.s3
+    name: Clickstream lake
+    parent: aws-us-east-1
+    position: { x: 1340, y: 690 }
+  bot-detector:
+    type: aws.lambda
+    name: Bot detector
+    parent: analytics-vpc
+    settings:
+      memory: 1024
+      timeout: 30 seconds
+      duration: { mean: 40, cv: 0.4 }
+      batchCalls: once
+    position: { x: 1020, y: 1170 }
+  session-state:
+    type: aws.elasticache
+    name: Session counters (Valkey)
+    parent: analytics-vpc
+    settings:
+      engine: valkey
+      nodeType: cache.m7g.large
+      keyspace:
+        keys: 200000
+        itemSize: 0.5
+      caching:
+        ttl: 30 minutes
+    position: { x: 1340, y: 1180 }
+  search-indexer:
+    type: aws.lambda
+    name: Search indexer
+    parent: analytics-vpc
+    settings:
+      memory: 1024
+      timeout: 1 minute
+      duration: { mean: 100, cv: 0.3 }
+      batchCalls: once
+    position: { x: 1020, y: 1390 }
+  clicks-search:
+    type: aws.opensearch
+    name: Clicks search (OpenSearch)
+    parent: analytics-vpc
+    settings:
+      instanceType: r6g.large.search
+      dataNodes: 3
+      primaryShards: 3
+      replicas: 1
+      refreshInterval: 30 seconds
+    position: { x: 1340, y: 1610 }
+edges:
+  trending-widget.out->trending-api:
+    from: { node: trending-widget }
+    to: trending-api
+    settings:
+      request: { operation: read }
+  trending-api.out->trending-fn:
+    from: { node: trending-api }
+    to: trending-fn
+    settings:
+      request: { operation: read }
+  trending-fn.out->page-counts:
+    from: { node: trending-fn }
+    to: page-counts
+    settings:
+      request: { operation: read }
+  web-sdk.out->collect-api:
+    from: { node: web-sdk }
+    to: collect-api
+    settings:
+      timeout: 5 seconds
+      retry: { maxAttempts: 2, backoff: 500 millis }
+  app-sdk.out->collect-api:
+    from: { node: app-sdk }
+    to: collect-api
+    settings:
+      timeout: 5 seconds
+      retry: { maxAttempts: 2, backoff: 500 millis }
+  collect-api.out->clickstream:
+    from: { node: collect-api }
+    to: clickstream
+  clickstream.consumers->aggregator:
+    from: { node: clickstream, port: consumers }
+    to: aggregator
+    settings:
+      enhancedFanOut: true
+      batchSize: 500
+      batchWindow: 1 second
+      parallelization: 2
+      bisectOnError: true
+      maxRetries: 2
+      maxRecordAge: 3600
+  aggregator.out->page-counts:
+    from: { node: aggregator }
+    to: page-counts
+    settings:
+      request: { operation: write, payload: 20 }
+      retry: { maxAttempts: 3, backoff: 50 millis }
+  clickstream.discarded->failed-batches:
+    from: { node: clickstream, port: discarded }
+    to: failed-batches
+  clickstream.consumers->lake-feed:
+    from: { node: clickstream, port: consumers }
+    to: lake-feed
+  lake-feed.transform->enrich:
+    from: { node: lake-feed, port: transform }
+    to: enrich
+  lake-feed.out->lake:
+    from: { node: lake-feed }
+    to: lake
+  clickstream.consumers->bot-detector:
+    from: { node: clickstream, port: consumers }
+    to: bot-detector
+    settings:
+      enhancedFanOut: true
+      batchSize: 100
+      bisectOnError: true
+      maxRetries: 2
+      maxRecordAge: 300
+  bot-detector.out->session-state:
+    from: { node: bot-detector }
+    to: session-state
+    settings:
+      request: { operation: write, payload: 4 }
+  clickstream.consumers->search-indexer:
+    from: { node: clickstream, port: consumers }
+    to: search-indexer
+    settings:
+      enhancedFanOut: true
+      batchSize: 1000
+      batchWindow: 5 seconds
+      bisectOnError: true
+      maxRetries: 5
+  search-indexer.out->clicks-search:
+    from: { node: search-indexer }
+    to: clicks-search
+    settings:
+      timeout: 30 seconds
+  analysts.out->clicks-search:
+    from: { node: analysts }
+    to: clicks-search
+    settings:
+      request: { operation: read }
+      timeout: 30 seconds
+scenarios:
+  viral:
+    name: A story goes viral
+    description: The web SDK's traffic rises to 1,100 events a second, and 60% of it is one story, 660 a second (1.3 MB/s), more than a shard takes on its own. The story's key lives on one shard, which throttles while the other two have room to spare; the web SDK loses about a third of its clicks, and app clicks that share the shard fail too. Doubling the shards helps only the clicks that shared the story's shard, since its key is still on one. Salting the key (the page plus a random suffix) spreads the story over all six shards, and nothing is throttled.
+    duration: 7m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: a story goes viral
+        set:
+          node: web-sdk
+          settings:
+            rps: 1100
+            hotKeys: 0.6
+      - at: 2m30s
+        note: the shards are doubled to six (UpdateShardCount takes two minutes)
+        set:
+          node: clickstream
+          settings:
+            shards: 6
+      - at: 4m30s
+        note: six shards open
+      - at: 5m30s
+        note: the collector salts the partition key
+        set:
+          node: web-sdk
+          settings:
+            hotKeys: 0
+    assert:
+      - check: clickstream.rate.throttled < 1/s
+        name: Before, three shards take every click
+        to: 1m
+      - check: clickstream.rate.throttled > 600/s
+        name: The story's shard is throttled
+        from: 1m30s
+        to: 2m30s
+      - check: web-sdk.errorRatio > 20%
+        name: The web SDK loses clicks
+        from: 1m30s
+        to: 2m30s
+      - check: app-sdk.errorRatio > 8%
+        name: App clicks on the same shard fail too
+        from: 1m30s
+        to: 2m30s
+      - check: clickstream.gauge.shards:min >= 6
+        name: The stream is resharded to six
+        from: 4m35s
+      - check: clickstream.rate.throttled > 400/s
+        name: Six shards still throttle, since the key is on one
+        from: 4m45s
+        to: 5m30s
+      - check: clickstream.rate.throttled < 1/s
+        name: A salted key spreads the story over every shard
+        from: 6m
+      - check: web-sdk.errorRatio < 0.1%
+        name: The web SDK loses nothing once the key is salted
+        from: 6m
+  push-surge:
+    name: A push campaign
+    description: A push notification brings app users back, and the app's events go from 300 to 1,200 a second. The stream now gets 3.8 MB/s on three shards that take 3 MiB/s, every shard is over its limit, and both SDKs lose about a fifth of their clicks. Unlike a hot key this is a capacity problem, so doubling the shards fixes it, once UpdateShardCount's two minutes have passed.
+    duration: 7m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the push goes out
+        set:
+          node: app-sdk
+          settings:
+            rps: 1200
+      - at: 2m
+        note: the shards are doubled to six (UpdateShardCount takes two minutes)
+        set:
+          node: clickstream
+          settings:
+            shards: 6
+      - at: 4m
+        note: six shards open
+      - at: 5m30s
+        note: the campaign is over
+        set:
+          node: app-sdk
+          settings:
+            rps: 300
+    assert:
+      - check: clickstream.rate.throttled < 1/s
+        name: Before, three shards take every click
+        to: 1m
+      - check: clickstream.rate.throttled > 800/s
+        name: Every shard is over its limit
+        from: 1m15s
+        to: 2m
+      - check: app-sdk.errorRatio > 10%
+        name: The app SDK loses clicks
+        from: 1m15s
+        to: 2m
+      - check: web-sdk.errorRatio > 10%
+        name: So does the web SDK
+        from: 1m15s
+        to: 2m
+      - check: clickstream.gauge.shards:min >= 6
+        name: The stream is resharded to six
+        from: 4m5s
+      - check: clickstream.rate.incoming > 1800/s
+        name: Six shards take the whole surge
+        from: 4m15s
+        to: 5m30s
+      - check: clickstream.rate.throttled < 1/s
+        name: Nothing is throttled
+        from: 4m15s
+      - check: system.errorRatio < 0.1%
+        name: No SDK loses a click
+        from: 4m15s
+  parser-bug:
+    name: A click the aggregator can't parse
+    description: The aggregator's mapping as first created has Lambda's defaults, retrying a failing batch until it succeeds or its records expire (seven days here) and never splitting it. A release can't parse one click in 20,000; each lane that meets one retries it while everything behind it waits, and within three minutes the page counts are minutes stale and almost nothing is processed. The other consumers read the same shards through their own pipes and don't notice. Turning on bisect-on-error with two retries isolates each bad click and notes it in the on-failure queue, and the aggregator catches up within two minutes.
+    duration: 8m
+    warmup: 30s
+    overrides:
+      edges:
+        clickstream.consumers->aggregator:
+          bisectOnError: false
+          maxRetries: -1
+          maxRecordAge: -1
+    timeline:
+      - at: 1m
+        note: a release can't parse one click in 20,000
+        set:
+          edge: clickstream.consumers->aggregator
+          settings:
+            poisonRecords: 0.00005
+      - at: 4m
+        note: bisect-on-error, two retries, one hour's maximum record age
+        set:
+          edge: clickstream.consumers->aggregator
+          settings:
+            bisectOnError: true
+            maxRetries: 2
+            maxRecordAge: 3600
+    assert:
+      - check: edge:clickstream.consumers->aggregator.gauge.iteratorAge:max < 5s
+        name: Before, the counts are seconds behind
+        to: 1m
+      - check: edge:clickstream.consumers->aggregator.gauge.iteratorAge:last > 120s
+        name: A bad click blocks its lane, and the counts fall minutes behind
+        from: 3m30s
+        to: 4m
+      - check: edge:clickstream.consumers->aggregator.rate.records < 400/s
+        name: Most lanes are stuck
+        from: 3m
+        to: 4m
+      - check: edge:clickstream.consumers->aggregator.total.discarded == 0
+        name: Nothing is given up on
+        from: 1m
+        to: 4m
+      - check: edge:clickstream.consumers->bot-detector.gauge.iteratorAge:max < 2s
+        name: The bot detector, on its own pipe, doesn't notice
+      - check: edge:clickstream.consumers->lake-feed.gauge.millisBehindLatest:max < 5s
+        name: Nor does Firehose
+      - check: failed-batches.gauge.depth:last > 10
+        name: Bisected bad clicks are noted in the on-failure queue
+      - check: edge:clickstream.consumers->aggregator.gauge.iteratorAge:max < 10s
+        name: The aggregator catches up
+        from: 7m
+  lake-buffers:
+    name: Tuning the lake's buffers
+    description: Firehose keeps a buffer per shard. At 128 MiB or five minutes each fills in about four and a half minutes, so the lake gets three large objects every few minutes and its newest data is that old. An analyst asks for fresher data, and the buffers are cut to 1 MiB and 60 seconds; data lands within seconds, but as nearly an object a second, some 75,000 small files a day for every query to list and open. 64 MiB and 60 seconds is the usual compromise; each buffer is flushed by the interval with about 30 MB, three objects a minute, and data at most a minute old.
+    duration: 12m
+    warmup: 30s
+    timeline:
+      - at: 6m
+        note: buffers cut to 1 MiB and 60 seconds
+        set:
+          node: lake-feed
+          settings:
+            bufferSize: 1
+            bufferInterval: 60 seconds
+      - at: 9m
+        note: buffers set to 64 MiB and 60 seconds
+        set:
+          node: lake-feed
+          settings:
+            bufferSize: 64
+            bufferInterval: 60 seconds
+    assert:
+      - check: lake.rate.put < 0.02/s
+        name: Large buffers, few objects
+        to: 6m
+      - check: lake-feed.gauge.dataFreshness:max > 200s
+        name: ...and data minutes old
+        to: 6m
+      - check: lake.rate.put > 0.6/s
+        name: 1 MiB buffers, an object almost every second
+        from: 6m30s
+        to: 9m
+      - check: lake-feed.gauge.dataFreshness:max < 10s
+        name: ...and data seconds old
+        from: 6m30s
+        to: 9m
+      - check: lake.rate.put < 0.1/s
+        name: 64 MiB and 60 seconds, three objects a minute
+        from: 10m
+      - check: lake-feed.gauge.dataFreshness:max < 70s
+        name: ...and data at most a minute old
+        from: 10m

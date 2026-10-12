@@ -167,6 +167,7 @@ kbd { font: 600 10.5px var(--mono); padding: 1px 5px; border: 1px solid var(--li
 .search input { flex: 1; min-width: 0; border: 0; background: none; outline: none; font-size: 12px; color: var(--text); }
 .picker-group { padding: 0 10px; }
 .picker-group h4 { margin: 14px 4px 6px; font-size: 10.5px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); }
+.picker-group h5 { margin: 10px 4px 5px; font-size: 10.5px; font-weight: 600; color: var(--muted); }
 .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .tile {
   display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px 6px 6px; text-align: left;
@@ -176,7 +177,7 @@ kbd { font: 600 10.5px var(--mono); padding: 1px 5px; border: 1px solid var(--li
 .tile:active { cursor: grabbing; }
 .tile[data-container] { border-style: dashed; }
 .tile-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
-.tile-text b { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-text b { font-weight: 600; font-size: 12px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .tile-text small { color: var(--faint); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .examples { display: grid; gap: 4px; }
 .example { display: block; width: 100%; padding: 7px 9px; text-align: left; border: 1px solid var(--line-soft); border-radius: 8px; background: transparent; }
@@ -341,6 +342,7 @@ select:disabled { opacity: 0.55; }
 .group-title { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
 .group-title b { font-weight: 650; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .group-title i { font-style: normal; font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.group-title .zones-down { color: var(--red); }
 /* Resize corners live in a layer above the nodes (`BoxGrips`); only the corners themselves take the pointer. */
 .react-flow__viewport-portal { z-index: 3; pointer-events: none; }
 .group-resize {

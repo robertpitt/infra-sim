@@ -44,7 +44,8 @@ export interface ProviderInfo {
   readonly id: string
   readonly title: string
   readonly defaultRegion: string
-  readonly regions: ReadonlyArray<{ readonly id: string; readonly name: string }>
+  /** Each region with its availability zones (none for a place without). */
+  readonly regions: ReadonlyArray<{ readonly id: string; readonly name: string; readonly zones: ReadonlyArray<string> }>
 }
 
 export interface Catalog {
@@ -66,7 +67,7 @@ const catalogOf = (components: Registry.Components): Catalog => ({
     id: p.id,
     title: p.title,
     defaultRegion: p.defaultRegion,
-    regions: p.regions.map((r) => ({ id: r.id, name: r.name }))
+    regions: p.regions.map((r) => ({ id: r.id, name: r.name, zones: r.zones ?? [] }))
   })),
   list: components.manifests,
   byType: Object.fromEntries(components.manifests.map((m) => [m.type, m])),
@@ -94,6 +95,10 @@ export const connectorOf = (
   if (manifest === undefined || q === undefined) return undefined
   return { connector: manifest, choices: Connector.candidates(catalog.get().connectors, q) }
 }
+
+/** The availability zones of one region of a provider (`us-east-1a`...), or none. */
+export const zonesOf = (provider: string, region: string): ReadonlyArray<string> =>
+  current.provider(provider)?.regions.find((r) => r.id === region)?.zones ?? []
 
 /** The account-level quota form for one region of a provider (published defaults differ by region). */
 export const accountFields = (provider: string, region: string): ReadonlyArray<FieldSpec> => {

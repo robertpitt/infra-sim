@@ -210,6 +210,26 @@ export const DynamoDb = Aws.component({
 
       /** Would a take succeed? Checked before anything is taken, so a request refused by any limit costs nothing. */
       const fits = (key: string, bucket: Bucket, tokens: number): boolean => limiter.levelUnsafe(key, bucket) >= need(tokens, bucket)
+      /**
+       * A request's units on a table's or index's partitions: all on the key's partition, or, for a batch whose records have
+       * keys of their own (`Message.spread`), that share spread evenly over every partition and the rest on the key's. Checks
+       * them all, or takes them all.
+       */
+      const onPartitions = (keys: PartitionKeys, op: "read" | "write", partitions: number, hot: number, units: number, spread: number, take: boolean): boolean => {
+        const bucket = PARTITION_BUCKET[op]
+        if (spread <= 0 || partitions <= 1) {
+          if (take) limiter.takeUnsafe(keys.of(op, hot), bucket, units)
+          return take || fits(keys.of(op, hot), bucket, units)
+        }
+        const each = (units * spread) / partitions
+        const own = units - units * spread
+        for (let p = 0; p < partitions; p++) {
+          const share = p === hot ? each + own : each
+          if (take) limiter.takeUnsafe(keys.of(op, p), bucket, share)
+          else if (!fits(keys.of(op, p), bucket, share)) return false
+        }
+        return true
+      }
 
       const refuse = (reason: string, isRead: boolean, count: number, source: "table" | "partition" | "index"): Call => {
         if (isRead) throttled.reads += count
@@ -361,9 +381,9 @@ export const DynamoDb = Aws.component({
 
           // A request that any limit refuses takes nothing from the others: all are checked first, then all are taken.
           const partition = partitionOf(message.key, table.partitions)
-          const partitionKey = tableKeys.of(op, partition)
+          const spread = count > 1 ? (message.spread ?? 1) : 0
           const bucketKey = isRead ? readKey : writeKey
-          if (!fits(partitionKey, PARTITION_BUCKET[op], units)) return refuse(direction.keyRange, isRead, count, "partition")
+          if (!onPartitions(tableKeys, op, table.partitions, partition, units, spread, false)) return refuse(direction.keyRange, isRead, count, "partition")
           if (!fits(bucketKey, direction.bucket, units)) return refuse(direction.throttle, isRead, count, "table")
 
           // ---- a write also writes to every global secondary index, and is throttled if any of them can't take it
@@ -374,13 +394,13 @@ export const DynamoDb = Aws.component({
               for (let i = 0; i < cap.indexes.length; i++) {
                 const index = cap.indexes[i]!
                 const part = partitionOf(indexKeyOf(message.key, i, c.gsi.keyValues), index.partitions)
-                if (!fits(keysOfIndex(i).of("write", part), PARTITION_BUCKET.write, perIndex)) return refuse(index.write.keyRange, false, count, "index")
+                if (!onPartitions(keysOfIndex(i), "write", index.partitions, part, perIndex, spread, false)) return refuse(index.write.keyRange, false, count, "index")
                 if (!fits(indexBucketKey(i, "write"), index.write.bucket, perIndex)) return refuse(index.write.throttle, false, count, "index")
               }
               for (let i = 0; i < cap.indexes.length; i++) {
                 const index = cap.indexes[i]!
                 const part = partitionOf(indexKeyOf(message.key, i, c.gsi.keyValues), index.partitions)
-                limiter.takeUnsafe(keysOfIndex(i).of("write", part), PARTITION_BUCKET.write, perIndex)
+                onPartitions(keysOfIndex(i), "write", index.partitions, part, perIndex, spread, true)
                 limiter.takeUnsafe(indexBucketKey(i, "write"), index.write.bucket, perIndex)
                 scalers.index(i).write.record(now, perIndex)
               }
@@ -388,7 +408,7 @@ export const DynamoDb = Aws.component({
               consumedIndexWrite.n += perIndex * cap.indexes.length
             }
           }
-          limiter.takeUnsafe(partitionKey, PARTITION_BUCKET[op], units)
+          onPartitions(tableKeys, op, table.partitions, partition, units, spread, true)
           limiter.takeUnsafe(bucketKey, direction.bucket, units)
 
           if (isRead) {

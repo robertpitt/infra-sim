@@ -197,7 +197,7 @@ export const merge = (base: Bag | undefined, over: Bag): Bag => {
 export const parseFault = (input: string | Bag): Bag | string => {
   if (typeof input === "string") {
     const m = /^\s*([A-Za-z]+)\s*(?:\(\s*([^)]*)\s*\))?\s*$/.exec(input)
-    if (m === null) return `can't read the fault "${input}" (Outage, Blackhole, Slow(250ms), Errors(20%), Loss(10%))`
+    if (m === null) return `can't read the fault "${input}" (Outage, Blackhole, Slow(250ms), Errors(20%), Loss(10%), Crash(2))`
     const kind = m[1]!
     const arg = m[2]?.trim()
     const tag = Fault.catalog.find((k) => k.tag.toLowerCase() === kind.toLowerCase())?.tag
@@ -206,6 +206,11 @@ export const parseFault = (input: string | Bag): Bag | string => {
     if (tag === "Slow") {
       const ms = parseDuration(arg)
       return ms === undefined ? `can't read "${arg}" as a duration (try 250ms or 2s)` : { _tag: tag, extra: ms }
+    }
+    if (tag === "Crash") {
+      // Crash(2): two units; Crash(2 hosts): two of the hosts under them.
+      const c = /^(\d+)\s*(units?|hosts?)?$/.exec(arg)
+      return c === null ? `can't read "${arg}" as a number of units (try Crash(2) or Crash(1 host))` : { _tag: tag, units: Number(c[1]), on: c[2]?.startsWith("host") ? "hosts" : "units" }
     }
     const rate = parseValue(arg)
     return rate === undefined ? `can't read "${arg}" as a rate` : { _tag: tag, rate }
@@ -228,11 +233,14 @@ export const parseFault = (input: string | Bag): Bag | string => {
 const parseTarget = (text: string, design: Design.Doc): Fault.Target | string => {
   const colon = text.indexOf(":")
   const kind = colon < 0 ? "" : text.slice(0, colon)
-  if (kind === "node" || kind === "edge" || kind === "region") return { kind, id: text.slice(colon + 1) }
+  if (kind === "node" || kind === "edge" || kind === "region" || kind === "zone") return { kind, id: text.slice(colon + 1) }
   if (text in design.nodes) return { kind: "node", id: text }
   if (text in design.edges) return { kind: "edge", id: text }
-  if (text.includes(":")) return { kind: "region", id: text }
-  return `can't tell what "${text}" is: write node:<id>, edge:<id> or region:<placement>`
+  // `aws:us-east-1` is a placement; `aws:us-east-1:us-east-1a` one of its zones.
+  const colons = text.split(":").length - 1
+  if (colons === 1) return { kind: "region", id: text }
+  if (colons === 2) return { kind: "zone", id: text }
+  return `can't tell what "${text}" is: write node:<id>, edge:<id>, region:<placement> or zone:<placement>:<zone>`
 }
 
 /** What a scenario needs from outside: how long to run. The CLI supplies defaults for flags. */
@@ -270,8 +278,13 @@ export const check = (design: Design.Doc, scenario: Spec): ReadonlyArray<string>
       if (typeof target === "string") issues.push(`${where}.inject.target: ${target}`)
       else if (target.kind === "node" && !(target.id in design.nodes)) issues.push(`${where}.inject.target: no node "${target.id}"`)
       else if (target.kind === "edge" && !(target.id in design.edges)) issues.push(`${where}.inject.target: no edge "${target.id}"`)
+      else if (target.kind === "zone" && target.id.split(":").length !== 3) issues.push(`${where}.inject.target: write a zone as zone:<placement>:<zone>, such as zone:aws:us-east-1:us-east-1a`)
       const fault = parseFault(event.inject.fault as string | Bag)
       if (typeof fault === "string") issues.push(`${where}.inject.fault: ${fault}`)
+      else if (typeof target !== "string") {
+        const kind = Fault.catalog.find((k) => k.tag === fault._tag)
+        if (kind !== undefined && !kind.targets.includes(target.kind)) issues.push(`${where}.inject: ${kind.label} can't be applied to a ${target.kind} (only to ${kind.targets.join(", ")})`)
+      }
       if (event.inject.for !== undefined && parseDuration(event.inject.for) === undefined) issues.push(`${where}.inject.for: can't read "${String(event.inject.for)}"`)
     }
     if (event.set !== undefined) {
@@ -445,12 +458,6 @@ export const playback = (
     }
     const recorded: Array<Frame> = []
 
-    // What each node, edge and account currently has as overrides, so a later change merges over it.
-    const current = {
-      nodes: new Map(Object.entries(prepared.nodes).map(([id, n]) => [id, (n.settings ?? {}) as Bag])),
-      edges: new Map(Object.entries(prepared.edges).map(([id, e]) => [id, (e.settings ?? {}) as Bag])),
-      accounts: new Map(Object.entries(prepared.accounts ?? {}).map(([k, v]) => [k, v as Bag]))
-    }
     const spans: Array<{ id: string; target: string; fault: Fault.Fault["_tag"]; from: number; to: number | undefined }> = []
     const log: Array<{ at: number; what: string }> = []
     const named = new Map<string, string>()
@@ -479,21 +486,16 @@ export const playback = (
             if (span !== undefined && span.to === undefined) span.to = at
           }
         } else if (event.set !== undefined) {
+          // Over what is live: a person's edit, an earlier set, an autoscaler's decision all stay.
           const { node, edge, settings } = event.set
           if (node !== undefined) {
-            const next = merge(current.nodes.get(node), settings)
-            yield* sim.configureNode(node, next).pipe(Effect.catch((e) => fail(`timeline: ${node}: ${messageOf(e)}`)))
-            current.nodes.set(node, next)
+            yield* sim.patchNode(node, settings).pipe(Effect.catch((e) => fail(`timeline: ${node}: ${messageOf(e)}`)))
           } else if (edge !== undefined) {
-            const next = merge(current.edges.get(edge), settings)
-            yield* sim.configureEdge(edge, next).pipe(Effect.catch((e) => fail(`timeline: ${edge}: ${messageOf(e)}`)))
-            current.edges.set(edge, next)
+            yield* sim.patchEdge(edge, settings).pipe(Effect.catch((e) => fail(`timeline: ${edge}: ${messageOf(e)}`)))
           }
         } else if (event.account !== undefined) {
           const { placement, settings } = event.account
-          const next = merge(current.accounts.get(placement), settings)
-          yield* sim.configureAccount(placement, next).pipe(Effect.catch((e) => fail(`timeline: ${placement}: ${messageOf(e)}`)))
-          current.accounts.set(placement, next)
+          yield* sim.patchAccount(placement, settings).pipe(Effect.catch((e) => fail(`timeline: ${placement}: ${messageOf(e)}`)))
         }
       })
 

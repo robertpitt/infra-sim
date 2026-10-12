@@ -4,8 +4,11 @@ import * as Aws from "../provider.ts"
 import { addresses, capacity, MAX_PREFIX, MIN_PREFIX, usablePerSubnet } from "./cidr.ts"
 import { source } from "./sources.ts"
 
-/** Component types that are VPC resources (they live in your subnets). Everything else on AWS is a regional service outside any VPC. */
-export const IN_VPC: ReadonlyArray<string> = ["aws.lambda", "aws.nat-gateway", "aws.vpc-endpoint"]
+/**
+ * Component types that are VPC resources (they live in your subnets). Everything else on AWS is a regional service outside
+ * any VPC. Databases, caches and search domains may also sit straight in a region box, for designs that don't draw the VPC.
+ */
+export const IN_VPC: ReadonlyArray<string> = ["aws.lambda", "aws.nat-gateway", "aws.vpc-endpoint", "aws.rds", "aws.rds-proxy", "aws.elasticache", "aws.opensearch", "aws.ec2", "aws.alb", "aws.nlb", "aws.ecs", "aws.eks"]
 
 export const Config = Schema.Struct({
   cidrPrefix: Setting.int({
@@ -67,7 +70,7 @@ export const Vpc = Aws.component({
   type: "aws.vpc",
   service: "VPC",
   title: "VPC",
-  description: "A virtual network inside a region. Place Lambda functions, NAT gateways and VPC endpoints in it.",
+  description: "A virtual network inside a region. Place what lives in your subnets in it: Lambda functions, NAT gateways, VPC endpoints, databases, caches and search domains.",
   category: "network",
   icon: "vpc",
   accent: "#8c4fff",

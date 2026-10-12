@@ -8,12 +8,26 @@ This page is the index and says how to read them.
 | API Gateway | [`apigateway/README.md`](../src/simulator/aws/apigateway/README.md#limits) |
 | CloudFront | [`cloudfront/README.md`](../src/simulator/aws/cloudfront/README.md#limits) |
 | DynamoDB | [`dynamodb/README.md`](../src/simulator/aws/dynamodb/README.md#limits) |
+| EC2 Auto Scaling | [`ec2/README.md`](../src/simulator/aws/ec2/README.md#limits) |
+| ECS (Fargate and EC2) | [`ecs/README.md`](../src/simulator/aws/ecs/README.md#limits) |
+| EKS | [`eks/README.md`](../src/simulator/aws/eks/README.md#limits) |
+| Elastic Load Balancing (ALB, NLB) | [`elb/README.md`](../src/simulator/aws/elb/README.md#limits) |
+| ElastiCache | [`elasticache/README.md`](../src/simulator/aws/elasticache/README.md#limits) |
+| EventBridge | [`eventbridge/README.md`](../src/simulator/aws/eventbridge/README.md#limits) |
+| EventBridge Scheduler | [`scheduler/README.md`](../src/simulator/aws/scheduler/README.md#limits) |
+| Data Firehose | [`firehose/README.md`](../src/simulator/aws/firehose/README.md#limits) |
+| Kinesis Data Streams | [`kinesis/README.md`](../src/simulator/aws/kinesis/README.md#limits) |
 | Lambda | [`lambda/README.md`](../src/simulator/aws/lambda/README.md#limits) |
+| OpenSearch Service | [`opensearch/README.md`](../src/simulator/aws/opensearch/README.md#limits) |
+| RDS, Aurora and RDS Proxy | [`rds/README.md`](../src/simulator/aws/rds/README.md#limits) |
+| Route 53 | [`route53/README.md`](../src/simulator/aws/route53/README.md#limits) |
 | S3 | [`s3/README.md`](../src/simulator/aws/s3/README.md#limits) |
 | SES | [`ses/README.md`](../src/simulator/aws/ses/README.md#limits) |
 | SNS | [`sns/README.md`](../src/simulator/aws/sns/README.md#limits) |
 | SQS | [`sqs/README.md`](../src/simulator/aws/sqs/README.md#limits) |
-| Regions | [`region/README.md`](../src/simulator/aws/region/README.md#limits) |
+| Step Functions | [`stepfunctions/README.md`](../src/simulator/aws/stepfunctions/README.md#limits) |
+| WAF | [`waf/README.md`](../src/simulator/aws/waf/README.md#limits) |
+| Regions and availability zones | [`region/README.md`](../src/simulator/aws/region/README.md#limits) |
 | VPC, NAT gateway, VPC endpoints | [`vpc/README.md`](../src/simulator/aws/vpc/README.md#limits) |
 
 ## How a limit is classified

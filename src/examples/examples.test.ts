@@ -13,7 +13,7 @@ const runnable = examples.filter((e) => e.id !== "blank").map((e): [string, Exam
 
 describe("the example designs", () => {
   it("are read from the files in examples/, in filename order", () => {
-    expect(examples.map((e) => e.id)).toEqual(["ingestion", "url-shortener", "orders", "retry-storm", "multi-region", "fan-out", "cluster", "blank"])
+    expect(examples.map((e) => e.id)).toEqual(["ingestion", "url-shortener", "orders", "retry-storm", "multi-region", "fan-out", "cluster", "order-saga", "clickstream", "product-catalog", "saas-api", "web-tier", "containers", "kubernetes", "blank"])
   })
 
   it.each(examples.map((e): [string, Example] => [e.id, e]))("%s: is a valid design with no errors, a title and a blurb", (_id, e) => {
@@ -104,26 +104,29 @@ describe("the autoscaled cluster", () => {
 describe("the event ingestion platform", () => {
   const ingestion = () => example("ingestion").design()
 
-  it("keeps the forwarder, the NAT gateway, the query handler and the gateway endpoints in the VPC", () => {
+  it("keeps the forwarder, the NAT gateway, the query handler, the gateway endpoints and the search domain in the VPC", () => {
     const doc = ingestion()
     const inVpc = Object.entries(doc.nodes).filter(([, n]) => n.parent === "platform-vpc").map(([id]) => id).sort()
-    expect(inVpc).toEqual(["dynamodb-endpoint", "forwarder", "nat", "query-service", "s3-endpoint"])
+    expect(inVpc).toEqual(["dynamodb-endpoint", "forwarder", "nat", "profile-search", "profile-sync", "query-service", "s3-endpoint"])
     expect(Object.values(doc.nodes).filter((n) => n.type.startsWith("aws.") && n.type !== "aws.region").every((n) => n.parent !== undefined)).toBe(true)
   })
 
-  it("fans every event out to the lake, the profiles and the destinations, and nobody sees an error", async () => {
+  it("streams every event to the lake, the profiles and the destinations, and nobody sees an error", async () => {
     const all = await frames(ingestion(), 90_000)
     const late = (id: string, name: string) => mean(all, "nodes", id, "rates", name, 45_000)
-    const published = late("events-topic", "ok")
-    expect(published).toBeGreaterThan(200)
-    // Every event to the lake; some, by filter policy, to the profiles and the destinations.
-    expect(late("warehouse-queue", "in")).toBeCloseTo(published, -1)
-    expect(late("realtime-queue", "in") / published).toBeCloseTo(0.4, 1)
-    expect(late("destinations-queue", "in") / published).toBeCloseTo(0.3, 1)
+    const records = (edge: string) => mean(all, "edges", edge, "rates", "records", 45_000)
+    const streamed = late("events-stream", "incoming")
+    expect(streamed).toBeGreaterThan(400)
+    // Each of the stream's three readers gets every event, at its own pace.
+    expect(late("lake-delivery", "incoming") / streamed).toBeCloseTo(1, 1)
+    expect(records("events-stream.consumers->enricher") / streamed).toBeCloseTo(1, 1)
+    expect(late("destinations-queue", "in") / streamed).toBeCloseTo(1, 1)
     expect(late("lake", "put")).toBeGreaterThan(0)
     expect(late("profiles", "streamDelivered")).toBeGreaterThan(0)
-    expect(late("search-index", "in")).toBeGreaterThan(0)
+    expect(late("profile-search", "indexed")).toBeGreaterThan(0)
+    expect(late("profile-search", "searchRequests")).toBeGreaterThan(0)
     expect(late("crm-api", "in")).toBeGreaterThan(late("ads-api", "in"))
+    expect(mean(all, "nodes", "export-job", "rates", "invocations")).toBeGreaterThan(0)
     for (const client of ["browser-sdk", "server-sdk", "partner-webhooks", "analysts", "sdk-page-loads"]) expect(late(client, "fail")).toBe(0)
   })
 
@@ -153,12 +156,18 @@ describe("the event ingestion platform", () => {
 describe("the URL shortener", () => {
   const shortener = () => example("url-shortener").design()
 
-  it("serves most redirects from CloudFront's cache, counts every click, and checks every new link", async () => {
+  it("serves most redirects from CloudFront's cache, streams every click to the counter and the archive, and checks every new link", async () => {
     const all = await frames(shortener(), 90_000)
     const late = (id: string, name: string) => mean(all, "nodes", id, "rates", name, 45_000)
+    const counter = (kind: "rates" | "gauges", name: string) => mean(all, "edges", "clicks.consumers->counter", kind, name, 45_000)
     expect(late("redirect-cdn", "originRequests")).toBeLessThan(late("redirect-cdn", "requests") / 2)
     expect(late("resolve", "in")).toBeCloseTo(late("redirect-cdn", "originRequests"), -1)
+    // Every click goes into the Kinesis stream, and its two consumers, the counter and the raw-click archive, each read all of it.
+    expect(late("clicks", "incoming") / late("click-log", "ok")).toBeCloseTo(1, 1)
+    expect(counter("rates", "records") / late("clicks", "incoming")).toBeCloseTo(1, 1)
+    expect(counter("gauges", "iteratorAge")).toBeLessThan(5_000)
     expect(late("click-counts", "consumedWrite") / late("click-log", "ok")).toBeCloseTo(1, 1)
+    expect(late("lake-feed", "incoming") / late("clicks", "incoming")).toBeCloseTo(1, 1)
     expect(late("safe-browsing", "in") / (late("creators", "ok") + late("importer", "ok"))).toBeCloseTo(1, 1)
     expect(late("qr-codes", "put")).toBeGreaterThan(0)
     // Expired links reach the archive through the table's stream.
@@ -169,7 +178,7 @@ describe("the URL shortener", () => {
 
   it("carries scenarios that check something, and says what it leaves out", () => {
     const doc = shortener()
-    expect(Object.keys(doc.scenarios ?? {})).toEqual(["viral", "bulk-import"])
+    expect(Object.keys(doc.scenarios ?? {})).toEqual(["viral", "viral-on-demand", "bulk-import", "bad-deploy"])
     for (const s of Object.values(doc.scenarios ?? {})) expect(s.assert?.length).toBeGreaterThan(3)
     expect(doc.description).toContain("What the simulator cannot show")
   })

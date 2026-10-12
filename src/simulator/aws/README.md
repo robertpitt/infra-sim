@@ -8,11 +8,22 @@ documented, and it is the brief for anyone (human or agent) working on one.
 | API Gateway | [`apigateway/`](apigateway) | `aws.apigateway` |
 | CloudFront | [`cloudfront/`](cloudfront) | `aws.cloudfront` |
 | DynamoDB | [`dynamodb/`](dynamodb) | `aws.dynamodb` |
+| EC2 Auto Scaling (groups of instances, warm pools, Spot) | [`ec2/`](ec2) | `aws.ec2` |
+| ECS (services on Fargate or EC2 capacity providers) and EKS (Deployments on node groups, Cluster Autoscaler, Karpenter) | [`ecs/`](ecs), [`eks/`](eks) | `aws.ecs`, `aws.eks` |
+| ElastiCache (Valkey, Redis OSS, Memcached, serverless) | [`elasticache/`](elasticache) | `aws.elasticache` |
+| Elastic Load Balancing (Application and Network Load Balancers) | [`elb/`](elb) | `aws.alb`, `aws.nlb` (and the `aws.alb.target-group`, `aws.alb.lambda-target`, `aws.alb.ip-target`, `aws.nlb.target-group`, `aws.nlb.ip-target` connectors) |
+| EventBridge (event buses) and EventBridge Scheduler | [`eventbridge/`](eventbridge), [`scheduler/`](scheduler) | `aws.eventbridge`, `aws.scheduler` |
+| Kinesis Data Streams and Data Firehose | [`kinesis/`](kinesis), [`firehose/`](firehose) | `aws.kinesis`, `aws.firehose` (and the `aws.kinesis.event-source-mapping`, `aws.firehose.kinesis-source` connectors) |
 | Lambda | [`lambda/`](lambda) | `aws.lambda` |
+| OpenSearch Service (managed domains) | [`opensearch/`](opensearch) | `aws.opensearch` |
+| RDS and Aurora, RDS Proxy | [`rds/`](rds) | `aws.rds`, `aws.rds-proxy` (and the `aws.rds.client`, `aws.rds-proxy.client`, `aws.rds-proxy.target` connectors) |
+| Route 53 | [`route53/`](route53) | `aws.route53` (and the `aws.route53.connection` connector) |
 | S3 | [`s3/`](s3) | `aws.s3` |
 | SES | [`ses/`](ses) | `aws.ses` |
 | SNS | [`sns/`](sns) | `aws.sns` |
 | SQS | [`sqs/`](sqs) | `aws.sqs` |
+| Step Functions (Standard and Express) | [`stepfunctions/`](stepfunctions) | `aws.stepfunctions` (and the `aws.stepfunctions.task` connector) |
+| WAF | [`waf/`](waf) | `aws.waf` |
 | Region and VPC (boundaries) | [`region/`](region), [`vpc/`](vpc) | `aws.region`, `aws.vpc` |
 
 ## What a service folder contains

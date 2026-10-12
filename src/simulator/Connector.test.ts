@@ -98,6 +98,38 @@ describe("connectors in a design", () => {
     expect(Design.encode(named, registry).edges["q.deliver->worker"]!.connector).toBe("core.poller")
   })
 
+  it("a plain link stamps its operation on the call, or keeps the caller's with \"caller\"", async () => {
+    // A client reads through a pass-through hop (a Lambda) into a table: the table sees reads only if the hop keeps them.
+    const run = (operation: string) => {
+      const b = Builder.make("hop", { seed: 4 })
+      const web = b.add("common.client", { id: "web", settings: { arrival: "constant", rps: 50 } })
+      const hop = b.add("aws.lambda", { id: "hop", settings: { duration: { mean: 5, cv: 0 } } })
+      const table = b.add("aws.dynamodb", { id: "table", settings: { mode: "on-demand" } })
+      b.connect(web, hop, { request: { operation: "read" } })
+      b.connect(hop, table, { request: { operation } })
+      return frames(b.build(), 10_000)
+    }
+    const reads = (all: Awaited<ReturnType<typeof frames>>) => mean(all, "nodes", "table", "rates", "consumedRead", 3_000)
+    const writes = (all: Awaited<ReturnType<typeof frames>>) => mean(all, "nodes", "table", "rates", "consumedWrite", 3_000)
+    const stamped = await run("write")
+    expect(writes(stamped)).toBeGreaterThan(40)
+    expect(reads(stamped)).toBe(0)
+    const kept = await run("caller")
+    expect(reads(kept)).toBeGreaterThan(20)
+    expect(writes(kept)).toBe(0)
+  })
+
+  it("gives a queue drained by a fleet a plain poller, not Lambda's event source mapping", () => {
+    const b = Builder.make("drained", { seed: 4 })
+    const q = b.add("aws.sqs", { id: "q" })
+    b.connect(b.add("common.client", { id: "web" }), q)
+    b.connect(q.port("deliver"), b.add("common.service", { id: "workers" }))
+    b.connect(q.port("deliver"), b.add("aws.lambda", { id: "fn" }))
+    const design = Design.resolve(b.build(), registry).design!
+    expect(edgeOf(design, "q.deliver->workers").connector.type).toBe("core.poller")
+    expect(edgeOf(design, "q.deliver->fn").connector.type).toBe("aws.sqs.event-source-mapping")
+  })
+
   it("reports a connector that doesn't fit", () => {
     const doc = Design.setConnector(queued(), "web.out->q", "core.poller")
     const { diagnostics } = Design.resolve(doc, registry)

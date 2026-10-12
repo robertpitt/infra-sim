@@ -168,7 +168,10 @@ export const scenarioProperties = (): JsonSchema => ({
           description: "Break something.",
           required: ["target", "fault"],
           properties: {
-            target: { type: "string", description: "What breaks: node:<id>, edge:<id> or region:<placement> (region:aws:us-east-1)." },
+            target: {
+              type: "string",
+              description: "What breaks: node:<id>, edge:<id>, region:<placement> (region:aws:us-east-1) or zone:<placement>:<zone> (zone:aws:us-east-1:us-east-1a)."
+            },
             fault: faultSchema(),
             for: { ...SCENARIO_DURATION, description: "How long it lasts. Without it, the fault lasts until cleared." },
             id: { type: "string", description: "A name to clear it by later." }
@@ -273,6 +276,10 @@ export const designSchema = (registry: Components): JsonSchema => {
       },
       name: { type: "string", description: "What the canvas calls it. Defaults to its id." },
       region: { type: "string", description: "The provider's region it runs in. Absent means the provider's default, or the region box it is in." },
+      zone: {
+        type: "string",
+        description: "The availability zone of its region it lives in (us-east-1a), for a single-zone resource: a zone outage takes it down. Absent for a regional one."
+      },
       parent: { type: "string", description: "The id of the container (a region or VPC box) it sits inside." },
       position: POSITION,
       size: {

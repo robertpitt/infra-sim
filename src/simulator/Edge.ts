@@ -2,6 +2,7 @@ import { type Context, Duration, Effect, Schema, SubscriptionRef } from "effect"
 import * as Distribution from "./Distribution.ts"
 import { type EdgeEffect, Faults } from "./Fault.ts"
 import { type Call, type CallFailure, failureCounter, isRetryable, type ItemFailures, type Message, Timeout, Unavailable } from "./Message.ts"
+import type { HealthAnswer, Unit } from "./Protocol.ts"
 import type { SeededRandom } from "./SeededRandom.ts"
 import * as Setting from "./Setting.ts"
 import { Telemetry } from "./Telemetry.ts"
@@ -39,9 +40,10 @@ const latency = Setting.latency({
 })
 const request = Setting.group(
   {
-    operation: Setting.choice(["read", "write"], {
+    operation: Setting.choice(["write", "read", "caller"], {
       default: "write",
-      help: "What this call does to the receiver. Stores and object stores price and limit reads and writes differently."
+      labels: { write: "Write", read: "Read", caller: "What the caller asked (read or write)" },
+      help: "What this call does to the receiver. Stores and object stores price and limit reads and writes differently. A hop that only passes calls on (a firewall, a load balancer, a cache in front of a store) keeps the caller's with \"caller\"."
     }),
     payload: Setting.int({
       default: 0,
@@ -132,6 +134,8 @@ export interface Link<C extends Config = Config> {
    * abandons the call (the callee keeps going unless the edge is set to cancel on timeout).
    */
   readonly send: (message: Message, done?: Done) => Cancel
+  /** What the node at the far end offers beyond calls (its `Instance.offer`), if anything. Ask when needed: it is made after the caller. */
+  readonly offer: () => unknown
 }
 
 /** The face of an edge a component calls through, from whatever its connector does with a message. */
@@ -141,6 +145,7 @@ export const link = <C extends Config>(args: {
   readonly to: string
   readonly config: SubscriptionRef.SubscriptionRef<C>
   readonly send: (message: Message, done?: Done) => Cancel
+  readonly offer?: () => unknown
 }): Link<C> => {
   const { config, send } = args
   // Only a plain link has a weight; anything else on an invoke port counts as 1.
@@ -157,9 +162,12 @@ export const link = <C extends Config>(args: {
         const cancel = send(message, (failure, items) => resume(failure !== undefined ? Effect.fail(failure) : items === undefined ? Effect.void : Effect.succeed(items)))
         return Effect.sync(cancel)
       }),
-    send
+    send,
+    offer: args.offer ?? noOffer
   }
 }
+
+const noOffer = (): unknown => undefined
 
 /**
  * What an edge calls: the node at its far end, already wrapped with that node's faults and metrics.
@@ -169,7 +177,16 @@ export const link = <C extends Config>(args: {
  * run a whole call (latency, timeout, retries) without building an effect for any of it.
  */
 export interface Target {
-  readonly start: (message: Message, done: Done) => Cancel
+  /**
+   * `unit`, when given, is the unit of a fleet the call is addressed to (picked by a connector that speaks `fleet`); the
+   * node runs it with its fleet's `serve` rather than its handler.
+   */
+  readonly start: (message: Message, done: Done, unit?: Unit) => Cancel
+  /**
+   * Whether the node answers at all right now (its own, its region's and its zone's outages): what a health check that
+   * crosses this edge finds before asking a unit.
+   */
+  readonly reachable?: () => boolean
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -231,8 +248,19 @@ export interface Wire {
   readonly to: string
   /** Tries in flight right now. */
   readonly inflight: () => number
-  /** Call the far end under `policy`: tries through transport, with the policy's timeout and retries. */
-  readonly call: (message: Message, policy: CallPolicy, done?: Done) => Cancel
+  /**
+   * Call the far end under `policy`: tries through transport, with the policy's timeout and retries. A connector that
+   * picks units of a fleet passes the `unit` the call is for, and any `extraMs` of one-way latency its route adds (crossing
+   * zones); every try goes to that unit.
+   */
+  readonly call: (message: Message, policy: CallPolicy, done?: Done, unit?: Unit, extraMs?: number) => Cancel
+  /**
+   * A health check across the edge: latency there, `answer` asked on arrival, latency back (plus what the answer adds),
+   * given up after `timeoutMs`. `done` hears `true` only for a healthy answer in time. It goes through the edge's faults
+   * (an outage refuses it, a black hole or loss lets it time out) but counts in none of the edge's metrics, as a load
+   * balancer's health checks aren't requests. The returned function abandons it.
+   */
+  readonly ping: (answer: () => HealthAnswer, timeoutMs: number, done: (healthy: boolean) => void, extraMs?: number) => Cancel
 }
 
 export interface WireArgs {
@@ -277,7 +305,11 @@ class Flight {
     readonly wire: WireRuntime,
     readonly message: Message,
     readonly policy: CallPolicy,
-    readonly done: Done | undefined
+    readonly done: Done | undefined,
+    /** The unit of a fleet the call is for, if a connector picked one. */
+    readonly unit: Unit | undefined,
+    /** One-way latency its route adds to the edge's own (crossing zones). */
+    readonly extraMs: number
   ) {}
 
   /** Begin one try. */
@@ -293,7 +325,7 @@ class Flight {
     if (this.policy.timeoutMs !== Infinity) this.timeout = w.world.after(this.policy.timeoutMs, onTimeout, this)
     // Black hole or packet loss: nothing arrives, nothing replies, the caller waits out its timeout.
     if (f.blackhole || (f.lossRate > 0 && w.random.nextDoubleUnsafe() < f.lossRate)) return
-    this.step = w.world.after(Distribution.latencyMs(this.transport.latency, w.random) + f.extraMs, onArrive, this)
+    this.step = w.world.after(Distribution.latencyMs(this.transport.latency, w.random) + f.extraMs + this.extraMs, onArrive, this)
   }
 
   /** The request has crossed the network. */
@@ -302,14 +334,14 @@ class Flight {
     const w = this.wire
     if (this.fault.outage) return this.end(Unavailable({ node: w.to, reason: "connection refused" }))
     const attempt = this.attempt
-    this.cancelCallee = w.target.start(this.message, (failure, items) => this.calleeDone(attempt, failure, items))
+    this.cancelCallee = w.target.start(this.message, (failure, items) => this.calleeDone(attempt, failure, items), this.unit)
   }
 
   calleeDone(attempt: number, failure: CallFailure | undefined, items: ItemFailures | undefined): void {
     if (attempt !== this.attempt || !this.open) return // abandoned: the caller has moved on
     if (failure !== undefined) return this.end(failure)
     this.items = items
-    this.step = this.wire.world.after(Distribution.latencyMs(this.transport.latency, this.wire.random), onReturn, this)
+    this.step = this.wire.world.after(Distribution.latencyMs(this.transport.latency, this.wire.random) + this.extraMs, onReturn, this)
   }
 
   /** This try is over, one way or the other. */
@@ -358,6 +390,55 @@ class Flight {
     this.step?.cancel()
   }
 }
+
+/**
+ * A health check across an edge: the same transport as a call (latency both ways, the edge's faults), none of its
+ * metrics, and an answer from the far end instead of a handler. See `Wire.ping`.
+ */
+class Ping {
+  timeout: TimerHandle | undefined
+  step: TimerHandle | undefined
+  settled = false
+  constructor(
+    readonly wire: WireRuntime,
+    readonly answer: () => HealthAnswer,
+    readonly done: (healthy: boolean) => void,
+    readonly transport: Transport,
+    readonly fault: EdgeEffect,
+    readonly extraMs: number
+  ) {}
+
+  arrive(): void {
+    this.step = undefined
+    // Refused by the edge or by the node (its own, its region's or its zone's outage), or by the unit: a fast failure.
+    if (this.fault.outage || this.wire.target.reachable?.() === false) return this.end(false)
+    const a = this.answer()
+    if (!a.up) return this.end(false)
+    this.step = this.wire.world.after(Distribution.latencyMs(this.transport.latency, this.wire.random) + this.extraMs + a.ms, a.healthy ? onPingHealthy : onPingSick, this)
+  }
+
+  end(healthy: boolean): void {
+    if (this.settled) return
+    this.settled = true
+    this.timeout?.cancel()
+    this.step?.cancel()
+    this.done(healthy)
+  }
+
+  cancel(): void {
+    if (this.settled) return
+    this.settled = true
+    this.timeout?.cancel()
+    this.step?.cancel()
+  }
+}
+const onPingArrive = (ping: Ping): void => ping.arrive()
+const onPingHealthy = (ping: Ping): void => ping.end(true)
+const onPingTimeout = (ping: Ping): void => {
+  ping.timeout = undefined
+  ping.end(false)
+}
+const onPingSick = (ping: Ping): void => ping.end(false)
 
 const onArrive = (flight: Flight): void => flight.arrive()
 const onReturn = (flight: Flight): void => flight.end(undefined)
@@ -426,11 +507,22 @@ export const wire = (args: WireArgs): Effect.Effect<Wire, never, Telemetry | Fau
       from: args.from,
       to,
       inflight: () => runtime.inflight,
-      call: (message, policy, done) => {
-        const flight = new Flight(runtime, message, policy, done)
+      call: (message, policy, done, unit, extraMs = 0) => {
+        const flight = new Flight(runtime, message, policy, done, unit, extraMs)
         flight.transport = SubscriptionRef.getUnsafe(config)
         flight.begin()
         return flight.cancelBound ?? (flight.cancelBound = () => flight.cancel())
+      },
+      ping: (answer, timeoutMs, done, extraMs = 0) => {
+        const transport = SubscriptionRef.getUnsafe(config)
+        const fault = faults.forEdgeUnsafe(id)
+        const ping = new Ping(runtime, answer, done, transport, fault, extraMs)
+        ping.timeout = world.after(timeoutMs, onPingTimeout, ping)
+        // Black hole or packet loss: the check never arrives, and times out.
+        if (!(fault.blackhole || (fault.lossRate > 0 && random.nextDoubleUnsafe() < fault.lossRate))) {
+          ping.step = world.after(Distribution.latencyMs(transport.latency, random) + fault.extraMs + extraMs, onPingArrive, ping)
+        }
+        return () => ping.cancel()
       }
     }
   })

@@ -46,8 +46,11 @@ export interface Context<Config> {
     readonly random: SeededRandom
     readonly after: <A>(ms: number, fire: (arg: A) => void, arg: A) => TimerHandle
   }
-  /** Hear the target's metrics each frame as they are flushed (`undefined` while it has recorded nothing). */
-  readonly watch: (listener: (stats: Stats | undefined, t: number) => Effect.Effect<void>) => Effect.Effect<void, never, Scope.Scope>
+  /**
+   * Hear the target's metrics each frame as they are flushed (`undefined` while it has recorded nothing). With `of`,
+   * another node's instead, asked again each frame: the queue whose backlog the target's workers drain.
+   */
+  readonly watch: (listener: (stats: Stats | undefined, t: number) => Effect.Effect<void>, of?: () => string | undefined) => Effect.Effect<void, never, Scope.Scope>
   /** The target's settings right now, as on disk: durations in milliseconds, every field filled in. */
   readonly settings: () => Readonly<Record<string, unknown>>
   /**

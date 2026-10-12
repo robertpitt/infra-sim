@@ -1,0 +1,526 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Order saga
+description: |-
+  An event-driven order backend in London, built the serverless way: an API takes the order, a Standard Step Functions workflow runs it as a saga (reserve the stock, charge the card, book the courier, confirm), and the confirmed order goes on an EventBridge bus whose rules fan it out to fulfilment, analytics, a loyalty partner and fraud review. About twenty-five components in one region. It shows a saga retrying through a payment provider's blip and compensating when an outage outlasts its retries, an event bus keeping one broken consumer's trouble to itself, and the Standard workflow quotas of a smaller Region (StartExecution and state transitions) meeting a flash sale.
+
+  How it is wired: shoppers call an HTTP API whose Place order function writes the order to the orders table as pending and starts an execution, answering at once with the order's id (the SDK retries a throttled start twice). The workflow is Standard, not Express, because an asynchronous Express execution may run twice and a charge must not. It reserves each of the order's three lines in the inventory table with a Map state (DynamoDB's own integration, no function), charges the card through a function calling the payment provider, books the courier through a function calling the carrier's API, marks the order confirmed and puts an OrderConfirmed event on the bus: eight state transitions an order. The charge retries any error six times with exponential backoff from 2 seconds and full jitter (about a minute in all), the booking four times; when either gives up, the catcher runs the compensations: release the stock (first, as it doesn't depend on the provider), refund the payment, retrying for several minutes in case the provider is still down, and mark the order cancelled. On the bus, the order-confirmed rule sends every order to the fulfilment queue, whose function calls the warehouse, and to a Firehose stream that lands it in S3 for analytics; the loyalty-points rule credits the partner through an API destination limited to 100 calls a second, retrying for at most five minutes before dead-lettering; the fraud-review rule sends the one order in ten above the review threshold to a function that opens a case. An EventBridge Scheduler schedule runs a sweep every five minutes for orders left pending, whose execution never started.
+
+  What the simulator cannot show: what an order contains, so a rule's event pattern is a share of events, and a declined card or an item out of stock never happens (either would be caught and compensated like an outage); Choice states (a workflow is a sequence of states); custom error names, so the charge's one retrier can't tell a decline, not worth retrying, from an outage; payment idempotency keys (a retried charge is a new call); and what the sweep finds and cancels (it only reads the orders table).
+seed: 8
+nodes:
+  aws-eu-west-2:
+    type: aws.region
+    name: eu-west-2 (London)
+    settings:
+      region: eu-west-2
+    position: { x: 352, y: -66 }
+    size: { w: 1572, h: 2346 }
+  shoppers:
+    type: common.client
+    name: Shoppers (web and app checkouts)
+    region: eu-west
+    settings:
+      rps: 30
+      payload: 2
+    position: { x: 0, y: 426 }
+  orders-api:
+    type: aws.apigateway
+    name: Orders API
+    parent: aws-eu-west-2
+    settings:
+      apiType: http
+    position: { x: 380, y: 398 }
+  place-order:
+    type: aws.lambda
+    name: Place order
+    parent: aws-eu-west-2
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 25 }
+    position: { x: 700, y: 422 }
+  order-saga:
+    type: aws.stepfunctions
+    name: Order saga (Standard workflow)
+    parent: aws-eu-west-2
+    settings:
+      workflowType: standard
+      timeout: 1 hour
+    position: { x: 1020, y: 348 }
+  inventory:
+    type: aws.dynamodb
+    name: Inventory table
+    parent: aws-eu-west-2
+    settings:
+      mode: on-demand
+    position: { x: 1340, y: 0 }
+  charge-card:
+    type: aws.lambda
+    name: Charge card
+    parent: aws-eu-west-2
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 30 }
+    position: { x: 1340, y: 240 }
+  refund-payment:
+    type: aws.lambda
+    name: Refund payment
+    parent: aws-eu-west-2
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 30 }
+    position: { x: 1340, y: 456 }
+  book-shipment:
+    type: aws.lambda
+    name: Book courier
+    parent: aws-eu-west-2
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 30 }
+    position: { x: 1340, y: 672 }
+  orders:
+    type: aws.dynamodb
+    name: Orders table
+    parent: aws-eu-west-2
+    settings:
+      mode: on-demand
+    position: { x: 1340, y: 888 }
+  order-events:
+    type: aws.eventbridge
+    name: Order events bus
+    parent: aws-eu-west-2
+    position: { x: 1020, y: 1040 }
+  fulfilment-queue:
+    type: aws.sqs
+    name: Fulfilment queue
+    parent: aws-eu-west-2
+    settings:
+      visibilityTimeout: 1 minute
+      maxReceives: 5
+    position: { x: 1340, y: 1200 }
+  fulfilment:
+    type: aws.lambda
+    name: Fulfilment
+    parent: aws-eu-west-2
+    settings:
+      memory: 512
+      timeout: 30 seconds
+      duration: { mean: 60 }
+    position: { x: 1660, y: 1200 }
+  fulfilment-dlq:
+    type: aws.sqs
+    name: Fulfilment DLQ
+    parent: aws-eu-west-2
+    settings:
+      retention: 14 days
+    position: { x: 1660, y: 1416 }
+  analytics-stream:
+    type: aws.firehose
+    name: Analytics delivery stream
+    parent: aws-eu-west-2
+    settings:
+      bufferSize: 5
+      bufferInterval: 60 seconds
+    position: { x: 1340, y: 1632 }
+  analytics-bucket:
+    type: aws.s3
+    name: Order analytics bucket
+    parent: aws-eu-west-2
+    position: { x: 1660, y: 1668 }
+  fraud-review:
+    type: aws.lambda
+    name: Fraud review
+    parent: aws-eu-west-2
+    settings:
+      memory: 1024
+      duration: { mean: 200 }
+    position: { x: 1340, y: 1860 }
+  review-cases:
+    type: aws.dynamodb
+    name: Review cases table
+    parent: aws-eu-west-2
+    settings:
+      mode: on-demand
+    position: { x: 1660, y: 1872 }
+  events-dlq:
+    type: aws.sqs
+    name: Order events DLQ
+    parent: aws-eu-west-2
+    settings:
+      retention: 14 days
+    position: { x: 1340, y: 2076 }
+  sweep-schedule:
+    type: aws.scheduler
+    name: Abandoned-order sweep
+    parent: aws-eu-west-2
+    settings:
+      expression: rate(5 minutes)
+    position: { x: 380, y: 852 }
+  sweeper:
+    type: aws.lambda
+    name: Sweep pending orders
+    parent: aws-eu-west-2
+    settings:
+      memory: 1024
+      timeout: 2 minutes
+      duration: { mean: 3000, cv: 0.3 }
+    position: { x: 700, y: 876 }
+  payment-provider:
+    type: common.http-endpoint
+    name: Payment provider
+    region: eu-west
+    settings:
+      latency: { mean: 400, cv: 0.4 }
+    position: { x: 2080, y: 412 }
+  carrier-api:
+    type: common.http-endpoint
+    name: Courier booking API
+    region: eu-west
+    settings:
+      latency: { mean: 600, cv: 0.5 }
+    position: { x: 2080, y: 736 }
+  warehouse-api:
+    type: common.http-endpoint
+    name: Warehouse system (3PL)
+    region: eu-west
+    settings:
+      latency: { mean: 150, cv: 0.4 }
+    position: { x: 2080, y: 1264 }
+  loyalty-api:
+    type: common.http-endpoint
+    name: Loyalty partner API
+    region: eu-west
+    settings:
+      latency: { mean: 150, cv: 0.4 }
+    position: { x: 2080, y: 1104 }
+edges:
+  shoppers.out->orders-api:
+    from: { node: shoppers }
+    to: orders-api
+    settings:
+      timeout: 10 seconds
+  orders-api.out->place-order:
+    from: { node: orders-api }
+    to: place-order
+  place-order.out->orders:
+    from: { node: place-order }
+    to: orders
+  place-order.out->order-saga:
+    from: { node: place-order }
+    to: order-saga
+    settings:
+      retry: { maxAttempts: 3, backoff: 100 millis }
+  order-saga.out->inventory:
+    from: { node: order-saga }
+    to: inventory
+    settings:
+      state: map
+      map: { items: 3 }
+      timeout: 5 seconds
+      retrier: { enabled: true, errorEquals: service, jitter: FULL }
+      catcher: { enabled: true, errorEquals: States.ALL }
+  order-saga.out->charge-card:
+    from: { node: order-saga }
+    to: charge-card
+    settings:
+      timeout: 15 seconds
+      retrier: { enabled: true, errorEquals: States.ALL, interval: 2 seconds, maxAttempts: 6, backoffRate: 2, jitter: FULL }
+      catcher: { enabled: true, errorEquals: States.ALL }
+  order-saga.out->book-shipment:
+    from: { node: order-saga }
+    to: book-shipment
+    settings:
+      timeout: 15 seconds
+      retrier: { enabled: true, errorEquals: States.ALL, interval: 2 seconds, maxAttempts: 4, backoffRate: 2, jitter: FULL }
+      catcher: { enabled: true, errorEquals: States.ALL }
+  order-saga.out->orders:
+    from: { node: order-saga }
+    to: orders
+    settings:
+      timeout: 5 seconds
+      retrier: { enabled: true, errorEquals: service, jitter: FULL }
+  order-saga.out->order-events:
+    from: { node: order-saga }
+    to: order-events
+    settings:
+      timeout: 5 seconds
+      retrier: { enabled: true, errorEquals: service, jitter: FULL }
+  order-saga.catch->inventory:
+    from: { node: order-saga, port: catch }
+    to: inventory
+    settings:
+      undoes: inventory
+      timeout: 5 seconds
+      retrier: { enabled: true, errorEquals: States.ALL, maxAttempts: 10, maxDelay: 30 seconds, jitter: FULL }
+  order-saga.catch->refund-payment:
+    from: { node: order-saga, port: catch }
+    to: refund-payment
+    settings:
+      undoes: charge-card
+      timeout: 15 seconds
+      retrier: { enabled: true, errorEquals: States.ALL, interval: 5 seconds, maxAttempts: 30, backoffRate: 2, maxDelay: 60 seconds, jitter: FULL }
+  order-saga.catch->orders:
+    from: { node: order-saga, port: catch }
+    to: orders
+    settings:
+      timeout: 5 seconds
+      retrier: { enabled: true, errorEquals: States.ALL, maxAttempts: 10, maxDelay: 30 seconds, jitter: FULL }
+  charge-card.out->payment-provider:
+    from: { node: charge-card }
+    to: payment-provider
+    settings:
+      timeout: 5 seconds
+  refund-payment.out->payment-provider:
+    from: { node: refund-payment }
+    to: payment-provider
+    settings:
+      timeout: 5 seconds
+  book-shipment.out->carrier-api:
+    from: { node: book-shipment }
+    to: carrier-api
+    settings:
+      timeout: 5 seconds
+  order-events.out->fulfilment-queue:
+    from: { node: order-events }
+    to: fulfilment-queue
+    settings:
+      rule: order-confirmed
+  order-events.out->analytics-stream:
+    from: { node: order-events }
+    to: analytics-stream
+    settings:
+      rule: order-confirmed
+  order-events.out->loyalty-api:
+    from: { node: order-events }
+    to: loyalty-api
+    settings:
+      rule: loyalty-points
+      apiDestination: { enabled: true, rate: 100 }
+      retryPolicy: { maxEventAge: 5 minutes }
+      deadLetterQueue: true
+  order-events.out->fraud-review:
+    from: { node: order-events }
+    to: fraud-review
+    settings:
+      rule: fraud-review
+      match: 0.1
+  order-events.dlq->events-dlq:
+    from: { node: order-events, port: dlq }
+    to: events-dlq
+  fulfilment-queue.deliver->fulfilment:
+    from: { node: fulfilment-queue, port: deliver }
+    to: fulfilment
+    settings:
+      batchSize: 10
+  fulfilment-queue.dlq->fulfilment-dlq:
+    from: { node: fulfilment-queue, port: dlq }
+    to: fulfilment-dlq
+  fulfilment.out->warehouse-api:
+    from: { node: fulfilment }
+    to: warehouse-api
+    settings:
+      timeout: 5 seconds
+  analytics-stream.out->analytics-bucket:
+    from: { node: analytics-stream }
+    to: analytics-bucket
+  fraud-review.out->review-cases:
+    from: { node: fraud-review }
+    to: review-cases
+  sweep-schedule.out->sweeper:
+    from: { node: sweep-schedule }
+    to: sweeper
+  sweeper.out->orders:
+    from: { node: sweeper }
+    to: orders
+    settings:
+      request: { operation: read, payload: 200 }
+scenarios:
+  payment-outage:
+    name: Payment provider down
+    description: The payment provider blips for 15 seconds, then is down for three minutes. The charge's six retries (about a minute, with jitter) ride out the blip; in the outage every charge gives up after its retries and the saga compensates, releasing the stock at once and retrying the refund until the provider is back before cancelling the order. Shoppers never notice, as the API answered them before the saga ran; but each retry is a state transition, so the workflow makes twice its usual transitions while confirming nothing.
+    duration: 9m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the payment provider blips for 15 seconds
+        inject:
+          target: node:payment-provider
+          fault: Outage
+          for: 15s
+      - at: 3m
+        note: the payment provider goes down for three minutes
+        inject:
+          target: node:payment-provider
+          fault: Outage
+          for: 3m
+      - at: 6m
+        note: it is back
+    assert:
+      - check: shoppers.errorRatio < 0.1%
+        name: Shoppers never notice
+      - check: order-saga.rate.retries > 30/s
+        name: In the blip, charges are retried
+        from: 1m
+        to: 1m30s
+      - check: order-saga.total.caught < 5
+        name: None of them gives up
+        from: 1m
+        to: 2m30s
+      - check: order-saga.rate.caught > 20/s
+        name: In the outage, every order gives up after its retries and is caught
+        from: 4m30s
+        to: 6m
+      - check: edge:order-saga.catch->inventory.rate.ok > 20/s
+        name: Its stock is released at once
+        from: 4m30s
+        to: 6m
+      - check: order-saga.rate.transitions > 450/s
+        name: Retries are state transitions, twice the usual while nothing is confirmed
+        from: 4m30s
+        to: 6m
+      - check: edge:order-saga.catch->refund-payment.rate.ok:max > 100/s
+        name: The refunds go through once the provider is back
+        from: 6m
+        to: 7m
+      - check: order-saga.gauge.running:last < 100
+        name: Then every order is settled, confirmed or cancelled
+        from: 8m30s
+  loyalty-outage:
+    name: Loyalty partner down
+    description: The loyalty partner's API is down for seven minutes, and nothing else notices. EventBridge retries each credit with exponential backoff for its five-minute maximum age, then moves it to the dead-letter queue. When the partner is back the credits still retrying arrive, but by then their backoff has grown to minutes, and those whose next try would come after their age runs out are dead-lettered anyway, for several minutes more. Redrive the queue once the partner is healthy.
+    duration: 12m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the loyalty partner's API goes down
+        inject:
+          target: node:loyalty-api
+          fault: Outage
+          for: 7m
+      - at: 8m
+        note: it is back
+    assert:
+      - check: system.errorRatio < 0.1%
+        name: Shoppers don't notice
+      - check: fulfilment-queue.rate.in > 27/s
+        name: Fulfilment still gets every order
+        from: 1m
+        to: 8m
+      - check: order-events.rate.retries > 70/s
+        name: EventBridge retries the credits
+        from: 2m
+        to: 8m
+      - check: order-events.rate.deadLettered > 20/s
+        name: Credits older than five minutes are dead-lettered
+        from: 6m30s
+        to: 8m
+      - check: loyalty-api.rate.ok > 60/s
+        name: Once it is back, the credits still retrying arrive
+        from: 8m
+        to: 9m
+      - check: order-events.rate.deadLettered > 7/s
+        name: Credits whose next retry comes too late are dead-lettered anyway
+        from: 8m
+        to: 10m
+      - check: events-dlq.gauge.depth:last > 3500
+        name: The dead-letter queue keeps them for a redrive
+      - check: order-events.total.dropped == 0
+        name: Nothing is lost
+  flash-sale:
+    name: Flash sale on the default quotas
+    description: Orders jump from 30 to 200 a second for three minutes. Outside the three largest Regions a Standard workflow may start 150 executions a second, so a quarter of the shoppers get an error (their orders stay pending for the sweep). The 150 that start need 1,200 state transitions a second and London allows 800, so transitions queue, orders are confirmed at 65 a second, and an order takes about two minutes instead of a second; the backlog clears two or three minutes after the sale.
+    duration: 9m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the sale starts
+        set:
+          node: shoppers
+          settings:
+            rps: 200
+      - at: 4m
+        note: the sale ends
+        set:
+          node: shoppers
+          settings:
+            rps: 30
+    assert:
+      - check: shoppers.errorRatio > 15%
+        name: A quarter of the shoppers get an error
+        from: 1m30s
+        to: 4m
+      - check: order-saga.rate.started < 155/s
+        name: StartExecution lets 150 a second through
+        from: 1m30s
+        to: 4m
+      - check: order-saga.rate.transitions:max <= 820
+        name: State transitions are held to 800 a second
+        from: 1m30s
+        to: 4m
+      - check: order-saga.gauge.waitingForTransition:max > 10000
+        name: The rest wait in line
+      - check: order-saga.rate.succeeded < 80/s
+        name: Orders are confirmed at 65 a second, not 150
+        from: 2m
+        to: 4m
+      - check: order-saga.dist.executionTime.p50 > 1m
+        name: An order takes minutes to confirm
+        from: 3m
+        to: 5m
+      - check: order-saga.rate.failed == 0
+        name: None of the started orders fails
+      - check: order-saga.gauge.running:last < 100
+        name: The backlog clears after the sale
+        from: 8m30s
+  flash-sale-raised:
+    name: Flash sale with raised quotas
+    description: The same sale after raising the Standard workflow quotas through Service Quotas, to 500 starts and 3,000 state transitions a second. Every order starts and is confirmed within two seconds. The bottleneck moves downstream, to the loyalty rule's API destination, which still sends 100 credits a second, so the credits fall about three minutes behind (within their five-minute age, so none is dead-lettered).
+    duration: 9m
+    warmup: 30s
+    overrides:
+      accounts:
+        aws:eu-west-2:
+          sfnStartExecutionBurst: 2000
+          sfnStartExecutionRate: 500
+          sfnStateTransitionBurst: 5000
+          sfnStateTransitionRate: 3000
+    timeline:
+      - at: 1m
+        note: the sale starts
+        set:
+          node: shoppers
+          settings:
+            rps: 200
+      - at: 4m
+        note: the sale ends
+        set:
+          node: shoppers
+          settings:
+            rps: 30
+    assert:
+      - check: system.errorRatio < 0.1%
+        name: Every shopper is answered
+      - check: order-saga.rate.throttled:max == 0
+        name: No start is throttled
+      - check: order-saga.rate.transitionsThrottled:max == 0
+        name: No transition waits
+      - check: order-saga.rate.succeeded > 190/s
+        name: Orders are confirmed as fast as they come
+        from: 1m30s
+        to: 4m
+      - check: order-saga.dist.executionTime.p95 < 5s
+        name: In about two seconds
+        from: 1m30s
+        to: 4m
+      - check: loyalty-api.rate.in < 102/s
+        name: The loyalty partner still gets 100 credits a second
+        from: 1m30s
+        to: 7m
+      - check: order-events.dist.startLatency.max:max > 2m
+        name: Its credits fall minutes behind
+      - check: order-events.total.deadLettered == 0
+        name: None waits past its five-minute age

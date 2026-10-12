@@ -4,6 +4,9 @@ import * as Edge from "../Edge.ts"
 import { type CallFailure, failureCounter, type Message } from "../Message.ts"
 import * as Setting from "../Setting.ts"
 
+/** The key a client's hot share is sent with: one fixed partition key, so it keeps landing on one partition or shard. */
+export const HOT_KEY = 0.1234
+
 /** Longest the generator naps before re-reading its settings, so edits (a scenario changing the rate) take effect promptly. */
 const MAX_NAP = Duration.millis(500)
 
@@ -20,7 +23,15 @@ const Config = Schema.Struct({
     help: "Fraction of requests that use the same partition key. Stores and streams partition by key, so a hot key can overload one partition while the rest sit idle."
   }),
   messageGroups: Setting.int({ default: 0, min: 0, max: 100_000, label: "FIFO message groups", help: "Spread requests across this many message groups (0 for none). FIFO queues process one message per group at a time." }),
-  invocation: Setting.choice(["sync", "async"], { default: "sync", help: "How requests invoke what they call. Lambda queues async invocations and retries them; sync ones are answered or throttled at once." })
+  invocation: Setting.choice(["sync", "async"], { default: "sync", help: "How requests invoke what they call. Lambda queues async invocations and retries them; sync ones are answered or throttled at once." }),
+  records: Setting.int({
+    default: 1,
+    min: 1,
+    max: 10_000,
+    unit: "records",
+    label: "Records per request",
+    help: "How many records one request carries: 1 for a plain call, more for a batch API (a Kinesis PutRecords, an OpenSearch bulk, EventBridge PutEvents). Services count records where AWS does. The request size is the whole batch's."
+  })
 })
 
 export const Client = Component.make({
@@ -72,11 +83,14 @@ export const Client = Component.make({
           return
         }
         const c = fast.settings()
-        const hot = c.hotKeys > 0 && fast.random.nextDoubleUnsafe() < c.hotKeys
+        // One record has the hot key or not; a batch carries the hot key's share of its records and spreads the rest.
+        const batch = c.records > 1
+        const hot = c.hotKeys > 0 && (batch || fast.random.nextDoubleUnsafe() < c.hotKeys)
         const message = fast.mint({
           bytes: Math.round(c.payload * 1024),
+          ...(batch ? { count: c.records, spread: hot ? 1 - c.hotKeys : 1 } : {}),
           invocation: c.invocation,
-          ...(hot ? { key: 0.1234 } : {}),
+          ...(hot ? { key: HOT_KEY } : {}),
           ...(c.messageGroups > 0 ? { group: `g${Math.floor(fast.random.nextDoubleUnsafe() * c.messageGroups)}` } : {})
         })
         sentTotal.n++

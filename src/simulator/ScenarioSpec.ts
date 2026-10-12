@@ -20,7 +20,10 @@ export const TimelineEvent = Schema.Struct({
   at: DurationInput,
   /** Say what this event is, in the result's log. */
   note: Schema.optionalKey(Schema.String),
-  /** Break something: `target` is `node:<id>`, `edge:<id>` or `region:<placement>` (`region:aws:us-east-1`). */
+  /**
+   * Break something: `target` is `node:<id>`, `edge:<id>`, `region:<placement>` (`region:aws:us-east-1`) or
+   * `zone:<placement>:<zone>` (`zone:aws:us-east-1:us-east-1a`).
+   */
   inject: Schema.optionalKey(
     Schema.Struct({
       target: Schema.String,

@@ -33,9 +33,10 @@ A **design** is a YAML or JSON file (see `examples/`). A Schema **codec** turns 
 | `Setting`, `Describe` | Schema constructors for config (`int`, `ratio`, `duration`, `choice`, `latency`, `group`…) and the derivation of a UI form from a schema. |
 | `Message`, `Distribution` | The unit of work (`Message`), typed call failures, and sampling (lognormal latency, exponential gaps, weighted choice). |
 | `Telemetry`, `Fault` | Windowed metrics published as a `Stream` of frames; fault kinds as a Schema union plus the service that tracks them. |
-| `Protocol` | How work crosses a port: `invoke` (push a call) or `pull` (the owner holds work, a taker takes leases). |
+| `Protocol` | How work crosses a port: `invoke` (push a call), `pull` (the owner holds work, a taker takes leases) or `fleet` (the target offers its units, and the edge picks one per call). |
 | `Edge` | Transport (latency and edge faults, one try per call, the edge's metrics) and call policy (timeout, retry/backoff). |
-| `Connector`, `connectors/*` | What sits on an edge: the definition API, the inference rule, and the core ones (`core.link`, `core.poller`). |
+| `Connector`, `connectors/*` | What sits on an edge: the definition API, the inference rule, and the core ones (`core.link`, `core.poller`, `core.target-group`). |
+| `fleet/` | Fleets of units (instances, tasks, pods) one by one: their life, zones, desired capacity, draining, replacement, interruptions; and a load balancer's target group. See `src/simulator/fleet/README.md`. |
 | `Controller`, `controllers/*` | Loops that watch a node and change it while it runs: the definition API and the core ones (`core.target-tracking`). |
 | `Family`, `kit/Slots` | A keyed family: instances by key, made on first use, evicted when idle, with cold starts counted; and slots with a line waiting for them. |
 | `Component`, `Registry` | The component definition API, and the set of components and connectors a design may use. |
@@ -88,9 +89,12 @@ export const Echo = Component.make({
     // node.meter    counters / samples / gauges
     // node.mint     create a Message (sources)
     // node.spawn    run a background loop, defects reported not lost
+    // node.faults   what faults reach it now, and a hook to hear them change
+    // node.zones    the zones of its region, and their faults
     return {
       call:  (msg) => /* handle an inbound call: Effect<void, CallFailure> */,
-      probe: /* Effect<State> */
+      probe: /* Effect<State> */,
+      // offer: anything the connectors on edges into it, and its callers, may reach (`ctx.offer()`, `link.offer()`)
     }
   })
 })
@@ -104,7 +108,9 @@ A port speaks a protocol. Most are `invoke`: the component calls through `node.o
 `Effect<void, CallFailure>` (or `link.send(message, done)`). A `pull` port (`port.pull`) is the other way round: the
 component holds the work and offers it (`Instance.pull`, a `Protocol.Pull` with `take` returning leases), and whatever sits
 on each edge takes from it. That is how a queue and its consumers work: the queue keeps visibility timeouts and redelivery,
-and Lambda's event source mapping, a connector, does the polling (see **Edges** below).
+and Lambda's event source mapping, a connector, does the polling (see **Edges** below). The third protocol is offered by an
+edge's *target*: a component declared a `fleet` (`fleet: true`) offers its units (`Instance.fleet`), and a connector that
+speaks `fleet` (a load balancer's target group) picks one for each call (see **Fleets and load balancers** below).
 
 ### Providers, regions and placement
 
@@ -115,6 +121,35 @@ Every node has a **placement** (`aws:eu-west-1`). Placement decides:
 - **network latency**: an edge's default latency comes from the distance between its two placements (great circle at 200 km/ms with a 1.35 route factor, 1 ms inside a region, +3 ms across providers, +10 ms touching the internet). Setting an edge's latency overrides it;
 - **shared quotas**: every node in a placement sees the same live account settings, and `node.shared(key, build)` hands out one resource per placement (the Lambda regional pool, the API Gateway account bucket, the DynamoDB account ledger);
 - **regional faults**: `Outage`, `Errors` and `Slow` can target a placement such as `aws:us-east-1` and hit everything in it, and nothing outside it.
+
+A **global** component (`global: true`: CloudFront, Route 53) runs at the provider's edge everywhere rather than in the region
+it is placed in. Its placement still keys its quotas and its latency, but no region's or zone's fault reaches it, only its
+own: losing us-east-1 takes a distribution's origins there down, not the distribution.
+
+### Availability zones
+
+Every region lists its **zones** (`Region.zones`): AWS's are named as AWS names them, the region's code and a letter
+(`us-east-1a`...), as many as AWS's Regions page lists for it (`aws/region/catalog.ts`); a place outside any cloud has three by
+assumption (`eu-west-a`...), so a self-hosted cluster can lose one too. A zone is a placement detail, not an account: quotas and
+shared resources stay regional (`keyOf` ignores the zone).
+
+- **A node can live in one zone**, written as a field beside `region` (`zone: us-east-1a`), for a single-zone resource: a
+  database primary, a NAT gateway. It is part of its `Placement`. The design checks it is a zone of the node's region
+  (`unknown-zone`); absent, the node is regional, as every existing design's nodes are. A field rather than a setting because
+  placement is the engine's business, not each component's: faults and latency apply to any node without its component
+  knowing, and one form field (the Zone selector under Region) serves every component.
+- **A fleet spreads its units** over several zones by a setting of its own (`common.service`'s `zones`): see **Fleets** below.
+- **Zone faults**: `Outage`, `Errors` and `Slow` can target one zone of a placement, `zone:<placement>:<zone>`
+  (`zone:aws:us-east-1:us-east-1a`). They reach every node placed in that zone (the node guard adds them to its own and its
+  region's) and every unit a fleet runs there. A region fault still reaches everything in the region, zoned or not.
+  Components ask cheaply (`node.zones.effect(zone)`, `node.zones.down(zone)`: one check and a shared constant when nothing is
+  injected anywhere) and hear about changes without a fiber (`node.zones.watch`, called synchronously after the fault set changes).
+- **Latency**: two nodes in the same region that both live in zones, in different ones, are `CROSS_ZONE_MS` (0.5 ms, assumed:
+  AWS says zones are up to ~100 km apart with single-digit millisecond latency) further apart than the 1 ms inside a region.
+  Otherwise the edge latency model is as it was. A target group adds the same when it sends a request across zones.
+- **Where you inject them**: scenarios (`inject: { target: "zone:aws:us-east-1:us-east-1a", fault: Outage }`), the CLI
+  (`--fault "zone:aws:us-east-1:us-east-1a Outage at=2m"`, `docs faults`), and in the app a Region box's Faults panel ("Where":
+  the whole region or one zone). A box with a zone down says so in its title; a node in that zone shows as faulted.
 
 ### Limits: hard, quota, assumed
 
@@ -139,9 +174,9 @@ is the guide to writing one. The READMEs are the reference; this is the overview
 
 **Common** (`common/`): nothing in these belongs to a provider, so they model systems with no cloud in them too.
 
-- `common.client`: a traffic source. Poisson or constant arrivals, payload size, hot keys, message groups, sync or async. A chain of timers, no fiber per request. Its rate is steady: a surge, a lull or a spike is a scenario's timeline setting the rate and setting it back.
+- `common.client`: a traffic source. Poisson or constant arrivals, payload size, records per request (a batch API call), hot keys, message groups, sync or async. A chain of timers, no fiber per request. Its rate is steady: a surge, a lull or a spike is a scenario's timeline setting the rate and setting it back.
 - `common.http-endpoint`: something outside your system. Latency, error rate, rate limit (429), concurrency limit (503), payload limit.
-- `common.service`: identical replicas behind a load balancer (a Kubernetes Deployment, an ECS service, a team taking tickets): `replicas × concurrency` workers, a queue with a limit (503 past it), a service time, downstream calls, and a start-up time for added replicas. Gauges `ready`, `starting`, `busy`, `queued`, `utilization`; an autoscaler tracks `busy` per replica.
+- `common.service`: identical replicas behind a load balancer (a Kubernetes Deployment, an ECS service, a team taking tickets): `replicas × concurrency` workers, a queue with a limit (503 past it), a service time, downstream calls, and a start-up time for added replicas. Gauges `ready`, `starting`, `busy`, `queued`, `utilization` (and `draining`, `ready.<zone>`); an autoscaler tracks `busy` per replica. It is built on the fleet core: optionally it spreads over `zones` (losing a zone's replicas and replacing them elsewhere, after `replaceAfter`), drains replicas it lets go (`drain`), and can be reached replica by replica through a target group.
 - `common.actor`: a family of single-threaded objects addressed by key (Durable Objects, actors, per-user sessions), made on first use (a cold start) and evicted when idle. Different keys run side by side; one key runs one request at a time, so a hot key is capped at one object's pace and only its queue grows (503 past a per-object limit). It can be held busy while it calls its store downstream, as a Durable Object's input gate holds it.
 
 The **Autoscaled cluster** example is built from these alone, with two autoscaling controllers tracking different metrics.
@@ -158,6 +193,14 @@ The **Autoscaled cluster** example is built from these alone, with two autoscali
 | [SES](src/simulator/aws/ses/README.md) | sandbox and production quotas, throttling, the fate of each accepted message (delivered, bounced, complained, delayed), event fan-out, and the reputation thresholds that put an account in review or pause it |
 | [SNS](src/simulator/aws/sns/README.md) | standard and FIFO topics, regional publish quotas, deduplication, per-subscription delivery with retries, filters as rates, dead-letter queues, bounded memory for stuck subscribers |
 | [SQS](src/simulator/aws/sqs/README.md) | standard and FIFO, visibility timeouts, delay, retention, deduplication, dead-letter queues and redrive, in-flight limits, and the Lambda event source mapping with its scaling |
+| [ElastiCache](src/simulator/aws/elasticache/README.md) | Valkey, Redis OSS and Memcached in front of a database: a hit ratio that emerges from keys, memory, eviction and TTL; slots and shards (hot keys), replicas, failover, stampedes and the lock that stops them; Serverless scaling |
+| [EventBridge](src/simulator/aws/eventbridge/README.md), [Scheduler](src/simulator/aws/scheduler/README.md) | event buses with regional PutEvents and invocation quotas, rules as match shares with up to five targets, retries for a day, dead-letter queues, API destinations; schedules (rate, cron, one-time) for thousands of tenants and the flexible time window that spreads them |
+| [Kinesis](src/simulator/aws/kinesis/README.md), [Firehose](src/simulator/aws/firehose/README.md) | data streams with per-shard write and read limits, hot shards, on-demand splitting, enhanced fan-out and the Lambda event source mapping (parallelization, bisect, poison records, iterator age); Firehose buffers landing as objects, transformation, retries and backup |
+| [OpenSearch](src/simulator/aws/opensearch/README.md) | data nodes whose write and search thread pools share the CPU, 429 rejections, indexing pressure, shards and replicas (the write cost of a replica, hot shards), refresh lag, node failure and red/yellow clusters |
+| [RDS](src/simulator/aws/rds/README.md) | RDS and Aurora: `max_connections` from the parameter group, connection setup cost, CPU and IOPS queues, readers, Multi-AZ failover; RDS Proxy pooling, borrow timeouts and pinning |
+| [Route 53](src/simulator/aws/route53/README.md) | DNS routing (simple, weighted, failover, latency, geolocation) with health checkers and resolver caches, so failover takes detection plus the TTL |
+| [Step Functions](src/simulator/aws/stepfunctions/README.md) | Standard and Express workflows: tasks in order, Parallel, Inline and Distributed Map, Wait, retriers and catchers (sagas with compensation), StartExecution and state-transition quotas |
+| [WAF](src/simulator/aws/waf/README.md) | web ACLs inline in front of CloudFront, ALB or API Gateway: rate-based rules per client IP with their detection lag, managed and custom rules as match shares, capacity units, body inspection limits |
 | [Region](src/simulator/aws/region/README.md), [VPC](src/simulator/aws/vpc/README.md) | the boundary boxes: placement and regional quotas; VPC address plans and quotas, NAT gateways with their connection and bandwidth limits, VPC endpoints |
 
 ## Importers
@@ -216,7 +259,9 @@ when its window closes), and only what they read is kept, so a long live run doe
 language (errors, throttling, timeouts, expired and dead-lettered messages, an old backlog, saturation) applied to every node.
 The monitor works like CloudWatch alarms: telemetry is cut into 10-second periods, a rule must breach for some consecutive
 periods to fire and stay calm for three to resolve. Errors that the clients see are critical (they are what users see); errors
-inside are warnings, since retries may absorb them. It is plain code over frames, so the CLI and the engine raise the same alerts.
+inside are warnings, since retries may absorb them. A component can leave out rules that don't fit it (`quietAlarms`): a
+firewall's 403s are its job, so WAF has no errors alarm, and what it passes on still alarms where it lands. It is plain code
+over frames, so the CLI and the engine raise the same alerts.
 
 `src/cli` is a thin Node layer over it (an `effect/cli` command tree, file loading, rendering): `run`, `check`, `import`, `convert`,
 `components`, `describe`, `examples`, `docs`. It loads designs, scenarios (resolving the design they name, which may itself
@@ -244,12 +289,58 @@ protocols). Providers bring their own (`Provider.connectors`). The ones there ar
 | `core.link` | `invoke` → `invoke` | The plain call: `weight` (share of traffic when the source routes by weight), `request` (what the call does and carries), `timeout` and `cancelOnTimeout` (by default the callee **keeps working** after the caller gives up, like most real clients), `retry` (max attempts, backoff, factor, cap and jitter, drawn from the edge's own seeded stream). |
 | `core.poller` | `pull` → `invoke` | A fixed pool of `workers` that take batches, call with each and acknowledge on success; a failed batch is left to the source's lease. |
 | `aws.sqs.event-source-mapping` | `aws.sqs:deliver` → `invoke` | Lambda's poller between a queue and its consumer: batching, scaling with the backlog, throttle back-off; it waits for the function rather than timing out. |
+| `core.target-group` | `invoke` → `fleet` | A load balancer's target group: registers a fleet's units, checks their health across the edge, picks one per call (round robin, least outstanding requests, random, flow hash), with slow start, cross-zone balancing, fail open and a deregistration delay. Named on an edge (`connector: core.target-group`); a plain link stays the default into a fleet. |
+
+**Reaching the far end.** A connector sometimes needs more of its target node than calls: a database's connectors register
+their client's connection policy with it, a target group needs a fleet's units. A node offers what it wants to share as
+`Instance.offer` (any shape, agreed between the component and its partners, who narrow it with a guard): connectors on
+edges into it read it as `ctx.offer()`, and components calling it as `link.offer()` (a proxy finding the database behind it).
+A fleet's units have their own typed offer (`Instance.fleet`, `ctx.target`). A connector can also share a resource with the
+nodes of its target's placement: `ctx.shared(key, build)` is `node.shared(key, build)` there.
 
 An edge's settings are flat: the source port's own fields (an SNS subscription's filter, a CloudFront origin's timeouts),
 then the connector's, then transport's (`Connector.edgeSchema`). `Simulation.probeEdge(id)` returns the connector's state, and
 `inspect` lists each edge's connector. In the editor a connector that isn't a plain link is drawn as a badge on the line.
 
 Retries and orphaned work are what make retry storms and metastable failures emerge. The **Retry storm** example shows retries at every layer multiplying a slow provider's load many times over, and nested timeouts with fewer, jittered retries keeping it to a few times.
+
+## Fleets and load balancers
+
+A **fleet** is a component whose capacity is a number of identical units (EC2 instances, ECS tasks, pods, replicas), each
+with a zone, a life and workers of its own: requested → starting (phases the service gives: launch, boot, image pull, start)
+→ grace → in service → draining → terminated. `fleet/Fleet.ts` is the provider-neutral core; a component builds one in `make`,
+passes it the numbers it reads from its settings (desired count, min and max, zones, phases, grace, workers, line and
+backlog limits, drain time, detection time, an account-capacity hook, interruptions) and hands it its calls. The fleet keeps
+the number of units at the desired count (a setting, so `core.target-tracking` drives it), spreads launches evenly over its
+zones, loses a zone's units when it goes down and replaces them in the others once it notices, rebalances (new before old)
+when the zone returns, drains what it lets go (no new calls, in-flight ones finish, cut off when the drain time runs out),
+takes interruptions with a notice (Spot), and refuses launches past an account quota. `src/simulator/fleet/README.md` is the
+guide for building EC2, ECS and EKS on it.
+
+A fleet is reached two ways:
+
+- **A plain edge** (a client calling a service directly) is a call into the node: it waits in the fleet's one line and runs
+  on the first unit with a free worker, an idealised balancer that knows at once which units are dead. `common.service` built
+  this way plays every scenario of the cluster and retry-storm examples bit for bit as it did before.
+- **A load balancer** puts a **target group** on the edge (`core.target-group`, or its own connector over
+  `fleet/TargetGroup.ts`). That edge's connector speaks a third protocol, `fleet`: the target node offers its units
+  (`Instance.fleet`: each unit that is up, a watch for units coming up, draining and going, a health answer per unit, `serve`
+  a call on a unit, health reports back, a hold on draining units), and the connector picks a unit for every call and sends it
+  through the edge's transport addressed to that unit (`Wire.call(message, policy, done, unit, extraMs)`). Health checks
+  cross the same transport with `Wire.ping` (latency, the edge's faults, a timeout) without counting as requests, so a dead
+  unit keeps getting requests (which fail) until its checks catch it, and a black-holed edge fails its checks too.
+
+Why this design. The choosing and the health checking belong to neither end: a fleet doesn't know how its balancer picks,
+and a load balancer's listener doesn't care which unit answers, only how to turn failures into 502, 503 and 504. That is
+exactly what a connector is for (as Lambda's event source mapping sits between a queue and its consumer), and a target
+group in AWS is a resource of its own between the two. Making the *target end* offer its units, symmetrical to a `pull`
+source offering work at the source end, needed no new port kind on the balancer: its port stays an ordinary `invoke` port,
+so the same balancer can target a Lambda function (a plain link) or a fleet (a target group), and a plain client still gets
+today's service. Calls keep going through the edge's transport and the target node's guard, so latency, edge faults, the
+node's own and its region's faults, and both ends' metrics are what they are for any call; the fleet adds its zones'
+faults for the unit that runs it. The alternatives were worse: a balancer reaching into the fleet from its own component
+would bypass the edge (no latency, faults or edge metrics), and per-unit nodes in the design would make a 500-unit fleet
+500 nodes and an autoscaler an editor of the graph.
 
 ## Controllers
 
@@ -276,7 +367,7 @@ a number, is an error; one not told what to change yet is a warning, and does no
 
 | Controller | What it does |
 | --- | --- |
-| `core.target-tracking` | Keeps a metric (a gauge, a rate, or a percentile like `latency.p95`) near a target by scaling one numeric setting, the way Kubernetes' horizontal autoscaler and Application Auto Scaling do: averaged over a window, decided every period, within a minimum and maximum, a tolerance band, and separate scale-out and scale-in cooldowns. Per unit (`ceil(total / target)`) or in total (in proportion). |
+| `core.target-tracking` | Keeps a metric (a gauge, a rate, or a percentile like `latency.p95`) near a target by scaling one numeric setting, the way Kubernetes' horizontal autoscaler and Application Auto Scaling do: averaged over a window, decided every period, within a minimum and maximum, a tolerance band, and separate scale-out and scale-in cooldowns. Per unit (`ceil(total / target)`) or in total (in proportion). The metric may be another node's (`source`): a queue's backlog per worker instance. |
 
 In the editor a node's panel lists its controllers with their settings and live metrics, and offers the ones that fit; a
 controlled node carries a badge on the canvas. Live edits are checked again as they are made (the engine keeps its copy of
@@ -288,13 +379,33 @@ Faults are universal: the framework applies them around every node and edge, so 
 
 | Fault | Targets | Effect |
 | --- | --- | --- |
-| `Outage` | node, edge, region | Rejects every call at once. On a region (`aws:us-east-1`), everything in it. |
-| `Errors { rate }` | node, region | A fraction of calls fail after being processed. |
-| `Slow { extra }` | node, edge, region | Adds fixed latency. |
+| `Outage` | node, edge, region, zone | Rejects every call at once. On a region (`aws:us-east-1`), everything in it; on a zone (`aws:us-east-1:us-east-1a`), the nodes placed in it and the fleet units running there. |
+| `Errors { rate }` | node, region, zone | A fraction of calls fail after being processed. |
+| `Slow { extra }` | node, edge, region, zone | Adds fixed latency. |
 | `Blackhole` | edge | Calls vanish; callers wait out their timeout. |
 | `Loss { rate }` | edge | A fraction of calls vanish. |
+| `Crash { units, on }` | node (fleets) | That many of a fleet's units crash at once (or hosts, for ECS on EC2 and EKS): calls on them fail, a balancer sends them traffic until its checks catch them, and the fleet replaces them when it notices. An instant, not a span. |
 
 Faults can carry a duration and lift themselves. `Faults.changes` is a `Stream` of the active set.
+
+**What a component can see of them.** The engine refuses a call to a node with an `Outage` before its handler runs, so most
+components never think about faults. One that reacts to them reads `node.faults`, synchronously and cheaply (one check and a
+shared constant while nothing is injected anywhere):
+
+| | |
+| --- | --- |
+| `node.faults.own()` | The node's own faults and its region's, added up (`outage`, `extraMs`, `errorRate`): what the engine applies to its calls. |
+| `node.faults.zone()` | The faults on the zone it is placed in (its `zone`); nothing for a node in no zone. |
+| `node.faults.active()` | Every active fault that reaches it (on it, its region, its zone), as data: kind, target, start, end. |
+| `node.faults.watch(fn)` | Hear, synchronously and after the fact, when the set of faults changes; read again then. Returns an unsubscribe. |
+| `node.zones` | The region's zones (`all`), any zone's faults (`effect(zone)`, `down(zone)`) and the same `watch`: for a component that places parts of itself in zones (a fleet, a standby). |
+
+So a database sees an outage on itself begin (its primary failing: start a failover) and end, without inferring it from
+its clients' failures. And a **Multi-AZ resource** keeps serving through its zone's outage: a component declared
+`handlesZoneFaults: true` is not refused by the engine when the zone its node is placed in fails (its own and its region's
+faults still are); it reads `node.faults.zone()`, fails over to a standby in another zone (refusing calls itself for the
+failover time), and serves from there. A component that spreads over zones without a node zone of its own (a fleet) reads
+`node.zones.effect(zone)` for each of its parts instead.
 
 ## Telemetry
 
@@ -361,6 +472,9 @@ To profile: `scratchpad/bench.ts` (a design for N virtual seconds at a traffic m
 `src/simulator/**/*.test.ts` (run with `npm test`). The suite checks behaviour, not just plumbing:
 
 - determinism, and independence of unrelated nodes' randomness;
+- zones (names, placement, faults, latency) and fleets (spreading, losing and replacing a zone, rebalancing, draining, quotas,
+  interruptions, grace) and target groups (a dead unit served until its checks catch it, fail open, slow start, least
+  outstanding requests against round robin with a slow unit, cross-zone off, flow hash, deregistration with no lost request);
 - queueing sanity (latency ≈ service time + network, Little's law for busy workers, throttling at capacity);
 - SQS semantics (backlog, visibility-timeout redelivery, dead-lettering, duplicate processing, live scale-up);
 - retry multiplication and orphaned work, weights, token-bucket throttling, topic fan-out;
@@ -392,17 +506,23 @@ to the engine itself, and several services asked for the same thing, so they are
 - **What a message says.** `Message` has `operation: read | write` and nothing about the item or the event. Services want: a request
   kind (S3's get/head/list/put/copy/delete, today four bucket-wide share settings), an event kind (SES bounce vs delivery),
   an item identity (DynamoDB transaction conflicts, per-key stream ordering), a deduplication id and a per-message delay (SQS).
-- **Who calls with what.** An edge overrides the call's `operation` (default `write`), so a client wired to CloudFront or S3
-  writes unless the edge is set to read, and one edge can't carry both cached reads and proxied writes. Passing the caller's
-  operation through, and a better default, would fix both.
+- **Who calls with what.** An edge stamps its `request.operation` on the call (default `write`), so a client wired to
+  CloudFront or S3 writes unless the edge is set to read. A hop that only passes calls on (WAF, a load balancer, a cache)
+  sets `caller` on its out edge to keep what it was asked. A client still sends one operation per edge: a mixed read/write
+  share on one edge would need a client setting.
+- **Batches of keys.** A message has one `key`, so a batch of records (`count` > 1: a client's `records`, a stream
+  consumer's batch) lands on one partition downstream, as if every record had the same key. A batch should carry how its
+  keys are spread, and stores should spread its units over their partitions accordingly.
 - **Control actions.** Start or cancel a SQS redrive, `ChangeMessageVisibility`: a channel from a caller to a component besides the call.
 
 **The design and its checks**
 
 - **Audits see nodes, not edges or containers.** Checks like "FIFO subscribers must be SQS", more than 100 subscriptions on a
   topic, quotas counted per VPC, or a Lambda in a VPC with no NAT calling the internet need edges and parents in `Provider.audit`'s input.
-- **Availability zones.** A zone in `Placement`, a `zone` fault target beside `region`, and the zone on a node would give zonal NAT
-  gateways, single-AZ failures and subnet-level IP capacity.
+- **Zones, next.** EC2 Auto Scaling, the load balancers, RDS, ElastiCache and OpenSearch place what they run in zones and
+  fail over when one goes down. Still to do: the NAT gateway has its own `zone` setting (a letter) rather than the node's
+  zone, VPC subnets aren't per zone, a zone's Slow and Errors faults don't reach ElastiCache's or OpenSearch's nodes, and a
+  zone that is slow or lossy *between* zones (a partition) isn't a fault yet.
 - **Routing through a container.** A call that leaves a VPC without a NAT or endpoint should fail like it does in AWS; that needs a routing hook on `Container`.
 
 **Edges, retries and faults**
@@ -415,6 +535,7 @@ to the engine itself, and several services asked for the same thing, so they are
 **Beyond AWS**
 
 - Cloudflare and Azure providers; cross-region and cross-provider partitions.
-- EventBridge, Kinesis, Step Functions, ALB/ECS, RDS/Aurora, ElastiCache, OpenSearch.
+- EventBridge, Kinesis, Step Functions, ALB/ECS, RDS/Aurora, ElastiCache, OpenSearch (the fleet core and the target group are
+  there for EC2 Auto Scaling, ELB, ECS and EKS to build on).
 - Circuit breakers and bulkheads, hedged requests; policy as an ordered list of tagged members, so order is expressible.
 - The importer reading other sources (Terraform plan output, CDK constructs).

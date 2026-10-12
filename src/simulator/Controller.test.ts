@@ -160,3 +160,24 @@ describe("a running target-tracking controller", () => {
       }))
   })
 })
+
+describe("target tracking on another node's metric", () => {
+  it("sizes its target from another node's metric: replicas from the requests a client sends", () => {
+    // 400 requests a second, one replica per 50 of them: eight replicas, read off the client rather than the service.
+    const b = Builder.make("source", { seed: 3 })
+    const web = b.add("common.client", { id: "web", settings: { arrival: "constant", rps: 400 } })
+    const svc = b.add("common.service", { id: "svc", settings: { replicas: 2, concurrency: 100, serviceTime: { mean: 5, cv: 0 }, startup: "1 second" } })
+    b.connect(web, svc)
+    const doc: Design.Doc = {
+      ...b.build(),
+      controllers: {
+        scaler: { type: "core.target-tracking", target: "svc", settings: { metric: "sent", source: "web", per: "unit", targetValue: 50, setting: "replicas", min: 1, max: 20, window: "5 seconds", period: "5 seconds", scaleOutCooldown: 0 } }
+      }
+    }
+    return sim(doc, (s) =>
+      Effect.gen(function*() {
+        const all = yield* s.advanceTo(60_000)
+        expect(mean(all, "nodes", "svc", "gauges", "replicas", 40_000)).toBe(8)
+      }))
+  })
+})

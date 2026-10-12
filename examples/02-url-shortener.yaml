@@ -2,11 +2,11 @@
 version: 1
 name: URL shortener
 description: |-
-  A link shortener: people and API customers create short links, and a far larger crowd follows them. Redirects are served from CloudFront's cache wherever it can, clicks are counted from the edge's logs, a dashboard shows each link's counts, and expired links are archived. About twenty-five components in us-east-1.
+  A link shortener: people and API customers create short links, and a far larger crowd follows them. Redirects are served from CloudFront's cache wherever it can, every click is streamed through Kinesis to a counter and to a raw-click archive in S3, a dashboard shows each link's counts, and expired links are archived. About twenty-five components in us-east-1.
 
-  How it is wired: creating a link, by hand or from an import script, goes through an HTTP API with a JWT authorizer to a shorten function, which checks the target against a safe-browsing service (an outside API with a quota), stores the link in DynamoDB and draws its QR code into S3. Following a link hits a CloudFront distribution that caches redirects for an hour; a miss goes to a redirect API and a resolve function that reads the links table. The edge's real-time logs feed a clicks queue, and a counter function adds each click to the link's total in a click-counts table, which the stats API (a REST API with a sixty-second cache) reads for the dashboard. The links table expires old links with a TTL, and its stream carries every change, expiries included, to an archiver that keeps them in S3. The web app itself is static files behind a second distribution.
+  How it is wired: creating a link, by hand or from a customer's import script, goes through a REST API with a Cognito authorizer to a shorten function, which checks the target against a safe-browsing service (an outside API with a quota), stores the link in DynamoDB and draws its QR code into S3. Following a link hits a CloudFront distribution that caches redirects for an hour; a miss goes to a redirect API and a resolve function that reads the links table. There is no cache between the function and the table: CloudFront is the cache, and what gets past it is mostly links followed too rarely to be in any cache. The distribution's real-time logs go to a Kinesis stream of two shards (room for five times the usual clicks), which two consumers read independently: the click counter, through an event source mapping (batches of 100, two at once per shard, retried until they are an hour old, with an SQS queue as the on-failure destination), adds up each batch's clicks per link in a click-counts table; and a Firehose stream lands the raw log records in S3 every two minutes for analytics. The stats API (a REST API with a sixty-second cache) reads the counts for the dashboard. The links table expires old links with a TTL, and its stream carries every change, expiries included, to an archiver that keeps them in S3. The web app itself is static files behind a second distribution.
 
-  What the simulator cannot show: CloudFront's real-time logs and the Kinesis stream they go to (the logs are a client sending one record per click, and the stream is an SQS queue), a 404 for an expired link, and summing a batch's clicks per link before writing (each click is its own write here, which is what makes a hot link's counter hot).
+  What the simulator cannot show: CloudFront's real-time logs themselves (a client sends one record per click, spread evenly over the shards because CloudFront, not you, chooses the partition key; CloudFront's retries aren't published, so a record the stream refuses is lost here), which link a click is for once it is in the stream (the counter writes a batch as one call charged a write unit per click; really it writes once per link in the batch, which is what keeps a viral link's counter item clear of its partition's 1,000 writes a second), a 404 for an expired link, and API keys (the usage plan tells callers apart by a key on each request, so the import script sends all of its requests with one).
 seed: 7
 nodes:
   aws-us-east-1:
@@ -15,7 +15,7 @@ nodes:
     settings:
       region: us-east-1
     position: { x: 352, y: -46 }
-    size: { w: 1892, h: 1446 }
+    size: { w: 1892, h: 1516 }
   creators:
     type: common.client
     name: App and API users (create links)
@@ -26,11 +26,12 @@ nodes:
     position: { x: 0, y: 40 }
   importer:
     type: common.client
-    name: Bulk import scripts (API keys)
+    name: Bulk import scripts (one API key)
     region: us-east
     settings:
       rps: 2
       payload: 1
+      hotKeys: 1
     position: { x: 0, y: 170 }
   visitors:
     type: common.client
@@ -42,12 +43,12 @@ nodes:
     position: { x: 0, y: 330 }
   click-log:
     type: common.client
-    name: Edge click logs (real-time logs stand-in)
+    name: CloudFront real-time logs (stand-in)
     region: us-east
     settings:
       rps: 400
       payload: 0.5
-    position: { x: 0, y: 600 }
+    position: { x: 0, y: 648 }
   dashboards:
     type: common.client
     name: Link owners' dashboards
@@ -55,7 +56,7 @@ nodes:
     settings:
       rps: 6
       payload: 1
-    position: { x: 0, y: 1010 }
+    position: { x: 0, y: 1098 }
   web-visitors:
     type: common.client
     name: Web app visits
@@ -63,7 +64,7 @@ nodes:
     settings:
       rps: 30
       payload: 1
-    position: { x: 0, y: 1240 }
+    position: { x: 0, y: 1310 }
   safe-browsing:
     type: common.http-endpoint
     name: Safe-browsing API
@@ -78,8 +79,8 @@ nodes:
     name: Links API
     parent: aws-us-east-1
     settings:
-      apiType: http
-      authorizer: { type: jwt }
+      apiType: rest
+      authorizer: { type: cognito }
     position: { x: 380, y: 52 }
   shorten:
     type: aws.lambda
@@ -145,29 +146,30 @@ nodes:
     name: Expired links archive
     parent: aws-us-east-1
     position: { x: 1980, y: 310 }
-  clicks-queue:
-    type: aws.sqs
-    name: Clicks stream (Kinesis stand-in)
+  clicks:
+    type: aws.kinesis
+    name: Click log stream
     parent: aws-us-east-1
     settings:
-      visibilityTimeout: 30 seconds
-      maxReceives: 10
-    position: { x: 380, y: 560 }
-  clicks-dlq:
+      mode: provisioned
+      shards: 2
+    position: { x: 380, y: 620 }
+  failed-batches:
     type: aws.sqs
-    name: Clicks DLQ
+    name: Failed click batches
     parent: aws-us-east-1
     settings:
       retention: 14 days
-    position: { x: 700, y: 770 }
+    position: { x: 380, y: 820 }
   counter:
     type: aws.lambda
     name: Click counter
     parent: aws-us-east-1
     settings:
       memory: 512
-      timeout: 20 seconds
-      duration: { mean: 30 }
+      timeout: 30 seconds
+      duration: { mean: 40, cv: 0.3 }
+      batchCalls: once
     position: { x: 700, y: 560 }
   click-counts:
     type: aws.dynamodb
@@ -175,7 +177,20 @@ nodes:
     parent: aws-us-east-1
     settings:
       mode: on-demand
-    position: { x: 1020, y: 760 }
+    position: { x: 1020, y: 540 }
+  lake-feed:
+    type: aws.firehose
+    name: Raw clicks delivery stream
+    parent: aws-us-east-1
+    settings:
+      bufferSize: 128
+      bufferInterval: 120 seconds
+    position: { x: 700, y: 780 }
+  raw-clicks:
+    type: aws.s3
+    name: Raw clicks bucket
+    parent: aws-us-east-1
+    position: { x: 1020, y: 792 }
   stats-api:
     type: aws.apigateway
     name: Stats API
@@ -184,7 +199,7 @@ nodes:
       apiType: rest
       authorizer: { type: cognito }
       cache: { enabled: true, ttl: 60 seconds, keys: 2000 }
-    position: { x: 380, y: 990 }
+    position: { x: 380, y: 1070 }
   stats:
     type: aws.lambda
     name: Stats
@@ -192,7 +207,7 @@ nodes:
     settings:
       memory: 512
       duration: { mean: 20 }
-    position: { x: 700, y: 980 }
+    position: { x: 700, y: 1060 }
   app-cdn:
     type: aws.cloudfront
     name: Web app CDN
@@ -200,12 +215,12 @@ nodes:
     settings:
       objects: 60
       objectSize: 120
-    position: { x: 380, y: 1240 }
+    position: { x: 380, y: 1310 }
   app-assets:
     type: aws.s3
     name: Web app bucket
     parent: aws-us-east-1
-    position: { x: 700, y: 1220 }
+    position: { x: 700, y: 1290 }
 edges:
   creators.out->links-api:
     from: { node: creators }
@@ -265,22 +280,29 @@ edges:
   archiver.out->archive:
     from: { node: archiver }
     to: archive
-  click-log.out->clicks-queue:
+  click-log.out->clicks:
     from: { node: click-log }
-    to: clicks-queue
-  clicks-queue.deliver->counter:
-    from: { node: clicks-queue, port: deliver }
+    to: clicks
+  clicks.consumers->counter:
+    from: { node: clicks, port: consumers }
     to: counter
     settings:
       batchSize: 100
       batchWindow: 1 second
-      maxConcurrency: 10
-  clicks-queue.dlq->clicks-dlq:
-    from: { node: clicks-queue, port: dlq }
-    to: clicks-dlq
+      parallelization: 2
+      maxRecordAge: 3600
+  clicks.consumers->lake-feed:
+    from: { node: clicks, port: consumers }
+    to: lake-feed
+  clicks.discarded->failed-batches:
+    from: { node: clicks, port: discarded }
+    to: failed-batches
   counter.out->click-counts:
     from: { node: counter }
     to: click-counts
+  lake-feed.out->raw-clicks:
+    from: { node: lake-feed }
+    to: raw-clicks
   dashboards.out->stats-api:
     from: { node: dashboards }
     to: stats-api
@@ -309,7 +331,7 @@ edges:
 scenarios:
   viral:
     name: A link goes viral
-    description: One link is shared everywhere, and for two and a half minutes there are seven times the clicks, half of them on that link. CloudFront serves it from the edge, so the redirect path barely notices. The click counter does. One link's count is one item, an item lives on one partition, and a partition takes 1,000 writes a second. A batch that touches the throttle fails as a whole and comes back thirty seconds later, so counts fall a minute behind, then catch up. Summing a batch's clicks per link before writing (or spreading the counter over several items) would keep them current.
+    description: "One link is shared everywhere, and for two and a half minutes there are seven times the clicks, half of them on that link. CloudFront serves it from the edge, so the redirect path barely notices, but every click is still a log record. CloudFront spreads its records over the shards (a stream keyed by link would hold the viral link to one shard's 1,000 a second, however many shards), so what runs out is the stream as a whole: two shards take 2,000 records a second, and the third of the clicks they refuse is dropped by CloudFront's best-effort logs, from the counts and the raw-click archive alike. The counter keeps up with what gets in."
     duration: 7m
     warmup: 30s
     timeline:
@@ -325,7 +347,6 @@ scenarios:
           node: click-log
           settings:
             rps: 3000
-            hotKeys: 0.5
       - at: 3m30s
         note: the crowd moves on
         set:
@@ -338,7 +359,6 @@ scenarios:
           node: click-log
           settings:
             rps: 400
-            hotKeys: 0
     assert:
       - check: visitors.errorRatio < 0.1%
         name: Nobody following a link notices
@@ -348,21 +368,84 @@ scenarios:
         name: The CDN takes the crowd; the origin sees a fraction
         from: 1m
         to: 3m30s
-      - check: click-counts.rate.fail.Throttled > 10/s
-        name: The viral link's counter is throttled
+      - check: clicks.rate.incoming < 2100/s
+        name: Two shards take 2,000 records a second
+        from: 1m30s
+        to: 3m30s
+      - check: clicks.rate.throttled > 800/s
+        name: The rest are refused
+        from: 1m30s
+        to: 3m30s
+      - check: click-log.errorRatio > 25%
+        name: A third of the clicks are lost
+        from: 1m30s
+        to: 3m30s
+      - check: lake-feed.rate.incoming < 2100/s
+        name: The raw-click archive misses them too
+        from: 1m30s
+        to: 3m30s
+      - check: edge:clicks.consumers->counter.gauge.iteratorAge:max < 10s
+        name: The counter keeps up with what gets in
+      - check: clicks.rate.throttled < 1/s
+        name: Afterwards nothing is refused
+        from: 4m
+  viral-on-demand:
+    name: A link goes viral, with an on-demand stream
+    description: The same viral link, with the click stream in on-demand mode. A new on-demand stream starts at four shards, 4,000 records a second, and holds about twice the peak it has seen, so seven times the usual clicks fit; every click is counted and archived. A surge past 4,000 a second would be throttled until the busy shards split, up to fifteen minutes later.
+    duration: 7m
+    warmup: 30s
+    overrides:
+      nodes:
+        clicks:
+          mode: on-demand
+    timeline:
+      - at: 1m
+        note: one link takes off
+        set:
+          node: visitors
+          settings:
+            rps: 3000
+            hotKeys: 0.5
+      - at: 1m
+        set:
+          node: click-log
+          settings:
+            rps: 3000
+      - at: 3m30s
+        note: the crowd moves on
+        set:
+          node: visitors
+          settings:
+            rps: 400
+            hotKeys: 0
+      - at: 3m30s
+        set:
+          node: click-log
+          settings:
+            rps: 400
+    assert:
+      - check: clicks.gauge.shards:max == 4
+        name: Four shards, as the stream started
+      - check: clicks.rate.incoming > 2800/s
+        name: All three thousand clicks a second get in
+        from: 1m30s
+        to: 3m30s
+      - check: click-log.errorRatio < 0.1%
+        name: None is lost
         from: 1m
         to: 3m30s
-      - check: clicks-queue.gauge.oldestAgeMs:max > 30s
-        name: Counts fall behind
-      - check: clicks-queue.total.deadLettered < 1
-        name: No click is lost
-      - check: clicks-queue.gauge.depth:last < 100
-        name: They catch up afterwards
-        from: 6m30s
+      - check: lake-feed.rate.incoming > 2800/s
+        name: The raw-click archive gets every one
+        from: 1m30s
+        to: 3m30s
+      - check: edge:clicks.consumers->counter.gauge.iteratorAge:max < 10s
+        name: The counter keeps up
+      - check: visitors.errorRatio < 0.1%
+        name: Nobody following a link notices
   bulk-import:
     name: A customer bulk-imports links
-    description: A customer's script creates 120 links a second for three minutes. Every new link is checked with the safe-browsing API, whose quota is 40 calls a second. The script uses it up, its refused calls are retried (asking for more), and people creating links by hand are refused as often as the script. Redirects don't notice. A usage plan per API key on the links API would refuse the script alone, and caching verdicts per domain would spare the quota.
-    duration: 6m
+    description: A customer's script creates 120 links a second. Every new link is checked with the safe-browsing API, whose quota is 40 calls a second; the script uses it up, its refused calls are retried (asking for more), and people creating links by hand are refused as often as the script, while redirects don't notice. At three minutes the customer's API key is put on a usage plan of 20 requests a second, so the links API refuses the script's excess at the door (429s are the script's problem) and people's links go through again. Caching verdicts per domain would spare the quota too.
+    duration: 7m
     warmup: 30s
     timeline:
       - at: 1m
@@ -371,7 +454,17 @@ scenarios:
           node: importer
           settings:
             rps: 120
-      - at: 4m
+      - at: 3m
+        note: the customer's API key goes on a usage plan
+        set:
+          node: links-api
+          settings:
+            usagePlan:
+              enabled: true
+              clients: 10000
+              rate: 20
+              burst: 40
+      - at: 5m
         note: the import is done
         set:
           node: importer
@@ -385,17 +478,63 @@ scenarios:
       - check: safe-browsing.rate.fail.Throttled > 100/s
         name: The import uses up the safe-browsing quota
         from: 1m
-        to: 4m
+        to: 3m
       - check: safe-browsing.rate.in > 180/s
         name: Retries ask for more
         from: 1m
-        to: 4m
+        to: 3m
       - check: creators.errorRatio > 40%
         name: People creating links by hand are refused too
         from: 1m
-        to: 4m
+        to: 3m
+      - check: links-api.rate.fail.Throttled > 100/s
+        name: The usage plan refuses the script's excess at the door
+        from: 3m30s
+        to: 5m
+      - check: creators.errorRatio < 0.5%
+        name: People's links go through again
+        from: 3m30s
+        to: 5m
       - check: visitors.errorRatio < 0.1%
         name: Redirects don't notice
       - check: creators.errorRatio < 0.1%
-        name: Afterwards it works again
-        from: 4m30s
+        name: Afterwards it works for everyone
+        from: 5m30s
+  bad-deploy:
+    name: A bad deploy of the click counter
+    description: A release of the click counter fails every batch for two minutes, until it is rolled back. A Kinesis event source mapping doesn't skip a failing batch, it retries it (one second, doubling to a minute) and holds the rest of the shard behind it, so IteratorAge climbs a second every second while the clicks wait in the stream, which keeps them for 24 hours. After the rollback the next retry (they are up to a minute apart by then) gets through and the counter catches up in seconds; as nothing got to an hour old, nothing is given up. The raw-click archive's Firehose stream reads the same shards for itself and doesn't notice.
+    duration: 7m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: a release that fails every batch
+        set:
+          node: counter
+          settings:
+            errorRate: 1
+      - at: 3m
+        note: rolled back
+        set:
+          node: counter
+          settings:
+            errorRate: 0
+    assert:
+      - check: edge:clicks.consumers->counter.gauge.iteratorAge:max > 90s
+        name: The shards wait behind the failing batches
+        from: 1m
+        to: 3m
+      - check: clicks.gauge.backlog:max > 30000
+        name: The clicks wait in the stream
+      - check: click-counts.rate.consumedWrite > 1000/s
+        name: After the rollback, the counter catches up at several times the usual rate
+        from: 3m
+        to: 3m30s
+      - check: edge:clicks.consumers->counter.gauge.iteratorAge:last < 5s
+        name: It has caught up
+        from: 6m
+      - check: failed-batches.gauge.depth:max < 1
+        name: No batch is given up
+      - check: edge:clicks.consumers->lake-feed.gauge.millisBehindLatest:max < 5s
+        name: The raw-click archive doesn't notice
+      - check: click-log.errorRatio < 0.1%
+        name: Every click gets into the stream

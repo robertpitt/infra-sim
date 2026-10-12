@@ -28,6 +28,8 @@ const example = async (page, name) => {
   await page.getByRole("button", { name }).click()
   await page.waitForTimeout(600)
   await page.locator(".section-toggle", { hasText: "Examples" }).click()
+  // Opening the list scrolled the sidebar down to it: show the top of the palette again.
+  await page.locator(".side-scroll").evaluate((el) => { el.scrollTop = 0 })
 }
 /** Simulated time on the clock, in seconds. */
 const clock = async (page) => {
@@ -59,7 +61,9 @@ const shot = async (page, name) => {
   await page.locator(".dock-tab", { hasText: "Scenario" }).click()
   await page.locator('.scenario-card:has-text("Lose us-east-1") button:has-text("Run")').click()
   await speed(page, 8) // 50x
-  await pauseAt(page, 3 * 60 + 15)
+  // Late enough that Route 53 has noticed (about 85 s in) and is moving US users to Europe, before us-east-1 comes back
+  // at 4:00. At 50x the pause lands about ten simulated seconds after it is asked for.
+  await pauseAt(page, 3 * 60 + 38)
   await page.keyboard.press("f")
   await shot(page, "scenario")
   await page.close()

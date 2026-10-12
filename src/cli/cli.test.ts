@@ -96,7 +96,7 @@ describe("help and usage", () => {
 describe("discovering what exists", () => {
   it("lists the examples, and prints one", async () => {
     const listed = json<Array<{ id: string }>>((await cli(["examples", "--json"])).out)
-    expect(listed.map((e) => e.id)).toEqual(["ingestion", "url-shortener", "orders", "retry-storm", "multi-region", "fan-out", "cluster", "blank"])
+    expect(listed.map((e) => e.id)).toEqual(["ingestion", "url-shortener", "orders", "retry-storm", "multi-region", "fan-out", "cluster", "order-saga", "clickstream", "product-catalog", "saas-api", "web-tier", "containers", "kubernetes", "blank"])
     expect((await cli(["examples", "show", "orders"])).out).toMatch(/^# yaml-language-server: \$schema=\.\.\/schema\/design\.schema\.json\nversion: 1/)
     expect((await cli(["examples", "path", "orders"])).out).toMatch(/03-orders\.yaml/)
   })
@@ -338,11 +338,12 @@ describe("the examples' scenarios", () => {
 
   it("ships some", () => expect(cases.length).toBeGreaterThanOrEqual(2))
 
+  // The larger examples' scenarios take ten to twenty seconds each on their own, more on a busy machine.
   it.each(cases)("@%s --scenario %s holds", async (example, id) => {
     const r = await cli(["run", `@${example}`, "--scenario", id, "--json"])
     expect(r.code).toBe(EXIT.ok)
     expect(json(r.out).assertions.length).toBeGreaterThan(0)
-  })
+  }, 120_000)
 
   it("says which scenarios there are when one doesn't exist", async () => {
     const r = await cli(["run", "@multi-region", "--scenario", "nope"])

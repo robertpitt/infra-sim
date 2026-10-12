@@ -174,7 +174,7 @@ interface Watch {
 /** Watch a design with the standard rules. Nodes that originate traffic (clients) are told apart by `registry`. */
 export const monitor = (
   design: Design.Doc,
-  registry: { readonly get: (type: string) => { readonly inputs: boolean; readonly container?: unknown } | undefined },
+  registry: { readonly get: (type: string) => { readonly inputs: boolean; readonly container?: unknown; readonly quietAlarms?: ReadonlyArray<string> } | undefined },
   options: MonitorOptions = {}
 ): Monitor => {
   const clearAfter = options.clearAfter ?? 3
@@ -190,6 +190,7 @@ export const monitor = (
     if (component?.container !== undefined) continue
     const source = component !== undefined && !component.inputs
     for (const rule of rules) {
+      if (component?.quietAlarms?.includes(rule.id)) continue
       const checks = forNode(rule, id)
       watches.push({
         key: `${rule.id}:${id}`,

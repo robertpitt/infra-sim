@@ -69,6 +69,16 @@ describe("Alarm", () => {
     expect(after.find((a) => a.rule === "errors" && a.target.id === "web")).toMatchObject({ resolvedAt: 90_000 })
   })
 
+  it("leaves out the rules a component says don't fit it, and only those", () => {
+    // A firewall: its 403s are its job. Its other alarms still apply.
+    const quiet = { get: (type: string) => (type === "aws.lambda" ? { inputs: true, quietAlarms: ["errors"] } : registry.get(type)) }
+    const m = monitor(design, quiet)
+    m.observe(frames(0, 60, failing))
+    const fired = m.alerts()
+    expect(fired.filter((a) => a.rule === "errors").map((a) => a.target.id)).toEqual(["web"])
+    expect(fired.some((a) => a.rule === "throttled" && a.target.id === "api")).toBe(true)
+  })
+
   it("applies a rule only where its metric exists, and never to a container", () => {
     const m = monitor(design, registry)
     m.observe(frames(0, 30, () => ({ queue: { gauges: { oldestAgeMs: 120_000 } }, region: { gauges: { oldestAgeMs: 120_000 } } })))

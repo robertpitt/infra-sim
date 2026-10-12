@@ -3,8 +3,9 @@ import type { Limiter } from "./Limiter.ts"
 import type { Placement } from "./Provider.ts"
 import * as Describe from "./Describe.ts"
 import * as Edge from "./Edge.ts"
+import type { ActiveFault, NodeEffect } from "./Fault.ts"
 import type { Call, Message } from "./Message.ts"
-import type { Protocol, Pull } from "./Protocol.ts"
+import type { Fleet, Protocol, Pull } from "./Protocol.ts"
 import type { SeededRandom } from "./SeededRandom.ts"
 import type { Meter } from "./Telemetry.ts"
 import type { TimerHandle } from "./VirtualTime.ts"
@@ -122,6 +123,43 @@ export interface Node<Config, Ports extends PortDefs> {
   readonly mint: (init?: Partial<Pick<Message, "bytes" | "count" | "group" | "key" | "invocation" | "operation">>) => Effect.Effect<Message>
   /** Run a background loop for the life of the simulation. A defect in it is reported rather than lost. */
   readonly spawn: <A, E>(effect: Effect.Effect<A, E>) => Effect.Effect<void, never, Scope.Scope>
+  /** The availability zones of this node's region, and what is wrong with them: what a fleet spreads its units over. */
+  readonly zones: Zones
+  /** The faults that reach this node now, and a hook to hear them change: so a component can see an outage begin. */
+  readonly faults: NodeFaults
+}
+
+/**
+ * What is wrong with a node right now, as the node itself can see it. The engine applies faults around every node (a call
+ * to a node with an `Outage` is refused before its handler runs), so most components never need this. It is for one that
+ * reacts to them: a database whose primary failing (an outage on it) starts a failover, or a Multi-AZ resource that keeps
+ * serving through its zone's outage from a standby in another zone (with `handlesZoneFaults`). Cheap enough for a hot path:
+ * with nothing injected anywhere each read is one check and a shared constant.
+ */
+export interface NodeFaults {
+  /** The node's own faults and its region's, added up: what the engine applies to every call into it. */
+  readonly own: () => NodeEffect
+  /** The faults on the zone it is placed in (its `zone`), added up; nothing for a node in no zone. */
+  readonly zone: () => NodeEffect
+  /** Every active fault that reaches it (on it, its region, its zone), as data: what, since when, until when. */
+  readonly active: () => ReadonlyArray<ActiveFault>
+  /** Hear when faults change anywhere, after they have: then read again. Returns a function that stops listening. */
+  readonly watch: (listener: () => void) => () => void
+}
+
+/**
+ * The zones of a node's region, as the node sees them, with the faults on each. Cheap to ask on every call: with no fault
+ * anywhere, `effect` is one check and a shared constant.
+ */
+export interface Zones {
+  /** The region's zones, in order (`us-east-1a`, `us-east-1b`...). Empty for a place with none. */
+  readonly all: ReadonlyArray<string>
+  /** The faults on one zone right now (only the zone's own: the region's reach the node itself). */
+  readonly effect: (zone: string) => NodeEffect
+  /** Whether a zone is down (an outage on it). */
+  readonly down: (zone: string) => boolean
+  /** Hear when faults change anywhere, after they have: then ask `effect` or `down` again. Returns a function that stops listening. */
+  readonly watch: (listener: () => void) => () => void
 }
 
 export interface Fast<Config> {
@@ -144,6 +182,17 @@ export interface Instance<State = unknown> {
   readonly call?: (message: Message) => Call
   /** What the component offers on each of its `pull` ports, for the connectors wired there to take from. */
   readonly pull?: Readonly<Record<string, Pull>>
+  /**
+   * Its units, for a component declared a `fleet`: what a connector that speaks `fleet` (a target group) picks from, call
+   * by call. Plain calls into the node still go to `call`. See `fleet/README.md`.
+   */
+  readonly fleet?: Fleet
+  /**
+   * What the node offers whatever is wired to it, beyond calls: the connectors on edges into it (`ctx.offer()`) and the
+   * components calling it (`link.offer()`). Its shape is agreed between the component and its partners (a database's
+   * ledger of client connections, which the connectors of its clients register with); they narrow it with a guard.
+   */
+  readonly offer?: unknown
   /** Report internal state. This is what makes a running component inspectable. */
   readonly probe?: Effect.Effect<State>
 }
@@ -203,6 +252,27 @@ export interface ComponentDef<
   readonly highlights: ReadonlyArray<Highlight>
   /** False for pure sources (nothing may connect into them). */
   readonly inputs: boolean
+  /**
+   * A fleet of units (instances, tasks, pods) that can be reached one by one: an edge into it may carry a connector that
+   * speaks `fleet` (a load balancer's target group), besides plain calls. Its instance offers them as `Instance.fleet`.
+   */
+  readonly fleet: boolean
+  /**
+   * Faults on the zone its node is placed in don't refuse its calls: the component reads them (`node.faults.zone()`) and
+   * decides, as a Multi-AZ resource fails over to a standby in another zone and keeps serving. Its own and its region's
+   * faults are applied as for any node.
+   */
+  readonly handlesZoneFaults: boolean
+  /**
+   * It runs at the provider's edge, everywhere, rather than in the region it is placed in (CloudFront, Route 53). A
+   * region's or zone's fault doesn't reach it; its own faults do. Its placement still keys its quotas and its latency.
+   */
+  readonly global: boolean
+  /**
+   * Standard alarm rules (`Alarm.rules` ids) that don't fit it: a firewall's 403s are its job, not errors, so it leaves
+   * out `errors`. What it passes on still alarms where it lands.
+   */
+  readonly quietAlarms: ReadonlyArray<string>
   /** Set for components that group others rather than handle traffic. */
   readonly container: Container | undefined
   /** Component types this must sit inside, e.g. a VPC only makes sense inside a region. */
@@ -226,6 +296,10 @@ export interface Input<C extends Schema.Top, P extends PortDefs, S extends Schem
   readonly accent?: string
   readonly highlights?: ReadonlyArray<Highlight>
   readonly inputs?: boolean
+  readonly fleet?: boolean
+  readonly handlesZoneFaults?: boolean
+  readonly global?: boolean
+  readonly quietAlarms?: ReadonlyArray<string>
   readonly container?: Container
   readonly within?: ReadonlyArray<string>
   readonly config: C
@@ -251,6 +325,10 @@ export const make = <
   accent: input.accent ?? "#8995a8",
   highlights: input.highlights ?? [],
   inputs: input.container === undefined ? input.inputs ?? true : false,
+  fleet: input.container === undefined && (input.inputs ?? true) && (input.fleet ?? false),
+  handlesZoneFaults: input.handlesZoneFaults ?? false,
+  global: input.global ?? false,
+  quietAlarms: input.quietAlarms ?? [],
   container: input.container,
   within: input.within,
   config: input.config,
@@ -270,6 +348,11 @@ export type AnyComponent = ComponentDef<any, any, any>
 /** What a component accepts on its input: invocations, or nothing at all for a pure source. */
 export const accepts = (def: AnyComponent): Protocol | undefined => (def.inputs ? "invoke" : undefined)
 
+/** What else it accepts besides plain invocations: `fleet`, for a fleet whose units can be picked one by one. */
+export const alsoAccepts = (def: AnyComponent): ReadonlyArray<Protocol> => (def.fleet ? FLEET_ONLY : NOTHING)
+const FLEET_ONLY: ReadonlyArray<Protocol> = ["fleet"]
+const NOTHING: ReadonlyArray<Protocol> = []
+
 /** The serialisable description of a component, for UIs and tools that never run it. */
 export interface Manifest {
   readonly type: string
@@ -283,6 +366,8 @@ export interface Manifest {
   readonly icon: string
   readonly accent: string
   readonly inputs: boolean
+  /** Its units can be reached one by one: a load balancer's target group may be wired to it. */
+  readonly fleet?: true
   /** Set for components that draw a boundary round others: the component types allowed inside. */
   readonly container?: { readonly accepts: ReadonlyArray<string>; readonly decidesRegion: boolean }
   readonly within?: ReadonlyArray<string>
@@ -310,6 +395,7 @@ export const manifestOf = (def: AnyComponent, all: ReadonlyArray<AnyComponent> =
   icon: def.icon,
   accent: def.accent,
   inputs: def.inputs,
+  ...(def.fleet ? { fleet: true as const } : {}),
   ...(def.container === undefined
     ? {}
     : { container: { accepts: all.filter((c) => c !== def && def.container!.accepts(c)).map((c) => c.type), decidesRegion: def.container.region !== undefined } }),

@@ -17,6 +17,11 @@ export interface Region {
   readonly name: string
   readonly lat: number
   readonly lon: number
+  /**
+   * Its availability zones (failure domains that fail independently), by name: `us-east-1a`, `us-east-1b`... A node may
+   * live in one of them, and a fleet spreads its units over several. Empty or absent for a place with none.
+   */
+  readonly zones?: ReadonlyArray<string>
 }
 
 export interface Provider {
@@ -55,10 +60,31 @@ export interface Member {
 export interface Placement {
   readonly provider: string
   readonly region: string
+  /**
+   * The availability zone it lives in, for a single-zone resource (a database primary, a NAT gateway). Absent for nodes
+   * that are regional, or that spread over zones themselves (a fleet places each unit in a zone of its own).
+   */
+  readonly zone?: string
 }
 
-/** `aws:us-east-1`: the identity of a placement, used for shared quotas and regional faults. */
+/**
+ * `aws:us-east-1`: the identity of a placement, used for shared quotas and regional faults. A zone doesn't change it:
+ * quotas and accounts are regional.
+ */
 export const keyOf = (p: Placement): string => `${p.provider}:${p.region}`
+
+/** `aws:us-east-1:us-east-1a`: the identity of one zone of a placement, the id of a zone fault. */
+export const zoneKeyOf = (placement: string, zone: string): string => `${placement}:${zone}`
+
+/** The placement key and the zone of a zone key (`aws:us-east-1:us-east-1a`). */
+export const parseZoneKey = (key: string): { readonly placement: string; readonly zone: string } => {
+  const i = key.lastIndexOf(":")
+  return { placement: key.slice(0, i), zone: key.slice(i + 1) }
+}
+
+/** Zones are named by a letter after the region, as AWS names them (`us-east-1` → `us-east-1a`, `us-east-1b`...). */
+export const zoneNames = (region: string, count: number, separator = ""): ReadonlyArray<string> =>
+  Array.from({ length: count }, (_, i) => `${region}${separator}${String.fromCharCode(97 + i)}`)
 
 export const parseKey = (key: string): Placement => {
   const i = key.indexOf(":")
@@ -79,17 +105,27 @@ const distanceKm = (a: Region, b: Region): number => {
 export const INTERNET = "internet"
 
 /**
+ * What crossing from one availability zone to another adds, one way, in milliseconds: an assumption. AWS says zones are
+ * up to about 100 km apart and connected with "single-digit millisecond latency"
+ * (https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/availability-zones.html); 100 km of
+ * fibre is half a millisecond.
+ */
+export const CROSS_ZONE_MS = 0.5
+
+/**
  * Typical one-way network latency between two placements, in milliseconds.
  *
  * Clouds don't publish inter-region latency, so this is an estimate: fibre carries light at about 200 km/ms, real
- * routes are longer than great circles (x1.35), plus a millisecond inside a region. Crossing providers adds transit,
- * and anything touching the public internet adds a last mile. It is a starting point; every edge's latency stays editable.
+ * routes are longer than great circles (x1.35), plus a millisecond inside a region. Two nodes in the same region that
+ * each live in a zone, in different zones, are `CROSS_ZONE_MS` further apart. Crossing providers adds transit, and
+ * anything touching the public internet adds a last mile. It is a starting point; every edge's latency stays editable.
  */
 export const oneWayLatencyMs = (a: Placement, b: Placement, regionOf: (p: Placement) => Region | undefined): number => {
   const ra = regionOf(a)
   const rb = regionOf(b)
   const sameRegion = a.provider === b.provider && a.region === b.region
-  const base = sameRegion || ra === undefined || rb === undefined ? 1 : 1 + (distanceKm(ra, rb) / 200) * 1.35
+  const crossZone = sameRegion && a.zone !== undefined && b.zone !== undefined && a.zone !== b.zone ? CROSS_ZONE_MS : 0
+  const base = sameRegion || ra === undefined || rb === undefined ? 1 + crossZone : 1 + (distanceKm(ra, rb) / 200) * 1.35
   const touchesInternet = a.provider === INTERNET || b.provider === INTERNET
   const crossProvider = a.provider !== b.provider
   return base + (touchesInternet ? 10 : crossProvider ? 3 : 0)

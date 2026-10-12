@@ -1,5 +1,5 @@
 import { Context, Layer } from "effect"
-import { accepts, type AnyComponent, type Manifest, manifestOf, type PortDefs } from "./Component.ts"
+import { accepts, alsoAccepts, type AnyComponent, type Manifest, manifestOf, type PortDefs } from "./Component.ts"
 import * as Connector from "./Connector.ts"
 import { core } from "./connectors/index.ts"
 import * as Controller from "./Controller.ts"
@@ -40,7 +40,8 @@ export class Registry extends Context.Service<Registry, Components>()("simulator
 export const queryOf = (source: AnyComponent | undefined, port: string, target: AnyComponent | undefined): Connector.Query | undefined => {
   const def = source === undefined ? undefined : (source.ports as PortDefs)[port]
   if (source === undefined || def === undefined || target === undefined) return undefined
-  return { from: { component: source.type, port, protocol: def.protocol }, to: { component: target.type, protocol: accepts(target) } }
+  const also = alsoAccepts(target)
+  return { from: { component: source.type, port, protocol: def.protocol }, to: { component: target.type, protocol: accepts(target), ...(also.length === 0 ? {} : { also }) } }
 }
 
 export const make = (components: ReadonlyArray<AnyComponent>, providers: ReadonlyArray<Provider> = []): Components => {

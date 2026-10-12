@@ -39,6 +39,11 @@ export const NodeDoc = Schema.Struct({
   name: Schema.optionalKey(Schema.String),
   /** The provider's region it runs in. Absent means the provider's default. */
   region: Schema.optionalKey(Schema.String),
+  /**
+   * The availability zone it lives in (`us-east-1a`), for a single-zone resource: a zone fault takes it down. Absent
+   * means it doesn't live in one zone (regional, or a fleet that spreads its units over zones by a setting of its own).
+   */
+  zone: Schema.optionalKey(Schema.String),
   /** The container (region, VPC) this sits inside. Absent means it sits on the open canvas. */
   parent: Schema.optionalKey(Schema.String),
   /** Absent means "lay me out": imported designs have no coordinates. */
@@ -138,6 +143,7 @@ export interface NewNode {
   readonly type: string
   readonly name?: string
   readonly region?: string
+  readonly zone?: string
   readonly parent?: NodeId
   readonly size?: { readonly w: number; readonly h: number }
   readonly position?: Position
@@ -461,15 +467,21 @@ export const resolve = (doc: Doc, registry: Components): Resolution => {
       continue
     }
     const region = own ?? inherited ?? spec.region ?? provider?.defaultRegion
-    if (provider === undefined || region === undefined || !provider.regions.some((r) => r.id === region)) {
+    const known = provider?.regions.find((r) => r.id === region)
+    if (provider === undefined || region === undefined || known === undefined) {
       error("unknown-region", `${label(id)}: "${region ?? "?"}" is not a region of ${provider?.title ?? component.provider}`, { node: id })
+      continue
+    }
+    if (spec.zone !== undefined && !(known.zones ?? []).includes(spec.zone)) {
+      const zones = known.zones ?? []
+      error("unknown-zone", `${label(id)}: "${spec.zone}" is not a zone of ${region}${zones.length === 0 ? ", which has none" : ` (${zones.join(", ")})`}`, { node: id })
       continue
     }
     nodes.set(id, {
       id,
       type: spec.type,
       name: spec.name ?? id,
-      placement: { provider: component.provider, region },
+      placement: { provider: component.provider, region, ...(spec.zone === undefined ? {} : { zone: spec.zone }) },
       ...(parent === undefined ? {} : { parent }),
       ...(spec.size === undefined ? {} : { size: spec.size }),
       ...(spec.position === undefined ? {} : { position: spec.position }),
@@ -613,6 +625,7 @@ export const encode = (design: Design, registry: Components): Doc => {
       type: node.type,
       name: node.name,
       region: node.placement.region,
+      ...(node.placement.zone === undefined ? {} : { zone: node.placement.zone }),
       ...(node.parent === undefined ? {} : { parent: node.parent }),
       ...(node.size === undefined ? {} : { size: node.size }),
       ...(node.position === undefined ? {} : { position: node.position }),

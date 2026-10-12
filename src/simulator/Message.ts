@@ -24,6 +24,13 @@ export const Message = Schema.Struct({
   operation: Schema.Literals(["read", "write"]),
   /** A hash of the partition key, in [0, 1). It decides which DynamoDB partition or Kinesis shard a call lands on. */
   key: Schema.Number,
+  /**
+   * For a batch (`count` above 1): the share of its records whose keys are their own, spread over the key space; the
+   * rest all carry `key`. Absent means 1, as a batch API call's records each carry their own key. A batch of one hot
+   * key's records has 0, and a client's batch with a hot-key share has the rest. Stores spread a batch's units over
+   * their partitions accordingly, so only the shared-key part lands on one.
+   */
+  spread: Schema.optionalKey(Schema.Number),
   /** FIFO message group, when the sender uses one. */
   group: Schema.optionalKey(Schema.String),
   /** When a queue first accepted it. A standard queue's dead-letter queue keeps counting retention from here. */

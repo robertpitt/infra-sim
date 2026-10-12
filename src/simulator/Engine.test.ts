@@ -48,7 +48,7 @@ describe("Engine", () => {
         expect(connectors).toContain("aws.sqs.event-source-mapping")
         expect(engine.catalog.connectors[0]!.settings.map((f) => f.key)).toEqual(["weight", "request", "timeout", "cancelOnTimeout", "retry"])
         expect(engine.catalog.transport.map((f) => f.key)).toEqual(["latency"])
-        expect(engine.catalog.faults.map((f) => f.tag)).toEqual(["Outage", "Errors", "Slow", "Blackhole", "Loss"])
+        expect(engine.catalog.faults.map((f) => f.tag)).toEqual(["Outage", "Errors", "Slow", "Blackhole", "Loss", "Crash"])
         // Forms are derived from the schemas, durations in milliseconds.
         const queue = engine.catalog.components.find((c) => c.type === "aws.sqs")!
         expect(queue.settings.find((f) => f.key === "visibilityTimeout")).toMatchObject({ kind: "duration", default: 30_000, unit: "ms" })

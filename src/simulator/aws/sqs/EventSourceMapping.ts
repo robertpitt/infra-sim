@@ -100,7 +100,8 @@ export const EventSourceMapping = Connector.make({
   // Any consumer: one that isn't a function is modelled as if Lambda's mapping polled for it. A fixed pool of workers
   // is `core.poller`, chosen on the edge.
   from: { protocol: "pull", component: "aws.sqs", port: "deliver" },
-  to: { protocol: "invoke" },
+  // Lambda's poller: a fleet (an ECS service, an Auto Scaling group) drains a queue with workers of its own (core.poller).
+  to: { protocol: "invoke", fleets: false },
   config: Consumer,
   state: Schema.Struct({
     /** Concurrent batches the mapping is running at now. */

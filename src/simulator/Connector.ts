@@ -4,7 +4,7 @@ import * as Describe from "./Describe.ts"
 import * as Edge from "./Edge.ts"
 import type { Limiter } from "./Limiter.ts"
 import type { Message } from "./Message.ts"
-import type { Protocol, Pull } from "./Protocol.ts"
+import type { Fleet, Protocol, Pull } from "./Protocol.ts"
 import type { SeededRandom } from "./SeededRandom.ts"
 import type { Meter } from "./Telemetry.ts"
 import type { TimerHandle } from "./VirtualTime.ts"
@@ -48,16 +48,24 @@ export interface FromEnd<P extends Protocol = Protocol> {
 }
 
 /** The target end: what the target must accept, and optionally which component it must be. */
-export interface ToEnd {
-  readonly protocol: Protocol
+export interface ToEnd<P extends Protocol = Protocol> {
+  readonly protocol: P
   readonly component?: string
+  /**
+   * `false`: it doesn't fit a fleet (instances, tasks, pods), whose workers poll for themselves. Lambda's event source
+   * mappings are Lambda's: a queue drained by an ECS service or an Auto Scaling group gets a plain poller instead.
+   */
+  readonly fleets?: false
 }
 
 /** The two ends of one wire, as the registry sees them when choosing a connector. */
 export interface Query {
   readonly from: { readonly component: string; readonly port: string; readonly protocol: Protocol }
-  /** `protocol` is what the target accepts; `undefined` for a pure source, which accepts nothing. */
-  readonly to: { readonly component: string; readonly protocol: Protocol | undefined }
+  /**
+   * `protocol` is what the target accepts; `undefined` for a pure source, which accepts nothing. `also` is what else it
+   * accepts: `fleet` for a fleet whose units can be picked one by one.
+   */
+  readonly to: { readonly component: string; readonly protocol: Protocol | undefined; readonly also?: ReadonlyArray<Protocol> }
 }
 
 /** What `pick` needs of a connector: plain data, so a UI holding manifests can run the same rule. */
@@ -72,10 +80,12 @@ export interface Fits {
  * counts most, then naming a port; the target end counts as much as the source end.
  */
 export const score = (c: Fits, q: Query): number | undefined => {
-  if (c.from.protocol !== q.from.protocol || q.to.protocol === undefined || c.to.protocol !== q.to.protocol) return undefined
+  if (c.from.protocol !== q.from.protocol || q.to.protocol === undefined) return undefined
+  if (c.to.protocol !== q.to.protocol && !(q.to.also?.includes(c.to.protocol) ?? false)) return undefined
   if (c.from.component !== undefined && c.from.component !== q.from.component) return undefined
   if (c.from.port !== undefined && c.from.port !== q.from.port) return undefined
   if (c.to.component !== undefined && c.to.component !== q.to.component) return undefined
+  if (c.to.fleets === false && (q.to.also?.includes("fleet") ?? false)) return undefined
   return (c.from.component !== undefined ? 4 : 0) + (c.from.port !== undefined ? 2 : 0) + (c.to.component !== undefined ? 4 : 0)
 }
 
@@ -129,7 +139,10 @@ export const candidates = <C extends Fits>(all: ReadonlyArray<C>, q: Query): Rea
 /** The source end, as a connector sees it: what a `pull` port offers; nothing for `invoke`, whose source pushes. */
 export type SourceOf<P extends Protocol> = P extends "pull" ? Pull : undefined
 
-export interface Context<Config, From extends Protocol = Protocol> {
+/** The target end, as a connector sees it: a fleet's units for `fleet`; nothing for `invoke`, which is only called. */
+export type TargetOf<P extends Protocol> = P extends "fleet" ? Fleet : undefined
+
+export interface Context<Config, From extends Protocol = Protocol, To extends Protocol = Protocol> {
   /** The edge's id. */
   readonly id: string
   readonly from: string
@@ -155,6 +168,18 @@ export interface Context<Config, From extends Protocol = Protocol> {
   readonly sink: Edge.Wire
   /** The near end, for a connector that takes rather than being sent to. */
   readonly source: SourceOf<From>
+  /** The far end's units, for a connector that picks one per call (`to: { protocol: "fleet" }`). */
+  readonly target: TargetOf<To>
+  /**
+   * What the far end's node offers beyond calls (its `Instance.offer`), if anything: a database's ledger of client
+   * connections, say. Its shape is agreed between the component and its connectors; narrow it with a guard.
+   */
+  readonly offer: () => unknown
+  /**
+   * A resource shared by everything in the far end's placement, as `node.shared` hands it to nodes there: built the first
+   * time anyone (a node or a connector) asks for `key`, then reused.
+   */
+  readonly shared: <A>(key: string, build: Effect.Effect<A, never, Scope.Scope>) => Effect.Effect<A>
 }
 
 export interface Instance<State = unknown> {
@@ -166,7 +191,7 @@ export interface Instance<State = unknown> {
 
 export type Settings = Schema.Struct<Schema.Struct.Fields>
 
-export interface ConnectorDef<C extends Settings = Settings, S extends Schema.Top = Schema.Top, From extends Protocol = Protocol> {
+export interface ConnectorDef<C extends Settings = Settings, S extends Schema.Top = Schema.Top, From extends Protocol = Protocol, To extends Protocol = Protocol> {
   /** Unique id, namespaced like components: `core.link`, `aws.sqs.event-source-mapping`. */
   readonly type: string
   /** `core` for the built-in ones, otherwise the provider that defines it. */
@@ -176,14 +201,14 @@ export interface ConnectorDef<C extends Settings = Settings, S extends Schema.To
   readonly icon: string
   readonly docs: string | undefined
   readonly from: FromEnd<From>
-  readonly to: ToEnd
+  readonly to: ToEnd<To>
   /** Its own settings. An edge's full settings add the source port's own before them and transport's after. */
   readonly config: C
   readonly state: S
-  readonly make: (ctx: Context<C["Type"], From>) => Effect.Effect<Instance<S["Type"]>, never, Scope.Scope>
+  readonly make: (ctx: Context<C["Type"], From, To>) => Effect.Effect<Instance<S["Type"]>, never, Scope.Scope>
 }
 
-export interface Input<C extends Settings, S extends Schema.Top, From extends Protocol> {
+export interface Input<C extends Settings, S extends Schema.Top, From extends Protocol, To extends Protocol> {
   readonly type: string
   readonly provider?: string
   readonly title: string
@@ -191,15 +216,15 @@ export interface Input<C extends Settings, S extends Schema.Top, From extends Pr
   readonly icon?: string
   readonly docs?: string
   readonly from: FromEnd<From>
-  readonly to?: ToEnd
+  readonly to?: ToEnd<To>
   readonly config: C
   readonly state?: S
-  readonly make: ConnectorDef<C, S, From>["make"]
+  readonly make: ConnectorDef<C, S, From, To>["make"]
 }
 
-export const make = <const C extends Settings, const From extends Protocol, const S extends Schema.Top = Schema.Struct<{}>>(
-  input: Input<C, S, From>
-): ConnectorDef<C, S, From> => ({
+export const make = <const C extends Settings, const From extends Protocol, const S extends Schema.Top = Schema.Struct<{}>, const To extends Protocol = "invoke">(
+  input: Input<C, S, From, To>
+): ConnectorDef<C, S, From, To> => ({
   type: input.type,
   provider: input.provider ?? "core",
   title: input.title,
@@ -207,7 +232,7 @@ export const make = <const C extends Settings, const From extends Protocol, cons
   icon: input.icon ?? "chevron",
   docs: input.docs,
   from: input.from,
-  to: input.to ?? { protocol: "invoke" },
+  to: input.to ?? ({ protocol: "invoke" } as ToEnd<To>),
   config: input.config,
   state: (input.state ?? Schema.Struct({})) as S,
   make: input.make
@@ -215,7 +240,7 @@ export const make = <const C extends Settings, const From extends Protocol, cons
 
 /** A connector with its type parameters erased, as registries hold them. */
 // biome-ignore lint/suspicious/noExplicitAny: variance: a connector is only ever invoked with values it decoded itself.
-export type AnyConnector = ConnectorDef<any, any, any>
+export type AnyConnector = ConnectorDef<any, any, any, any>
 
 /** The plain link every push gets unless something more specific fits. */
 export const LINK = "core.link"

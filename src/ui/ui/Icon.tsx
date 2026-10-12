@@ -118,6 +118,88 @@ const paths: Record<string, ReactNode> = {
       <path d="M16 16l4 4" />
     </>
   ),
+  // Icons for the compute, data and integration services: one per service, in the same 24px stroke style.
+  server: (
+    <>
+      <rect x="4" y="4" width="16" height="7" rx="1.5" />
+      <rect x="4" y="13" width="16" height="7" rx="1.5" />
+      <path d="M7.5 7.5h.01M7.5 16.5h.01M11 7.5h5M11 16.5h5" />
+    </>
+  ),
+  balancer: (
+    <>
+      <circle cx="5" cy="12" r="2.2" />
+      <circle cx="19" cy="5.5" r="2" />
+      <circle cx="19" cy="12" r="2" />
+      <circle cx="19" cy="18.5" r="2" />
+      <path d="M7.2 12H17M7 11l10-4.8M7 13l10 4.8" />
+    </>
+  ),
+  container: (
+    <>
+      <rect x="3.5" y="7" width="17" height="11" rx="1.5" />
+      <path d="M7.5 7v11M12 7v11M16.5 7v11M6 4.5h12" />
+    </>
+  ),
+  cache: (
+    <>
+      <ellipse cx="12" cy="6" rx="7" ry="2.8" />
+      <path d="M5 6v5c0 1.5 3.1 2.8 7 2.8M19 6v4" />
+      <path d="M15.5 13l-2 4h3l-2 4" />
+    </>
+  ),
+  stream: (
+    <>
+      <path d="M3 7c3-2 6 2 9 0s6 2 9 0" />
+      <path d="M3 12c3-2 6 2 9 0s6 2 9 0" />
+      <path d="M3 17c3-2 6 2 9 0s6 2 9 0" />
+    </>
+  ),
+  bus: (
+    <>
+      <path d="M3 12h18" />
+      <path d="M6 12V6M12 12V6M18 12V6M9 12v6M15 12v6" />
+      <circle cx="6" cy="5" r="1.4" />
+      <circle cx="12" cy="5" r="1.4" />
+      <circle cx="18" cy="5" r="1.4" />
+      <circle cx="9" cy="19" r="1.4" />
+      <circle cx="15" cy="19" r="1.4" />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7v5l3.5 2" />
+    </>
+  ),
+  workflow: (
+    <>
+      <rect x="9" y="3" width="6" height="4.5" rx="1" />
+      <rect x="3" y="16.5" width="6" height="4.5" rx="1" />
+      <rect x="15" y="16.5" width="6" height="4.5" rx="1" />
+      <path d="M12 7.5v4.5M6 16.5V12h12v4.5" />
+    </>
+  ),
+  dns: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.5 12h17M12 3.5c2.5 2.5 2.5 14.5 0 17" />
+      <path d="M15 15.5l2.5 2.5 3.5-4" />
+    </>
+  ),
+  shield: (
+    <>
+      <path d="M12 3l7.5 3v5.5c0 4.5-3.2 8-7.5 9.5-4.3-1.5-7.5-5-7.5-9.5V6z" />
+      <path d="M9 12l2 2 4-4" />
+    </>
+  ),
+  proxy: (
+    <>
+      <path d="M3 8h6M3 12h6M3 16h6" />
+      <rect x="9" y="6" width="6" height="12" rx="1.5" />
+      <path d="M15 12h6" />
+    </>
+  ),
   back: <path d="M15 6l-6 6 6 6" />,
   link: (
     <>

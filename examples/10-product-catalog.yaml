@@ -1,0 +1,541 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Product catalog and search
+description: |-
+  An online shop's product catalog and search, on the classic read-heavy data tier: product pages read through a Valkey cache in front of Aurora PostgreSQL, searches go to an OpenSearch domain, merchants' edits are indexed through a queue, and a nightly job reindexes the whole catalog. Twenty components in one region, the data tier in a VPC. It shows a background job taking a search domain's CPU from live searches, a hot product landing on one cache shard, what an Aurora failover does to reads and to writes, and what losing an Availability Zone does to each part of the data tier.
+
+  How it is wired: shoppers open product pages through CloudFront and an HTTP API. The responses carry live price and stock, so CloudFront caches none of them; the function reads through the cache, a cluster-mode Valkey cluster of three shards with two replicas each that keeps the catalog's 50,000 products (64 KB each, a few far more popular than the rest) for an hour. A miss reads Aurora's reader endpoint (two readers) and fills the key. Searches go through a second HTTP API to a function that queries a three-node OpenSearch domain spread over three Availability Zones (three primary shards, one replica each, every shard's copies in two zones), sized for the day: searches use about 70% of its CPU. Aurora's writer is in us-east-1a and its readers in us-east-1b and us-east-1c; each cache shard's three nodes are in three zones. Merchants edit products through a REST API with a Cognito authorizer. The function writes Aurora's writer, deletes the product's key from the cache and only then sends the product to the catalog changes queue, through an SQS interface endpoint, and an indexer function bulk-indexes the queue into OpenSearch. At 02:00 EventBridge Scheduler starts a Step Functions workflow whose Distributed Map sends every product to a reindex queue, which the same indexer drains through its own event source mapping. Both queues dead-letter to one queue.
+
+  What the simulator cannot show: CloudFront routing by path (a distribution's origins are split by object, not by URL, so the search box calls its API directly here), the Distributed Map's S3 item reader and item batching (each of the 50,000 items is a child execution that sends one message), a reindex into a new index behind an alias, the zones of the functions and the queues (regional here), the connections each Lambda environment would hold to Aurora (the cache's reads are one pooled client here, where RDS Proxy would pool them in life), and anything about data: there are no values, so no stale cache entries, and the write to Aurora and the message to the queue can't disagree as they can in life (an outbox table would make that safe). The CPU a search, an indexed document and a product query cost, and the indexer's 8 ms per product, are assumptions.
+seed: 17
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 332, y: -90 }
+    size: { w: 1980, h: 1460 }
+  catalog-vpc:
+    type: aws.vpc
+    name: Catalog VPC
+    parent: aws-us-east-1
+    position: { x: 1032, y: -24 }
+    size: { w: 1252, h: 930 }
+  shoppers:
+    type: common.client
+    name: Shoppers (product pages)
+    region: us-east
+    settings:
+      rps: 800
+      payload: 0.5
+    position: { x: 0, y: 82 }
+  searchers:
+    type: common.client
+    name: Shoppers searching
+    region: us-east
+    settings:
+      rps: 100
+      payload: 0.5
+    position: { x: 0, y: 312 }
+  merchants:
+    type: common.client
+    name: Merchants (catalog edits)
+    region: us-east
+    settings:
+      rps: 10
+      payload: 4
+    position: { x: 0, y: 542 }
+  cdn:
+    type: aws.cloudfront
+    name: Storefront CDN
+    parent: aws-us-east-1
+    settings:
+      objects: 50000
+      objectSize: 64
+      cache: { originCacheControl: no-store }
+    position: { x: 360, y: 82 }
+  storefront-api:
+    type: aws.apigateway
+    name: Storefront API
+    parent: aws-us-east-1
+    settings:
+      apiType: http
+    position: { x: 680, y: 54 }
+  search-api:
+    type: aws.apigateway
+    name: Search API
+    parent: aws-us-east-1
+    settings:
+      apiType: http
+    position: { x: 680, y: 284 }
+  merchant-api:
+    type: aws.apigateway
+    name: Merchant API
+    parent: aws-us-east-1
+    settings:
+      apiType: rest
+      authorizer: { type: cognito }
+    position: { x: 680, y: 514 }
+  get-product:
+    type: aws.lambda
+    name: Get product
+    parent: catalog-vpc
+    settings:
+      memory: 1024
+      timeout: 3 seconds
+      duration: { mean: 4 }
+    position: { x: 1060, y: 42 }
+  search-fn:
+    type: aws.lambda
+    name: Search products
+    parent: catalog-vpc
+    settings:
+      memory: 1024
+      timeout: 6 seconds
+      duration: { mean: 6 }
+    position: { x: 1060, y: 272 }
+  update-product:
+    type: aws.lambda
+    name: Update product
+    parent: catalog-vpc
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 15 }
+    position: { x: 1060, y: 502 }
+  product-cache:
+    type: aws.elasticache
+    name: Product cache (Valkey, cluster mode)
+    parent: catalog-vpc
+    settings:
+      nodeType: cache.r7g.large
+      clusterMode: true
+      shards: 3
+      replicasPerShard: 2
+      keyspace:
+        keys: 50000
+        popularitySkew: 3
+        itemSize: 64
+      caching:
+        ttl: 1 hour
+        ttlJitter: 0.2
+    position: { x: 1380, y: 54 }
+  catalog-db:
+    type: aws.rds
+    name: Catalog DB (Aurora PostgreSQL)
+    parent: catalog-vpc
+    zone: us-east-1a
+    settings:
+      engine: aurora-postgres
+      instanceClass: db.r7g.large
+      readers: 2
+      query:
+        readCpu:
+          mean: 6
+          cv: 0.5
+    position: { x: 1700, y: 82 }
+  search-domain:
+    type: aws.opensearch
+    name: Product search (OpenSearch)
+    parent: catalog-vpc
+    settings:
+      instanceType: r6g.large.search
+      dataNodes: 3
+      availabilityZones: 3
+      primaryShards: 3
+      replicas: 1
+      indexing:
+        cpuPerDocument: 2
+      search:
+        cpuPerShard:
+          mean: 14
+          cv: 1
+    position: { x: 2020, y: 527 }
+  sqs-endpoint:
+    type: aws.vpc-endpoint
+    name: SQS interface endpoint
+    parent: catalog-vpc
+    settings:
+      type: interface
+    position: { x: 1380, y: 542 }
+  index-queue:
+    type: aws.sqs
+    name: Catalog changes queue
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 6 minutes
+      maxReceives: 5
+    position: { x: 1380, y: 956 }
+  reindex-queue:
+    type: aws.sqs
+    name: Reindex queue
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 6 minutes
+      maxReceives: 5
+    position: { x: 1380, y: 1166 }
+  index-dlq:
+    type: aws.sqs
+    name: Indexing DLQ
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 1700, y: 1166 }
+  indexer:
+    type: aws.lambda
+    name: Indexer (bulk)
+    parent: catalog-vpc
+    settings:
+      memory: 1024
+      timeout: 1 minute
+      duration: { mean: 8 }
+      batch:
+        duration: record
+      batchCalls: once
+    position: { x: 1700, y: 702 }
+  nightly:
+    type: aws.scheduler
+    name: Nightly reindex (02:00)
+    parent: aws-us-east-1
+    settings:
+      expression: cron(0 2 * * ? *)
+      clock: 2026-01-06T01:30:00
+    position: { x: 360, y: 1178 }
+  reindex:
+    type: aws.stepfunctions
+    name: Reindex catalog
+    parent: aws-us-east-1
+    settings:
+      workflowType: standard
+    position: { x: 680, y: 1178 }
+edges:
+  shoppers.out->cdn:
+    from: { node: shoppers }
+    to: cdn
+    settings:
+      timeout: 10 seconds
+      request: { operation: read }
+  cdn.out->storefront-api:
+    from: { node: cdn }
+    to: storefront-api
+    settings:
+      originType: custom
+      request: { operation: read }
+  storefront-api.out->get-product:
+    from: { node: storefront-api }
+    to: get-product
+    settings:
+      request: { operation: read }
+  get-product.out->product-cache:
+    from: { node: get-product }
+    to: product-cache
+    settings:
+      timeout: 1 second
+      request: { operation: read }
+  product-cache.misses->catalog-db:
+    from: { node: product-cache, port: misses }
+    to: catalog-db
+    settings:
+      timeout: 2 seconds
+  product-cache.writes->catalog-db:
+    from: { node: product-cache, port: writes }
+    to: catalog-db
+    settings:
+      timeout: 5 seconds
+  searchers.out->search-api:
+    from: { node: searchers }
+    to: search-api
+    settings:
+      timeout: 10 seconds
+      request: { operation: read }
+  search-api.out->search-fn:
+    from: { node: search-api }
+    to: search-fn
+    settings:
+      request: { operation: read }
+  search-fn.out->search-domain:
+    from: { node: search-fn }
+    to: search-domain
+    settings:
+      timeout: 5 seconds
+      request: { operation: read }
+  merchants.out->merchant-api:
+    from: { node: merchants }
+    to: merchant-api
+    settings:
+      timeout: 30 seconds
+  merchant-api.out->update-product:
+    from: { node: merchant-api }
+    to: update-product
+  update-product.out->product-cache:
+    from: { node: update-product }
+    to: product-cache
+    settings:
+      timeout: 5 seconds
+      request: { operation: write }
+  update-product.out->sqs-endpoint:
+    from: { node: update-product }
+    to: sqs-endpoint
+  sqs-endpoint.out->index-queue:
+    from: { node: sqs-endpoint }
+    to: index-queue
+  index-queue.deliver->indexer:
+    from: { node: index-queue, port: deliver }
+    to: indexer
+    settings:
+      batchSize: 100
+      batchWindow: 1 second
+  index-queue.dlq->index-dlq:
+    from: { node: index-queue, port: dlq }
+    to: index-dlq
+  reindex-queue.deliver->indexer:
+    from: { node: reindex-queue, port: deliver }
+    to: indexer
+    settings:
+      batchSize: 100
+      batchWindow: 1 second
+  reindex-queue.dlq->index-dlq:
+    from: { node: reindex-queue, port: dlq }
+    to: index-dlq
+  indexer.out->search-domain:
+    from: { node: indexer }
+    to: search-domain
+    settings:
+      timeout: 30 seconds
+  nightly.out->reindex:
+    from: { node: nightly }
+    to: reindex
+  reindex.out->reindex-queue:
+    from: { node: reindex }
+    to: reindex-queue
+    settings:
+      state: map
+      map: { mode: distributed, items: 50000, childType: express }
+      request: { operation: write, payload: 4 }
+      timeout: 10 seconds
+      retrier: { enabled: true, errorEquals: States.ALL, interval: 1 second, maxAttempts: 3, backoffRate: 2, jitter: FULL }
+scenarios:
+  reindex:
+    name: The nightly reindex starves search
+    description: The shop sells worldwide, so 02:00 in Virginia is as busy as noon. When the schedule fires, the Map sends the 50,000 products to the reindex queue at 1,000 a second, and the indexer's event source mapping scales out on the backlog to some 300 concurrent bulks. They keep both write threads busy on every data node, so the searches, which need 70% of the CPU on their own, get two-thirds of it, queue, and fail once the wait passes the search function's 5 s timeout, while product pages don't notice. The bulks wait past the indexer's own 30 s timeout too, and though the domain indexes them anyway, their batches (and merchants' edits caught in the same jam) count as failed, come back when the queues' six-minute visibility timeout runs out, and are indexed a second time.
+    duration: 10m
+    warmup: 30s
+    overrides:
+      nodes:
+        nightly:
+          clock: 2026-01-06T01:59:00
+    timeline:
+      - at: 1m
+        note: 02:00, the schedule is due (it fires within the minute)
+      - at: 2m40s
+        note: the Map has sent every product; the indexer works through the backlog
+      - at: 8m15s
+        note: six minutes on, the batches that timed out are visible again
+    assert:
+      - check: searchers.latency.p95 < 300ms
+        name: Before the reindex, searches are quick
+        from: 30s
+        to: 1m30s
+      - check: search-domain.gauge.cpu > 95%
+        name: The bulks take all of the domain's CPU
+        from: 2m
+        to: 3m
+      - check: searchers.latency.p95 > 2s
+        name: Shoppers wait seconds for results
+        from: 2m20s
+        to: 3m
+      - check: searchers.errorRatio > 50%
+        name: Then their searches time out
+        from: 3m10s
+        to: 3m30s
+      - check: shoppers.errorRatio < 0.1%
+        name: Product pages don't notice
+      - check: searchers.errorRatio == 0
+        name: Search recovers once the bulks are done
+        from: 4m
+        to: 8m
+      - check: index-queue.gauge.oldestAgeMs:max > 3m
+        name: Merchants' edits caught in the jam wait out the visibility timeout
+        from: 4m
+        to: 8m
+      - check: search-domain.rate.indexed > 300/s
+        name: The timed-out batches are indexed a second time
+        from: 8m20s
+        to: 9m
+  reindex-capped:
+    name: The same reindex, capped
+    description: The reindex queue's event source mapping is capped at two concurrent batches (MaximumConcurrency 2). The indexer then sends about 150 products a second, the domain keeps some of its CPU free, and searches barely slow down. No bulk waits long enough to time out, so nothing is indexed twice, and the reindex takes six minutes instead of a minute and a half, which at night costs nothing. Data nodes twice the size (r6g.xlarge) would let it run at full speed, at twice the price.
+    duration: 6m
+    warmup: 30s
+    overrides:
+      nodes:
+        nightly:
+          clock: 2026-01-06T01:59:00
+      edges:
+        reindex-queue.deliver->indexer:
+          maxConcurrency: 2
+    timeline:
+      - at: 1m
+        note: 02:00, the schedule is due (it fires within the minute)
+    assert:
+      - check: searchers.errorRatio == 0
+        name: Every search succeeds
+      - check: searchers.latency.p95 < 400ms
+        name: Searches stay quick during the reindex
+        from: 2m
+      - check: search-domain.gauge.cpu < 95%
+        name: The domain keeps some CPU free
+        from: 2m
+      - check: search-domain.rate.indexed < 250/s
+        name: The reindex goes at a steady trickle
+        from: 2m
+      - check: search-domain.rate.indexed > 100/s
+        name: but it keeps going
+        from: 2m
+      - check: reindex-queue.gauge.depth:last > 5000
+        name: It takes longer
+        from: 5m50s
+      - check: shoppers.errorRatio < 0.1%
+        name: Product pages don't notice
+  celebrity:
+    name: A celebrity product
+    description: At 1m a celebrity posts a product, traffic triples and 80% of it asks for that one product. Its key lives on one shard, and reads go to the shard's primary, whose 0.937 Gbps sends about 1,800 of its 64 KB pages a second; it is asked for more. Its queue grows while the other eight nodes idle, product pages wait, and the waiting functions use up the region's Lambda concurrency, so searches and merchants' edits are throttled too. More shards wouldn't help, as the key stays on one. At 2m30s the function starts reading from replicas (READONLY connections), the shard's two replicas share the product, and everything recovers.
+    duration: 4m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the product goes viral
+        set:
+          node: shoppers
+          settings:
+            rps: 2400
+            hotKeys: 0.8
+      - at: 2m30s
+        note: the function reads from replicas
+        set:
+          node: product-cache
+          settings:
+            readFrom: replicas
+    assert:
+      - check: product-cache.gauge.engineUtilization > 95%
+        name: The node holding the product is saturated
+        from: 1m20s
+        to: 2m30s
+      - check: product-cache.gauge.meanUtilization < 30%
+        name: The rest of the cluster idles
+        from: 1m20s
+        to: 2m30s
+      - check: shoppers.latency.p95 > 400ms
+        name: Product pages wait
+        from: 1m20s
+        to: 2m30s
+      - check: get-product.gauge.concurrent:max > 900
+        name: The waiting functions use up the region's concurrency
+        from: 1m20s
+        to: 2m30s
+      - check: shoppers.errorRatio > 5%
+        name: Shoppers see errors
+        from: 1m20s
+        to: 2m30s
+      - check: searchers.errorRatio > 2%
+        name: Searches are throttled too
+        from: 1m20s
+        to: 2m30s
+      - check: product-cache.gauge.engineUtilization < 80%
+        name: Read from replicas, no node is saturated
+        from: 2m50s
+      - check: system.errorRatio < 0.1%
+        name: and nobody sees an error
+        from: 2m50s
+  failover:
+    name: Aurora fails over in a busy minute
+    description: At 1m30s the Aurora writer fails and Aurora promotes a reader, which takes about half a minute. Product pages carry on, as most hit the cache and the misses go to the reader endpoint, where the reader that isn't being promoted serves them. Merchants' edits fail until the new writer is up, and as the function writes Aurora first, an edit that failed is never sent to the index. Search doesn't notice.
+    duration: 4m
+    warmup: 30s
+    timeline:
+      - at: 1m30s
+        note: the writer fails
+        inject:
+          target: node:catalog-db
+          fault: Outage
+          for: 1s
+    assert:
+      - check: catalog-db.gauge.failingOver:max == 1
+        name: Aurora fails over to a reader
+      - check: catalog-db.gauge.readers:min == 1
+        name: One reader serves meanwhile
+        from: 1m35s
+        to: 1m55s
+      - check: merchants.errorRatio > 90%
+        name: Merchants' edits fail while the writer is replaced
+        from: 1m35s
+        to: 1m55s
+      - check: index-queue.rate.in < 1/s
+        name: An edit that failed is never sent to the index
+        from: 1m35s
+        to: 1m55s
+      - check: shoppers.errorRatio < 1%
+        name: Product pages carry on
+        from: 1m30s
+        to: 2m30s
+      - check: searchers.errorRatio == 0
+        name: Search doesn't notice
+      - check: merchants.errorRatio == 0
+        name: Edits go through again on the new writer
+        from: 2m30s
+  zone-outage:
+    name: Losing us-east-1a
+    description: At 1m30s us-east-1a, the zone Aurora's writer is in, goes down for three minutes. Aurora promotes its reader in us-east-1b, in about half a minute, while the reader in us-east-1c serves the cache's misses; merchants' edits fail until the new writer is up, then go through though the zone is still down. The cache shard whose primary was in us-east-1a promotes a replica in eight seconds, and meanwhile the product function reads Aurora instead (fail open), so product pages don't notice. The search domain keeps a copy of every shard in the other two zones (yellow), but it was sized for three nodes, and the two left get all the searches, which need 105% of their CPU. Its search queues grow, searches wait seconds, then time out, until the zone and its node come back. AWS's advice for a three-zone domain is to size it so that two-thirds of its nodes can carry the load.
+    duration: 6m
+    warmup: 30s
+    timeline:
+      - at: 1m30s
+        note: us-east-1a goes down for three minutes
+        inject:
+          target: zone:aws:us-east-1:us-east-1a
+          fault: Outage
+          for: 3m
+      - at: 4m30s
+        note: us-east-1a is back
+    assert:
+      - check: catalog-db.gauge.failingOver:max == 1
+        name: Aurora promotes its reader in another zone
+      - check: catalog-db.gauge.readers:min == 1
+        name: The reader in the third zone keeps serving
+        from: 1m35s
+        to: 4m30s
+      - check: merchants.errorRatio > 90%
+        name: Merchants' edits fail while the writer is replaced
+        from: 1m35s
+        to: 1m55s
+      - check: merchants.errorRatio == 0
+        name: then go through on the new writer, the zone still down
+        from: 2m20s
+        to: 4m30s
+      - check: product-cache.total.failovers == 1
+        name: One cache shard had its primary in the zone, and fails over
+      - check: shoppers.errorRatio < 0.1%
+        name: Product pages don't notice
+      - check: search-domain.gauge.clusterStatus:max == 1
+        name: Search keeps a copy of every shard (yellow)
+        from: 1m35s
+        to: 4m30s
+      - check: search-domain.gauge.cpu > 95%
+        name: but two nodes get three nodes' searches
+        from: 2m
+        to: 4m30s
+      - check: searchers.latency.p95 > 2s
+        name: Searches wait seconds
+        from: 2m
+        to: 2m30s
+      - check: searchers.errorRatio > 50%
+        name: then time out
+        from: 3m
+        to: 4m30s
+      - check: searchers.errorRatio == 0
+        name: Search recovers once the zone is back
+        from: 5m
+      - check: search-domain.gauge.clusterStatus:max == 0
+        name: and the domain is green again
+        from: 4m40s

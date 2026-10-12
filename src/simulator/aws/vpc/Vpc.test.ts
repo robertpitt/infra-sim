@@ -71,7 +71,7 @@ describe("aws.vpc: where it sits and what sits in it", () => {
   it("advertises what it accepts", () => {
     const vpc = registry.get("aws.vpc")!
     const accepted = registry.list.filter((c) => c !== vpc && vpc.container!.accepts(c)).map((c) => c.type)
-    expect(accepted.sort()).toEqual(["aws.lambda", "aws.nat-gateway", "aws.vpc-endpoint"])
+    expect(accepted.sort()).toEqual(["aws.alb", "aws.ec2", "aws.ecs", "aws.eks", "aws.elasticache", "aws.lambda", "aws.nat-gateway", "aws.nlb", "aws.opensearch", "aws.rds", "aws.rds-proxy", "aws.vpc-endpoint"])
   })
 })
 

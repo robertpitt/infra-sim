@@ -1,9 +1,12 @@
 #!/bin/zsh
-# usage: run-with-deadline.sh <seconds> <command...>  — kills the whole process group when the deadline passes
+# usage: run-with-deadline.sh <seconds> <command...>  — kills the command and everything it started when the deadline passes.
+# Only this command's own process tree: several runs (other terminals, agents) may be going at once, and must not be hit.
 secs=$1; shift
 "$@" &
 pid=$!
-( sleep $secs; kill -9 $pid 2>/dev/null; pkill -9 -P $pid 2>/dev/null; pkill -9 -f "workers/forks.js" 2>/dev/null ) &
+# Every descendant of a process, deepest first (vitest's workers are grandchildren of npx).
+descendants() { local child; for child in $(pgrep -P $1); do descendants $child; echo $child; done }
+( sleep $secs; for p in $(descendants $pid) $pid; do kill -9 $p 2>/dev/null; done ) &
 killer=$!
 wait $pid; code=$?
 kill $killer 2>/dev/null

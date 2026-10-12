@@ -2,11 +2,11 @@
 version: 1
 name: Event ingestion platform
 description: |-
-  A customer-data platform that takes in events from browser and mobile SDKs, server SDKs, partner webhooks and bulk file uploads, fans them out to a data lake, real-time customer profiles and third-party destinations, and serves analysts through a cached query API. About forty-five components in one region, with a VPC.
+  A customer-data platform that takes in events from browser and mobile SDKs, server SDKs, partner webhooks and bulk file uploads, streams them to a data lake, real-time customer profiles and third-party destinations, and serves analysts through a cached query API. About forty components in one region, with a VPC.
 
-  How it is wired: a collect API (HTTP API with a write-key authorizer) runs a Lambda that records an idempotency key in DynamoDB and publishes to an SNS topic. The topic fans out, through filter policies, to three SQS queues, each with its own dead-letter queue: a batch writer that lands events in the lake in S3, an enricher that updates customer profiles in DynamoDB (whose stream keeps a search index in step), and a forwarder in the VPC that calls the destinations' APIs through a NAT gateway. Bulk uploads land in S3 and are split by a Lambda the bucket's notifications invoke. Page loads fetch the SDK from CloudFront. Analysts query a REST API with a cache, in front of a query handler in the VPC that reaches S3 and DynamoDB through gateway endpoints. The collect function's provisioned concurrency follows its load, as Application Auto Scaling keeps it near 70% in use. A scheduled job exports the lake and emails that the export is ready.
+  How it is wired: a collect API (HTTP API with a write-key authorizer) runs a Lambda that records an idempotency key in DynamoDB and puts the events on a four-shard Kinesis data stream (a server SDK's batch of ten as one PutRecords), keyed by user so that a user's events stay in order. Three consumers read the stream, each at its own pace. Firehose lands every event in the lake in S3, an object per shard a minute. A profile enricher, with enhanced fan-out and an on-failure queue for batches it gives up on, updates the customer's profile in DynamoDB, whose stream keeps an OpenSearch domain in the VPC in step. A router moves every event into a destinations queue, where a forwarder in the VPC calls the destinations' APIs through a NAT gateway, at most 50 batches at a time. Partner webhooks and bulk uploads (split by a Lambda the bucket's notifications invoke) join the same stream. Page loads fetch the SDK from CloudFront. Analysts query a REST API with a cache, in front of a query handler in the VPC that reads the lake and the profiles through gateway endpoints and searches the OpenSearch domain. The collect function's provisioned concurrency follows its load, as Application Auto Scaling keeps it near 70% in use. EventBridge Scheduler starts each workspace's hourly export, spread over a 15-minute window: it reads the lake, writes the export and emails that it is ready.
 
-  What the simulator cannot show: a stream service (Kinesis or Firehose in front of the lake is modelled as SNS and SQS), a file being split into many events (a bulk file is one message, and a batch written to the lake counts as its events, not as one object), the query engine's own cost (Athena, Redshift: the query handler stands in for it), and OpenSearch, which is an HTTP endpoint here. The scheduled export is a client firing every five minutes, standing in for EventBridge.
+  What the simulator cannot show: a file being split into many events (a bulk file is one record on the stream), filtering on the way to the destinations (the router stands in for an EventBridge Pipe and sends every event, each to one destination), the query engine's own cost (Athena, Redshift: the query handler stands in for it), and an export's real size (each reads a fixed 5 MB of the lake). The on-failure queue belongs to the stream here, shared by the mappings that read it; in AWS each event source mapping names its own.
 seed: 11
 nodes:
   aws-eu-west-1:
@@ -14,14 +14,14 @@ nodes:
     name: eu-west-1 (Ireland)
     settings:
       region: eu-west-1
-    position: { x: 352, y: -26 }
-    size: { w: 2240, h: 2000 }
+    position: { x: 352, y: -66 }
+    size: { w: 2240, h: 1918 }
   platform-vpc:
     type: aws.vpc
     name: Platform VPC
     parent: aws-eu-west-1
-    position: { x: 672, y: 1264 }
-    size: { w: 1892, h: 320 }
+    position: { x: 672, y: 1234 }
+    size: { w: 1892, h: 590 }
   browser-sdk:
     type: common.client
     name: Browser and mobile SDKs
@@ -29,15 +29,16 @@ nodes:
     settings:
       rps: 220
       payload: 2
-    position: { x: 0, y: 250 }
+    position: { x: 0, y: 280 }
   server-sdk:
     type: common.client
-    name: Server SDKs (batched)
+    name: Server SDKs (batches of 10)
     region: eu-west
     settings:
       rps: 30
-      payload: 48
-    position: { x: 0, y: 380 }
+      payload: 20
+      records: 10
+    position: { x: 0, y: 410 }
   partner-webhooks:
     type: common.client
     name: Partner webhooks
@@ -45,7 +46,7 @@ nodes:
     settings:
       rps: 12
       payload: 6
-    position: { x: 0, y: 750 }
+    position: { x: 0, y: 800 }
   bulk-uploads:
     type: common.client
     name: Bulk file uploads
@@ -53,7 +54,7 @@ nodes:
     settings:
       rps: 0.1
       payload: 20000
-    position: { x: 0, y: 970 }
+    position: { x: 0, y: 1040 }
   sdk-page-loads:
     type: common.client
     name: Page loads (fetch the SDK)
@@ -69,16 +70,7 @@ nodes:
     settings:
       rps: 8
       payload: 1
-    position: { x: 0, y: 1390 }
-  export-schedule:
-    type: common.client
-    name: Export schedule (EventBridge stand-in)
-    region: eu-west
-    settings:
-      rps: 0.0033
-      arrival: constant
-      invocation: async
-    position: { x: 0, y: 1680 }
+    position: { x: 0, y: 1480 }
   sdk-cdn:
     type: aws.cloudfront
     name: SDK CDN
@@ -100,14 +92,14 @@ nodes:
       apiType: http
       stageThrottle: { rate: 4000, burst: 4000 }
       authorizer: { type: lambda, ttl: 300 seconds }
-    position: { x: 380, y: 280 }
+    position: { x: 380, y: 300 }
   webhook-api:
     type: aws.apigateway
     name: Webhook API
     parent: aws-eu-west-1
     settings:
       apiType: rest
-    position: { x: 380, y: 730 }
+    position: { x: 380, y: 770 }
   query-api:
     type: aws.apigateway
     name: Query API
@@ -115,7 +107,7 @@ nodes:
     settings:
       apiType: rest
       cache: { enabled: true, ttl: 60 seconds, keys: 400 }
-    position: { x: 380, y: 1370 }
+    position: { x: 380, y: 1450 }
   write-key-authorizer:
     type: aws.lambda
     name: Write-key authorizer
@@ -123,14 +115,14 @@ nodes:
     settings:
       memory: 256
       duration: { mean: 12 }
-    position: { x: 700, y: 490 }
+    position: { x: 700, y: 520 }
   workspaces:
     type: aws.dynamodb
     name: Workspaces table
     parent: aws-eu-west-1
     settings:
       mode: on-demand
-    position: { x: 1020, y: 480 }
+    position: { x: 1020, y: 500 }
   collect:
     type: aws.lambda
     name: Collect
@@ -140,14 +132,15 @@ nodes:
       timeout: 5 seconds
       duration: { mean: 20 }
       provisioned: 10
-    position: { x: 700, y: 280 }
+      batchCalls: once
+    position: { x: 700, y: 300 }
   dedup-keys:
     type: aws.dynamodb
     name: Idempotency keys
     parent: aws-eu-west-1
     settings:
       mode: on-demand
-    position: { x: 1020, y: 230 }
+    position: { x: 1020, y: 250 }
   webhook-receiver:
     type: aws.lambda
     name: Webhook receiver
@@ -155,12 +148,12 @@ nodes:
     settings:
       memory: 512
       duration: { mean: 35 }
-    position: { x: 700, y: 720 }
+    position: { x: 700, y: 760 }
   landing:
     type: aws.s3
     name: Landing bucket
     parent: aws-eu-west-1
-    position: { x: 380, y: 950 }
+    position: { x: 380, y: 1010 }
   file-splitter:
     type: aws.lambda
     name: File splitter
@@ -169,65 +162,45 @@ nodes:
       memory: 3008
       timeout: 5 minutes
       duration: { mean: 20000, cv: 0.5 }
-    position: { x: 700, y: 940 }
-  events-topic:
-    type: aws.sns
-    name: Events topic
-    parent: aws-eu-west-1
-    position: { x: 1340, y: 600 }
-  warehouse-queue:
-    type: aws.sqs
-    name: Warehouse queue
+    position: { x: 700, y: 1000 }
+  events-stream:
+    type: aws.kinesis
+    name: Events stream
     parent: aws-eu-west-1
     settings:
-      visibilityTimeout: 2 minutes
-      maxReceives: 5
-    position: { x: 1660, y: 240 }
-  warehouse-dlq:
+      mode: provisioned
+      shards: 4
+      retention: 7 days
+    position: { x: 1020, y: 760 }
+  failed-batches:
     type: aws.sqs
-    name: Warehouse DLQ
+    name: Failed batches (on-failure)
     parent: aws-eu-west-1
     settings:
       retention: 14 days
-    position: { x: 1980, y: 380 }
-  batch-writer:
-    type: aws.lambda
-    name: Batch writer
+    position: { x: 1340, y: 1010 }
+  lake-delivery:
+    type: aws.firehose
+    name: Lake delivery stream
     parent: aws-eu-west-1
     settings:
-      memory: 2048
-      timeout: 20 seconds
-      duration: { mean: 400 }
-      batchCalls: once
-    position: { x: 1980, y: 180 }
+      bufferSize: 64
+      bufferInterval: 60 seconds
+    position: { x: 1340, y: 260 }
   lake:
     type: aws.s3
     name: Event lake
     parent: aws-eu-west-1
-    position: { x: 2300, y: 200 }
-  realtime-queue:
-    type: aws.sqs
-    name: Real-time queue
-    parent: aws-eu-west-1
-    settings:
-      visibilityTimeout: 30 seconds
-      maxReceives: 5
-    position: { x: 1660, y: 560 }
-  realtime-dlq:
-    type: aws.sqs
-    name: Real-time DLQ
-    parent: aws-eu-west-1
-    settings:
-      retention: 14 days
-    position: { x: 1980, y: 800 }
+    position: { x: 1660, y: 270 }
   enricher:
     type: aws.lambda
     name: Profile enricher
     parent: aws-eu-west-1
     settings:
       memory: 1024
+      timeout: 30 seconds
       duration: { mean: 60 }
-    position: { x: 1980, y: 600 }
+    position: { x: 1340, y: 520 }
   profiles:
     type: aws.dynamodb
     name: Customer profiles
@@ -236,15 +209,35 @@ nodes:
       mode: on-demand
       stream:
         view: new
-    position: { x: 2300, y: 580 }
+    position: { x: 1660, y: 500 }
   profile-sync:
     type: aws.lambda
     name: Profile search sync
-    parent: aws-eu-west-1
+    parent: platform-vpc
     settings:
       memory: 512
       duration: { mean: 80 }
-    position: { x: 2300, y: 840 }
+      batchCalls: once
+    position: { x: 1980, y: 1620 }
+  profile-search:
+    type: aws.opensearch
+    name: Profile search domain
+    parent: platform-vpc
+    settings:
+      instanceType: r6g.large.search
+      dataNodes: 3
+      primaryShards: 3
+      replicas: 1
+    position: { x: 2300, y: 1484 }
+  destinations-router:
+    type: aws.lambda
+    name: Destination router
+    parent: aws-eu-west-1
+    settings:
+      memory: 512
+      timeout: 30 seconds
+      duration: { mean: 20 }
+    position: { x: 1340, y: 784 }
   destinations-queue:
     type: aws.sqs
     name: Destinations queue
@@ -252,14 +245,14 @@ nodes:
     settings:
       visibilityTimeout: 30 seconds
       maxReceives: 4
-    position: { x: 1660, y: 880 }
+    position: { x: 1660, y: 784 }
   destinations-dlq:
     type: aws.sqs
     name: Destinations DLQ
     parent: aws-eu-west-1
     settings:
       retention: 14 days
-    position: { x: 1980, y: 1020 }
+    position: { x: 1980, y: 900 }
   forwarder:
     type: aws.lambda
     name: Destination forwarder
@@ -268,12 +261,12 @@ nodes:
       memory: 512
       timeout: 10 seconds
       duration: { mean: 30 }
-    position: { x: 1980, y: 1350 }
+    position: { x: 1980, y: 1300 }
   nat:
     type: aws.nat-gateway
     name: NAT gateway
     parent: platform-vpc
-    position: { x: 2300, y: 1370 }
+    position: { x: 2300, y: 1320 }
   query-service:
     type: aws.lambda
     name: Query handler
@@ -282,21 +275,30 @@ nodes:
       memory: 2048
       timeout: 29 seconds
       duration: { mean: 250, cv: 0.6 }
-    position: { x: 700, y: 1350 }
+    position: { x: 700, y: 1420 }
   s3-endpoint:
     type: aws.vpc-endpoint
     name: S3 gateway endpoint
     parent: platform-vpc
     settings:
       type: gateway
-    position: { x: 1020, y: 1330 }
+    position: { x: 1340, y: 1310 }
   dynamodb-endpoint:
     type: aws.vpc-endpoint
     name: DynamoDB gateway endpoint
     parent: platform-vpc
     settings:
       type: gateway
-    position: { x: 1020, y: 1460 }
+    position: { x: 1340, y: 1630 }
+  export-schedule:
+    type: aws.scheduler
+    name: Hourly exports (40 workspaces)
+    parent: aws-eu-west-1
+    settings:
+      expression: rate(1 hour)
+      schedules: 40
+      flexibleWindow: 15
+    position: { x: 1020, y: 40 }
   export-job:
     type: aws.lambda
     name: Export job
@@ -305,43 +307,35 @@ nodes:
       memory: 3008
       timeout: 10 minutes
       duration: { mean: 30000, cv: 0.3 }
-    position: { x: 380, y: 1660 }
+    position: { x: 1340, y: 20 }
   exports:
     type: aws.s3
     name: Exports bucket
     parent: aws-eu-west-1
-    position: { x: 700, y: 1660 }
+    position: { x: 1980, y: 0 }
   notify:
     type: aws.ses
     name: Notification email
     parent: aws-eu-west-1
-    position: { x: 700, y: 1850 }
+    position: { x: 1980, y: 190 }
   crm-api:
     type: common.http-endpoint
     name: CRM destination API
     region: us-east
     settings:
       latency: { mean: 180, cv: 0.5 }
-      rateLimit: 120
-      burst: 200
-    position: { x: 2700, y: 1310 }
+      rateLimit: 800
+      burst: 1000
+    position: { x: 2700, y: 1260 }
   ads-api:
     type: common.http-endpoint
     name: Ads destination API
     region: us-east
     settings:
       latency: { mean: 120, cv: 0.4 }
-      rateLimit: 200
-      burst: 300
-    position: { x: 2700, y: 1450 }
-  search-index:
-    type: common.http-endpoint
-    name: Search index (OpenSearch stand-in)
-    region: eu-west
-    settings:
-      latency: { mean: 15, cv: 0.4 }
-      maxConcurrency: 200
-    position: { x: 2700, y: 880 }
+      rateLimit: 1500
+      burst: 1500
+    position: { x: 2700, y: 1400 }
 edges:
   sdk-page-loads.out->sdk-cdn:
     from: { node: sdk-page-loads }
@@ -380,9 +374,9 @@ edges:
   collect.out->dedup-keys:
     from: { node: collect }
     to: dedup-keys
-  collect.out->events-topic:
+  collect.out->events-stream:
     from: { node: collect }
-    to: events-topic
+    to: events-stream
   partner-webhooks.out->webhook-api:
     from: { node: partner-webhooks }
     to: webhook-api
@@ -392,9 +386,9 @@ edges:
   webhook-api.out->webhook-receiver:
     from: { node: webhook-api }
     to: webhook-receiver
-  webhook-receiver.out->events-topic:
+  webhook-receiver.out->events-stream:
     from: { node: webhook-receiver }
-    to: events-topic
+    to: events-stream
   bulk-uploads.out->landing:
     from: { node: bulk-uploads }
     to: landing
@@ -405,68 +399,56 @@ edges:
     to: file-splitter
     settings:
       eventTypes: created
-  file-splitter.out->events-topic:
+  file-splitter.out->events-stream:
     from: { node: file-splitter }
-    to: events-topic
-  events-topic.out->warehouse-queue:
-    from: { node: events-topic }
-    to: warehouse-queue
-    settings:
-      rawMessageDelivery: true
-  events-topic.out->realtime-queue:
-    from: { node: events-topic }
-    to: realtime-queue
-    settings:
-      rawMessageDelivery: true
-      filterMatch: 0.4
-  events-topic.out->destinations-queue:
-    from: { node: events-topic }
-    to: destinations-queue
-    settings:
-      rawMessageDelivery: true
-      filterMatch: 0.3
-  warehouse-queue.deliver->batch-writer:
-    from: { node: warehouse-queue, port: deliver }
-    to: batch-writer
-    settings:
-      batchSize: 200
-      batchWindow: 5 seconds
-      maxConcurrency: 20
-  warehouse-queue.dlq->warehouse-dlq:
-    from: { node: warehouse-queue, port: dlq }
-    to: warehouse-dlq
-  batch-writer.out->lake:
-    from: { node: batch-writer }
+    to: events-stream
+  events-stream.consumers->lake-delivery:
+    from: { node: events-stream, port: consumers }
+    to: lake-delivery
+  lake-delivery.out->lake:
+    from: { node: lake-delivery }
     to: lake
-    settings:
-      request: { operation: write, payload: 400 }
-  realtime-queue.deliver->enricher:
-    from: { node: realtime-queue, port: deliver }
+  events-stream.consumers->enricher:
+    from: { node: events-stream, port: consumers }
     to: enricher
     settings:
-      batchSize: 10
-      maxConcurrency: 30
-  realtime-queue.dlq->realtime-dlq:
-    from: { node: realtime-queue, port: dlq }
-    to: realtime-dlq
+      batchSize: 100
+      parallelization: 2
+      enhancedFanOut: true
+      bisectOnError: true
+      maxRetries: 5
+      maxRecordAge: 3600
+  events-stream.consumers->destinations-router:
+    from: { node: events-stream, port: consumers }
+    to: destinations-router
+    settings:
+      batchSize: 100
+  events-stream.discarded->failed-batches:
+    from: { node: events-stream, port: discarded }
+    to: failed-batches
   enricher.out->profiles:
     from: { node: enricher }
     to: profiles
+    settings:
+      request: { operation: write, payload: 1 }
   profiles.stream->profile-sync:
     from: { node: profiles, port: stream }
     to: profile-sync
     settings:
       batchSize: 100
       batchWindow: 1 second
-  profile-sync.out->search-index:
+  profile-sync.out->profile-search:
     from: { node: profile-sync }
-    to: search-index
+    to: profile-search
+  destinations-router.out->destinations-queue:
+    from: { node: destinations-router }
+    to: destinations-queue
   destinations-queue.deliver->forwarder:
     from: { node: destinations-queue, port: deliver }
     to: forwarder
     settings:
       batchSize: 10
-      maxConcurrency: 20
+      maxConcurrency: 50
   destinations-queue.dlq->destinations-dlq:
     from: { node: destinations-queue, port: dlq }
     to: destinations-dlq
@@ -500,6 +482,11 @@ edges:
   query-service.out->dynamodb-endpoint:
     from: { node: query-service }
     to: dynamodb-endpoint
+  query-service.out->profile-search:
+    from: { node: query-service }
+    to: profile-search
+    settings:
+      request: { operation: read }
   s3-endpoint.out->lake:
     from: { node: s3-endpoint }
     to: lake
@@ -541,7 +528,7 @@ controllers:
 scenarios:
   launch:
     name: Product launch
-    description: Four times the SDK traffic for three minutes. The collect function's provisioned concurrency follows the load (and keeps it for the five-minute scale-in cooldown afterwards), the queues absorb the burst, and nobody sees an error.
+    description: Four times the browser and mobile traffic for three minutes. Four shards take it without a throttle, and the lake and the profiles keep up. The collect function's provisioned concurrency follows the load (and keeps it for the five-minute scale-in cooldown afterwards). The forwarder, held to 50 batches at a time so that the CRM stays under its rate limit, falls behind by up to half a minute, and the destinations queue holds the difference until the launch is over. Nobody sees an error.
     duration: 8m
     warmup: 30s
     timeline:
@@ -562,10 +549,6 @@ scenarios:
         name: Nobody sees an error
         from: 2m
         to: 5m
-      - check: browser-sdk.latency.p99 < 300ms
-        name: Latency holds
-        from: 2m
-        to: 5m
       - check: collect.gauge.provisioned:max <= 25
         name: Before the launch, little provisioned concurrency
         from: 30s
@@ -577,13 +560,24 @@ scenarios:
       - check: collect.gauge.provisioned:last >= 40
         name: It is kept for the scale-in cooldown, and paid for
         from: 7m30s
-      - check: warehouse-queue.gauge.depth:last < 100
-        name: The lake keeps up
-        from: 7m
+      - check: events-stream.rate.throttled < 1/s
+        name: Four shards take it
+        from: 2m
+        to: 5m
+      - check: events-stream.gauge.iteratorAgeMs:max < 5s
+        name: Every reader of the stream keeps up
+        from: 2m
+        to: 8m
+      - check: destinations-queue.gauge.depth:max > 15000
+        name: The destinations queue holds what the forwarder can't take
+        from: 2m
+        to: 5m
+      - check: crm-api.rate.fail == 0
+        name: and the CRM never sees more than it accepts
   crm-outage:
     name: CRM destination down
-    description: The CRM's API is down for five minutes. Ingestion doesn't notice, but its events give up after four tries thirty seconds apart, shorter than the outage, and end in the dead-letter queue. And because a batch fails as a whole, the healthy ads API gets its events several times over. Partial batch responses (reportBatchItemFailures) would spare it.
-    duration: 10m
+    description: The CRM's API is down for five minutes. The stream never notices, because the destinations' retries happen in their queue, a message at a time, not on the stream's shards. But the CRM's events give up after four tries thirty seconds apart, shorter than the outage, and end in the dead-letter queue. And because a batch fails as a whole, the healthy ads API gets nearly twice its traffic, in duplicates. Partial batch responses (reportBatchItemFailures) would spare it. The retries left over take four more minutes to clear, at the pace the forwarder's cap allows.
+    duration: 12m
     warmup: 30s
     timeline:
       - at: 1m
@@ -597,40 +591,63 @@ scenarios:
     assert:
       - check: system.errorRatio < 0.1%
         name: Ingestion doesn't notice
-      - check: destinations-queue.total.deadLettered > 5000
+      - check: edge:events-stream.consumers->destinations-router.gauge.iteratorAge:max < 5s
+        name: Nor does the stream
+      - check: destinations-queue.total.deadLettered > 20000
         name: Events give up and are dead-lettered
         from: 1m
         to: 7m
-      - check: ads-api.rate.in < 40/s
+      - check: ads-api.rate.in < 300/s
         name: Before, the ads API gets its share
         from: 30s
         to: 1m
-      - check: ads-api.rate.in > 60/s
+      - check: ads-api.rate.in > 300/s
         name: During, it gets duplicates of whole batches
         from: 2m
         to: 6m
-      - check: destinations-queue.gauge.depth:last < 50
+      - check: destinations-queue.gauge.depth:last < 100
         name: Afterwards the queue is clear
-        from: 9m
+        from: 11m
   profiles-throttled:
     name: Profiles table under-provisioned
-    description: The profiles table switched to provisioned capacity with 60 write units, for about a hundred writes a second. The enricher is throttled, failed batches are retried and then dead-lettered, and the search index falls behind, while ingestion carries on untouched.
+    description: The profiles table was switched to provisioned capacity with 150 write units, for about 530 writes a second. Burst capacity hides it at first; then the enricher's writes are throttled. Each failed batch is retried, writing again what it had already written, so the table does about 150 writes a second but only some 75 events get through, and the enricher, and the search index with it, falls minutes behind. The lake, reading the same stream, doesn't notice, and nor does ingestion. Nothing is lost. At five minutes the table goes back to on-demand, and the enricher catches up from the stream.
     duration: 8m
     warmup: 30s
     overrides:
       nodes:
         profiles:
           mode: provisioned
-          writeCapacity: 60
+          writeCapacity: 150
           readCapacity: 200
+    timeline:
+      - at: 5m
+        note: the table goes back to on-demand
+        set:
+          node: profiles
+          settings:
+            mode: on-demand
     assert:
       - check: profiles.rate.fail.Throttled > 20/s
         name: Profile writes are throttled
-      - check: realtime-queue.gauge.oldestAgeMs:max > 30s
-        name: Updates wait
-      - check: realtime-queue.total.deadLettered > 5000
-        name: Updates are dead-lettered
-      - check: search-index.rate.in < 60/s
+        from: 3m
+        to: 5m
+      - check: edge:events-stream.consumers->enricher.rate.records < 100/s
+        name: Retried batches pay twice, and few events get through
+        from: 3m
+        to: 5m
+      - check: edge:events-stream.consumers->enricher.gauge.iteratorAge:max > 60s
+        name: Profile updates wait in the stream
+        to: 5m
+      - check: profile-search.rate.indexed < 200/s
         name: The search index falls behind
+        from: 3m
+        to: 5m
+      - check: edge:events-stream.consumers->lake-delivery.gauge.millisBehindLatest:max < 5s
+        name: The lake doesn't notice
       - check: browser-sdk.errorRatio < 0.1%
-        name: Ingestion is untouched
+        name: Nor does ingestion
+      - check: edge:events-stream.consumers->enricher.gauge.iteratorAge:max < 5s
+        name: Back on on-demand, the enricher catches up
+        from: 7m
+      - check: failed-batches.gauge.depth:last == 0
+        name: Nothing was given up

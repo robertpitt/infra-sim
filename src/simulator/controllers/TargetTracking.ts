@@ -11,6 +11,12 @@ export const Config = Schema.Struct({
     label: "Metric",
     help: "What it watches on the target, as the target's metrics name it: a gauge (inflight, depth, concurrent), a rate per second (in, ok, fail), or a percentile such as latency.p95."
   }),
+  source: Setting.text({
+    default: "",
+    placeholder: "the target",
+    label: "Metric of",
+    help: "Another node to read the metric from, by id: the queue whose backlog the target's workers drain (depth per instance, as Application Auto Scaling's backlog-per-instance policy does). Empty: the target's own."
+  }),
   per: Setting.choice(["unit", "total"], {
     default: "unit",
     labels: { unit: "Per unit", total: "In total" },
@@ -135,6 +141,7 @@ export const TargetTracking = Controller.make({
       meter.gaugeUnsafe("current", currentOf)
       meter.gaugeUnsafe("desired", () => last.desired)
 
+      const source = (): string | undefined => fast.settings().source.trim() || undefined
       yield* ctx.watch((stats, t) =>
         Effect.sync(() => {
           const v = read(stats, fast.settings().metric)
@@ -147,7 +154,7 @@ export const TargetTracking = Controller.make({
             times.shift()
             values.shift()
           }
-        })
+        }), source
       )
 
       const decide = (): Effect.Effect<void> =>
@@ -167,7 +174,7 @@ export const TargetTracking = Controller.make({
           if (!seen) {
             if (!warned && values.length > 0) {
               warned = true
-              ctx.log(`${ctx.target} reports no metric called "${c.metric}"; nothing will change until it does`)
+              ctx.log(`${source() ?? ctx.target} reports no metric called "${c.metric}"; nothing will change until it does`)
             }
             return Effect.void
           }

@@ -102,7 +102,8 @@ export interface ProviderInfo {
   readonly id: string
   readonly title: string
   readonly defaultRegion: string
-  readonly regions: ReadonlyArray<{ readonly id: string; readonly name: string }>
+  /** Its regions, each with its availability zones (empty for a place with none). */
+  readonly regions: ReadonlyArray<{ readonly id: string; readonly name: string; readonly zones: ReadonlyArray<string> }>
   /** The account-level quota form for each region (published defaults differ by region). */
   readonly account: Readonly<Record<string, ReadonlyArray<Describe.FieldSpec>>>
 }
@@ -527,7 +528,7 @@ export function make(options: Options = {}) {
           id: p.id,
           title: p.title,
           defaultRegion: p.defaultRegion,
-          regions: p.regions.map((r) => ({ id: r.id, name: r.name })),
+          regions: p.regions.map((r) => ({ id: r.id, name: r.name, zones: r.zones ?? [] })),
           account: Object.fromEntries(p.regions.map((r) => [r.id, Describe.fields(p.account(r.id))]))
         })),
         components: registry.manifests,

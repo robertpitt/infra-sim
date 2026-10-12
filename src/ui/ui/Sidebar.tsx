@@ -1,5 +1,5 @@
 import { examples } from "#examples"
-import { useMemo, useState } from "react"
+import { Fragment, useMemo, useState } from "react"
 import { PALETTE_MIME } from "../canvas/Canvas.tsx"
 import { NODE_W, nodeHeight } from "../canvas/geometry.ts"
 import { GROUP_DEFAULT, isContainer } from "../canvas/groups.ts"
@@ -37,6 +37,19 @@ const addAtCentre = (m: ComponentManifest) => {
   addNode(m.type, { x: Math.round(spot.x), y: Math.round(spot.y) })
 }
 
+/** Past this many components a provider's tiles are grouped by category. */
+const GROUP_ABOVE = 10
+const CATEGORY_ORDER: ReadonlyArray<ComponentManifest["category"]> = ["network", "compute", "messaging", "storage", "traffic", "external", "other"]
+const CATEGORY_LABEL: Record<ComponentManifest["category"], string> = {
+  network: "Network and edge",
+  compute: "Compute",
+  messaging: "Integration and streaming",
+  storage: "Data",
+  traffic: "Traffic",
+  external: "Outside services",
+  other: "Other"
+}
+
 function Picker() {
   const manifests = useStore(catalog, (s) => s.list)
   const providers = useStore(catalog, (s) => s.providers)
@@ -53,11 +66,15 @@ function Picker() {
     const matches = (m: ComponentManifest) =>
       q === "" || [m.title, m.service, m.description, m.provider, m.category].some((t) => t.toLowerCase().includes(q))
     return providers
-      .map((p) => ({
-        provider: p,
+      .map((p) => {
         // Boundaries first, then the rest in the order the provider lists them.
-        items: manifests.filter((m) => m.provider === p.id && matches(m)).sort((a, b) => Number(isContainer(b)) - Number(isContainer(a)))
-      }))
+        const items = manifests.filter((m) => m.provider === p.id && matches(m)).sort((a, b) => Number(isContainer(b)) - Number(isContainer(a)))
+        // A provider with many components is easier to scan by what they do.
+        const groups = items.length <= GROUP_ABOVE
+          ? [{ label: undefined, items }]
+          : CATEGORY_ORDER.map((c) => ({ label: CATEGORY_LABEL[c], items: items.filter((m) => m.category === c) })).filter((g) => g.items.length > 0)
+        return { provider: p, items, groups }
+      })
       .filter((s) => s.items.length > 0)
   }, [manifests, providers, query])
 
@@ -81,11 +98,14 @@ function Picker() {
         </label>
       </header>
       <div className="side-scroll">
-        {sections.map(({ provider, items }) => (
+        {sections.map(({ provider, groups }) => (
           <section key={provider.id} className="picker-group">
             <h4>{provider.title}</h4>
+            {groups.map((group) => (
+            <Fragment key={group.label ?? "all"}>
+            {group.label !== undefined && <h5>{group.label}</h5>}
             <div className="tiles">
-              {items.map((m) => (
+              {group.items.map((m) => (
                 <button
                   key={m.type}
                   className="tile"
@@ -109,6 +129,8 @@ function Picker() {
                 </button>
               ))}
             </div>
+            </Fragment>
+            ))}
           </section>
         ))}
         {sections.length === 0 && <p className="muted small pad">Nothing matches “{query}”.</p>}

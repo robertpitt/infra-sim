@@ -165,7 +165,7 @@ const run = Command.make(
     ),
     fault: Flag.String("fault").pipe(
       Flag.withMetavar("target fault at=time"),
-      Flag.withDescription(`Inject a fault, repeatable: "node:fn Outage at=10s for=20s", "region:aws:us-east-1 Outage at=2m", "edge:web.out->api Slow(250ms) at=1m for=30s". See: infra-sim docs faults`),
+      Flag.withDescription(`Inject a fault, repeatable: "node:fn Outage at=10s for=20s", "region:aws:us-east-1 Outage at=2m", "zone:aws:us-east-1:us-east-1a Outage at=1m", "edge:web.out->api Slow(250ms) at=1m for=30s". See: infra-sim docs faults`),
       Flag.atLeast(0)
     ),
     assert: Flag.String("assert").pipe(
@@ -568,7 +568,7 @@ const docs = Command.make(
     const io = yield* Io
     const topic = undef(o.topic) ?? "cli"
     if (topic === "assertions") io.stdout(`${Scenario.ASSERTION_SYNTAX}\n`)
-    else if (topic === "faults") io.stdout(`${Fault.catalog.map((k) => `${k.tag}  targets: ${k.targets.join(", ")}\n  ${k.help}`).join("\n\n")}\n\nIn a scenario: "Outage", "Slow(250ms)", "Errors(20%)", "Loss(10%)", "Blackhole", or an object { type: Slow, extra: 250ms }.\nTargets: node:<id>, edge:<id>, region:<placement> (region:aws:us-east-1).\n`)
+    else if (topic === "faults") io.stdout(`${Fault.catalog.map((k) => `${k.tag}  targets: ${k.targets.join(", ")}\n  ${k.help}`).join("\n\n")}\n\nIn a scenario: "Outage", "Slow(250ms)", "Errors(20%)", "Loss(10%)", "Blackhole", "Crash(2)" (or "Crash(1 host)"), or an object { type: Slow, extra: 250ms }.\nTargets: node:<id>, edge:<id>, region:<placement> (region:aws:us-east-1), zone:<placement>:<zone> (zone:aws:us-east-1:us-east-1a).\nA zone fault reaches the nodes placed in that zone (their zone: field) and the units fleets run there (EC2 instances, ECS tasks, EKS pods and nodes, common.service with zones).\n`)
     else {
       const file = io.assets("docs/CLI.md")
       if (!io.exists(file)) return yield* new UsageError("the CLI guide (docs/CLI.md) isn't available in this install")

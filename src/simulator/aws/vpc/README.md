@@ -15,7 +15,7 @@ gateway in one zone is a single point of failure for everything routed through i
 | --- | --- | --- |
 | **The VPC box** | | |
 | Sits in a Region, inherits its placement | ✅ | `within: aws.region`; no nesting |
-| Holds only VPC resources | ✅ | Lambda, NAT gateway, VPC endpoint. S3, DynamoDB, SQS, SNS, SES, API Gateway and CloudFront are regional services outside any VPC and are refused |
+| Holds only VPC resources | ✅ | Those in `IN_VPC` (`Vpc.ts`): Lambda, NAT gateway, VPC endpoint, RDS and RDS Proxy, ElastiCache, OpenSearch. S3, DynamoDB, SQS, SNS, SES, API Gateway and CloudFront are regional services outside any VPC and are refused |
 | IPv4 block /16 to /28, address counts | ✅ | `cidrPrefix`; the probe reports addresses and usable addresses |
 | Subnet plan (zones x subnets, size, 5 reserved addresses) | 🟡 | Optional, audit-only: fit in the block, subnets per VPC quota, zones the Region has. No subnet exists as a node and no function is assigned to one |
 | Secondary CIDR blocks, IPv6, route tables, security groups, NACLs, peering, transit gateway | ❌ | Not modelled |
@@ -116,9 +116,11 @@ resource" is raised for every resource in the Region.
 
 ## Behaviour
 
-**Containment.** A VPC sits in a Region box (`within: aws.region`) and accepts Lambda functions, NAT gateways and
-VPC endpoints. Everything else is a regional service with public endpoints, reached from inside a VPC through a NAT
-gateway or an endpoint, and cannot be dropped in. The VPC inherits its Region from the box; so does everything in it.
+**Containment.** A VPC sits in a Region box (`within: aws.region`) and accepts the VPC resources listed in `IN_VPC`:
+Lambda functions, NAT gateways, VPC endpoints, databases (RDS, RDS Proxy), caches (ElastiCache) and search domains
+(OpenSearch). Those last ones may also sit straight in the Region box, for a design that doesn't draw the VPC. Everything
+else is a regional service with public endpoints, reached from inside a VPC through a NAT gateway or an endpoint, and
+cannot be dropped in. The VPC inherits its Region from the box; so does everything in it.
 
 **Address plan.** A block of prefix `p` holds `2^(32-p)` addresses. Every subnet loses five (the first four and the
 last), so a /24 subnet offers 251 and a /28 offers 11. With the subnet plan on, equal-size subnets pack a
@@ -177,7 +179,7 @@ They are warnings, not errors: the design still runs, the numbers AWS would refu
 
 ## Connections
 
-- **VPC**: no ports. Place Lambda functions, NAT gateways and VPC endpoints in it. A function's Region comes from the box.
+- **VPC**: no ports. Place its resources in it (see Containment). A resource's Region comes from the box.
 - **NAT gateway**: one input (call it), one output `out` ("Destinations": the external things it reaches). The
   output's edge settings are the usual ones (network latency, timeout, retry); each edge is one destination for the
   connection limit.

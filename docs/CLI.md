@@ -190,9 +190,10 @@ scenario file to the design ("Add from file…") if everything it names is there
 
 ### Faults
 
-`infra-sim docs faults` lists them. Written as `Outage`, `Blackhole`, `Slow(250ms)`, `Errors(20%)`, `Loss(10%)`, or as an object
+`infra-sim docs faults` lists them. Written as `Outage`, `Blackhole`, `Slow(250ms)`, `Errors(20%)`, `Loss(10%)`, `Crash(2)` (two of a fleet's units; `Crash(1 host)` for a host under them), or as an object
 `{ type: Slow, extra: 250ms }`. Targets: `node:<id>`, `edge:<id>`, `region:<placement>` (every node in it, e.g.
-`region:aws:us-east-1`). A fault without `for` lasts until cleared.
+`region:aws:us-east-1`), `zone:<placement>:<zone>` (every node placed in that zone and every fleet unit running there, e.g.
+`zone:aws:us-east-1:us-east-1a`). A fault without `for` lasts until cleared.
 
 ### Assertions
 

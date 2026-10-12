@@ -17,6 +17,8 @@ export const CloudFront = Aws.component({
     "Content delivery network. Caches objects at edge locations with a TTL, collapses simultaneous misses, adds regional cache and Origin Shield tiers, fails over between origins, and turns origin failures into 502, 503 and 504.",
   docs: DOCS,
   category: "network",
+  // Served from edge locations everywhere: losing a region takes its origins down, not the distribution.
+  global: true,
   icon: "cdn",
   accent: "#8c4fff",
   limits: [

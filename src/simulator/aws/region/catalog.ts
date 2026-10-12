@@ -1,4 +1,4 @@
-import type { Region as ProviderRegion } from "../../Provider.ts"
+import { type Region as ProviderRegion, zoneNames } from "../../Provider.ts"
 
 /** Where AWS publishes the list of Regions, their Availability Zones and their opt-in status. */
 export const REGIONS_SOURCE = "https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html"
@@ -9,7 +9,10 @@ export const REGIONS_SOURCE = "https://docs.aws.amazon.com/global-infrastructure
  * approximate location of the Region's main city, not of any data centre (AWS does not publish those).
  */
 export interface RegionInfo extends ProviderRegion {
-  /** Availability Zones, as the AWS table lists them. Zones are not modelled; the number bounds what a VPC may ask for. */
+  /**
+   * Availability Zones, as the AWS table lists them. The provider names them `us-east-1a`, `us-east-1b`... (a Region's code
+   * and a letter: https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-availability-zones.html).
+   */
   readonly azs: number
   /** True when the Region is disabled by default and an account has to enable it first (Regions launched after 20 March 2019). */
   readonly optIn: boolean
@@ -62,5 +65,9 @@ export const catalog: ReadonlyArray<RegionInfo> = [
 /** The catalog entry for a Region id, if AWS has such a Region. */
 export const infoOf = (id: string): RegionInfo | undefined => catalog.find((region) => region.id === id)
 
-/** The Regions as the provider wants them: id, name and coordinates. */
-export const regions: ReadonlyArray<ProviderRegion> = catalog.map(({ id, name, lat, lon }) => ({ id, name, lat, lon }))
+/**
+ * The Regions as the provider wants them: id, name, coordinates and zones. Zone letters are per account in AWS's oldest
+ * Regions (your `us-east-1a` may be another account's `us-east-1c`), so a name says which of a design's zones, not which
+ * building.
+ */
+export const regions: ReadonlyArray<ProviderRegion> = catalog.map(({ id, name, lat, lon, azs }) => ({ id, name, lat, lon, zones: zoneNames(id, azs) }))
