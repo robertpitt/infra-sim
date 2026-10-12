@@ -161,6 +161,16 @@ Published limits are modelled in three ways. Each service's README lists its num
 
 A provider can also `audit` a design against its account's quotas: reservations that add up to more than Lambda allows, provisioned DynamoDB capacity over the account total. Findings are diagnostics.
 
+### Prices
+
+What things cost is data, like limits are, but it changes far more often, so it lives outside the code: `pricing/aws.json`,
+a catalog of AWS's on-demand prices by service, region and dimension (`lambda` / `eu-west-1` / `duration/arm64`), with
+monthly tiers and free allowances, stamped with the AWS price list version each service came from. `tools/pricing/`
+generates it from AWS's public Price List bulk files (`npm run pricing`), through one small mapping per service from
+AWS's usage types to our dimensions; a price change is a regenerated file, not a code change. `Pricing.ts` reads it:
+`price(catalog, service, region, dimension)` and `cost(price, quantity, { used })` through the tiers. See `pricing/README.md`.
+Nothing meters cost yet: that is the next step (usage per component and edge, priced and projected to a month).
+
 ### Containers
 
 A component can be a **container**: it draws a boundary round other nodes instead of handling traffic. A node names its container as `parent`. `aws.region` decides the region of everything inside it (so dragging a Lambda into the Frankfurt box is how you put it in Frankfurt), and its settings are the region's account quotas; `aws.vpc` sits inside a region and holds the functions attached to it. `Design.resolve` checks that a node is accepted by its container, that a component that must sit inside another (`within`) does, and that nothing is inside itself, and reports `region-mismatch` if a node's own region disagrees with its box. Containers have a `size` in canvas units and take no part in the traffic graph (they are never sources, never "unreachable", and `Layout` skips them).

@@ -1,0 +1,9 @@
+{
+  // The generators and checks in tools/ that are TypeScript (the price catalog's generator), with Node's types.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2023"],
+    "types": ["node"]
+  },
+  "include": ["tools/pricing"]
+}

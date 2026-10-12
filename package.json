@@ -25,14 +25,15 @@
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p tsconfig.json && vite build && cp -R schema dist/schema",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.simulator.json && tsc -p tsconfig.cli.json && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.simulator.json && tsc -p tsconfig.cli.json && tsc -p tsconfig.json && tsc -p tsconfig.tools.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "bench": "tsx tools/bench.ts",
     "profile": "tools/prof.sh",
     "cli": "tsx src/cli/main.ts",
     "build:cli": "node tools/build-cli.mjs",
-    "schema": "tsx tools/schema.ts"
+    "schema": "tsx tools/schema.ts",
+    "pricing": "tsx tools/pricing/main.ts"
   },
   "dependencies": {
     "@effect/platform-node": "^4.0.3",
