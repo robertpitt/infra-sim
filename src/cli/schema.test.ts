@@ -47,7 +47,7 @@ describe("DesignSchema", () => {
     expect(errors({ ...base, scenarios: { s: ok } })).toEqual([])
     expect(errors({ ...base, scenarios: { s: { ...ok, timline: [] } } }).join(" ")).toMatch(/additional properties/)
     expect(errors({ ...base, scenarios: { s: { timeline: [{ at: "1m", inject: { target: "node:api", fault: "Melt" } }] } } }).length).toBeGreaterThan(0)
-    expect(validateScenario({ version: 1, design: "../examples/01-orders.yaml", ...ok })).toBe(true)
+    expect(validateScenario({ version: 1, design: "../examples/03-orders.yaml", ...ok })).toBe(true)
     expect(validateScenario({ version: 1, design: { version: 1, nodes: {}, edges: {} }, ...ok })).toBe(true)
   })
 

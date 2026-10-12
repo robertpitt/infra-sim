@@ -1,0 +1,387 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Retry storm
+description: |-
+  A checkout where every layer retries, and the payment provider pushes back. When payments slow down, gateway timeouts, orphaned Lambda work and retries stacked three deep turn sixty shoppers a second into nearly a thousand calls a second on the provider, and not one order goes through.
+
+  How it is wired: web shoppers and a mobile app call a REST API in front of a checkout Lambda. One call after another, the function reads the cart from DynamoDB, screens the order with a fraud API, reserves stock, takes the payment through an internal payments service, writes the payments ledger and publishes Order confirmed. The payments service calls the external payment provider, which allows 150 requests a second and answers 429 beyond that. Confirmations go through a queue, with a dead-letter queue, to a function that emails the customer with SES.
+
+  Each layer's timeout and retries look sensible on their own: the web app tries 3 times, backing off from 1 s; the mobile app 4 times, every half second; the gateway waits 5 s; the function runs for up to 10 s and calls the payments service with a 3 s timeout, up to 3 times; the payments service calls the provider with a 2 s timeout, up to 3 times. Together one tap can become 4 × 3 × 3 = 36 calls on the provider. And a caller that times out doesn't stop the work it started: the function keeps running after the gateway's 504, and the payments service keeps retrying after the function has given up on it.
+
+  What the simulator cannot show: idempotency keys, which make retrying a payment safe (here every call the provider completes counts, whether or not anyone is still waiting for its answer); a payments service whose threads wait on the provider (its workers are free as soon as its own part is done, so it never runs out of them); circuit breakers, retry budgets and deadlines passed down the call chain. The tamed scenario fixes the storm with timeouts and attempts alone.
+seed: 21
+accounts:
+  aws:us-east-1:
+    sesSendingRate: 200
+    sesDailyQuota: 20000000
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 352, y: -78 }
+    size: { w: 1892, h: 948 }
+  web-shoppers:
+    type: common.client
+    name: Web shoppers
+    region: us-east
+    settings:
+      rps: 25
+      payload: 2
+    position: { x: 0, y: 310 }
+  mobile-app:
+    type: common.client
+    name: Mobile app
+    region: us-east
+    settings:
+      rps: 35
+      payload: 2
+    position: { x: 0, y: 440 }
+  checkout-api:
+    type: aws.apigateway
+    name: Checkout API
+    parent: aws-us-east-1
+    settings:
+      apiType: rest
+      integrationTimeout: 5 seconds
+    position: { x: 380, y: 330 }
+  checkout:
+    type: aws.lambda
+    name: Checkout
+    parent: aws-us-east-1
+    settings:
+      memory: 1024
+      timeout: 10 seconds
+      duration: { mean: 40 }
+    position: { x: 700, y: 318 }
+  carts:
+    type: aws.dynamodb
+    name: Carts table
+    parent: aws-us-east-1
+    settings:
+      mode: on-demand
+    position: { x: 1020, y: 182 }
+  inventory:
+    type: aws.dynamodb
+    name: Stock reservations
+    parent: aws-us-east-1
+    settings:
+      mode: on-demand
+    position: { x: 1020, y: 412 }
+  ledger:
+    type: aws.dynamodb
+    name: Payments ledger
+    parent: aws-us-east-1
+    settings:
+      mode: on-demand
+    position: { x: 1020, y: 642 }
+  order-confirmed:
+    type: aws.sns
+    name: Order confirmed
+    parent: aws-us-east-1
+    position: { x: 1020, y: 0 }
+  confirmations-queue:
+    type: aws.sqs
+    name: Confirmations queue
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 30 seconds
+      maxReceives: 4
+    position: { x: 1340, y: -12 }
+  confirmations-dlq:
+    type: aws.sqs
+    name: Confirmations DLQ
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 1660, y: 194 }
+  send-confirmation:
+    type: aws.lambda
+    name: Send confirmation
+    parent: aws-us-east-1
+    settings:
+      memory: 256
+      timeout: 10 seconds
+      duration: { mean: 30 }
+    position: { x: 1660, y: -12 }
+  confirmation-email:
+    type: aws.ses
+    name: Confirmation email
+    parent: aws-us-east-1
+    position: { x: 1980, y: 28 }
+  fraud-api:
+    type: common.http-endpoint
+    name: Fraud screening API
+    region: us-east
+    settings:
+      latency: { mean: 80, cv: 0.5 }
+      rateLimit: 1000
+    position: { x: 1020, y: 930 }
+  payments-service:
+    type: common.service
+    name: Payments service
+    region: us-east
+    settings:
+      replicas: 4
+      concurrency: 25
+      serviceTime: { mean: 25, cv: 0.5 }
+      queueLimit: 200
+    position: { x: 1020, y: 1056 }
+  payment-provider:
+    type: common.http-endpoint
+    name: Payment provider
+    region: us-east
+    settings:
+      latency: { mean: 180, cv: 0.4 }
+      rateLimit: 150
+      maxConcurrency: 400
+    position: { x: 1340, y: 1056 }
+edges:
+  web-shoppers.out->checkout-api:
+    from: { node: web-shoppers }
+    to: checkout-api
+    settings:
+      timeout: 10 seconds
+      retry: { maxAttempts: 3, backoff: 1 second }
+  mobile-app.out->checkout-api:
+    from: { node: mobile-app }
+    to: checkout-api
+    settings:
+      timeout: 8 seconds
+      retry: { maxAttempts: 4, backoff: 500 millis, backoffFactor: 1, jitter: false }
+  checkout-api.out->checkout:
+    from: { node: checkout-api }
+    to: checkout
+  checkout.out->carts:
+    from: { node: checkout }
+    to: carts
+    settings:
+      request: { operation: read }
+      timeout: 1 second
+      retry: { maxAttempts: 3, backoff: 100 millis }
+  checkout.out->fraud-api:
+    from: { node: checkout }
+    to: fraud-api
+    settings:
+      timeout: 1 second
+      retry: { maxAttempts: 2, backoff: 100 millis }
+  checkout.out->inventory:
+    from: { node: checkout }
+    to: inventory
+    settings:
+      timeout: 1 second
+      retry: { maxAttempts: 3, backoff: 100 millis }
+  checkout.out->payments-service:
+    from: { node: checkout }
+    to: payments-service
+    settings:
+      timeout: 3 seconds
+      retry: { maxAttempts: 3, backoff: 100 millis }
+  checkout.out->ledger:
+    from: { node: checkout }
+    to: ledger
+    settings:
+      timeout: 1 second
+      retry: { maxAttempts: 3, backoff: 100 millis }
+  checkout.out->order-confirmed:
+    from: { node: checkout }
+    to: order-confirmed
+    settings:
+      timeout: 1 second
+      retry: { maxAttempts: 3, backoff: 100 millis }
+  payments-service.out->payment-provider:
+    from: { node: payments-service }
+    to: payment-provider
+    settings:
+      timeout: 2 seconds
+      retry: { maxAttempts: 3, backoff: 200 millis }
+  order-confirmed.out->confirmations-queue:
+    from: { node: order-confirmed }
+    to: confirmations-queue
+    settings:
+      rawMessageDelivery: true
+  confirmations-queue.deliver->send-confirmation:
+    from: { node: confirmations-queue, port: deliver }
+    to: send-confirmation
+    settings:
+      batchSize: 10
+      maxConcurrency: 10
+  confirmations-queue.dlq->confirmations-dlq:
+    from: { node: confirmations-queue, port: dlq }
+    to: confirmations-dlq
+  send-confirmation.out->confirmation-email:
+    from: { node: send-confirmation }
+    to: confirmation-email
+scenarios:
+  slow-payments:
+    name: Payments slow down
+    description: The payment provider takes 3 s longer for a minute. Every payment now outlasts the payments service's 2 s timeout, every layer retries what timed out, and the load multiplies on the way down. Sixty shoppers a second become over 200 requests a second at the gateway, over 300 at the payments service and nearly a thousand at the provider. Checkouts the gateway has given up on keep running and fill the region's 1,000 concurrent Lambda executions. The provider completes as many payments as its rate limit allows, but nobody is waiting for the answers any more, and not one order is recorded.
+    duration: 4m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: payments slow down by 3 s
+        inject:
+          target: node:payment-provider
+          fault: Slow(3s)
+          for: 1m
+      - at: 2m
+        note: payments are fast again
+    assert:
+      - check: payment-provider.rate.in < 70/s
+        name: Before, the provider gets what users send
+        from: 30s
+        to: 1m
+      - check: checkout-api.rate.in > 180/s
+        name: The apps' retries more than triple the requests at the gateway
+        from: 1m15s
+        to: 2m
+      - check: checkout.gauge.concurrent:max >= 950
+        name: Abandoned checkouts fill the region's Lambda concurrency
+        from: 1m15s
+        to: 2m
+      - check: payments-service.rate.in > 250/s
+        name: The checkout's retries reach the payments service at five times what users send
+        from: 1m15s
+        to: 2m
+      - check: payment-provider.rate.in > 750/s
+        name: The payments service's retries reach the provider at fifteen times
+        from: 1m15s
+        to: 2m
+      - check: payment-provider.rate.ok > 120/s
+        name: The provider completes payments nobody is waiting for
+        from: 1m15s
+        to: 2m
+      - check: ledger.rate.in < 1/s
+        name: Not one order is recorded
+        from: 1m15s
+        to: 2m
+      - check: system.errorRatio > 95%
+        name: Users see the slowdown as failures
+        from: 1m15s
+        to: 2m
+      - check: system.errorRatio < 1%
+        name: It recovers once payments are fast again
+        from: 3m
+  retries-tamed:
+    name: Same slowdown, retries tamed
+    description: The same 3 s slowdown, with timeouts that nest and retries in fewer places. Each caller waits longer than what it calls can take, retries included (the apps 15 s, the gateway 12 s, the function 10 s, its call to the payments service 9 s, each try at the provider 4 s), so no work is abandoned while it is still going. The checkout no longer retries the payments service, the payments service tries the provider twice, and the apps try twice, with jittered backoff. Checkouts take 3 s longer, but they succeed, the provider gets just what users send, and the checkout needs a quarter of the concurrency. Even a slowdown past the 4 s timeout would reach the provider at most four times over, not 36.
+    duration: 4m
+    warmup: 30s
+    overrides:
+      nodes:
+        checkout-api:
+          integrationTimeout: 12 seconds
+      edges:
+        web-shoppers.out->checkout-api:
+          timeout: 15 seconds
+          retry: { maxAttempts: 2, backoff: 1 second }
+        mobile-app.out->checkout-api:
+          timeout: 15 seconds
+          retry: { maxAttempts: 2, backoff: 1 second, backoffFactor: 2, jitter: true }
+        checkout.out->payments-service:
+          timeout: 9 seconds
+          retry: { maxAttempts: 1 }
+        payments-service.out->payment-provider:
+          timeout: 4 seconds
+          retry: { maxAttempts: 2, backoff: 200 millis }
+    timeline:
+      - at: 1m
+        note: payments slow down by 3 s
+        inject:
+          target: node:payment-provider
+          fault: Slow(3s)
+          for: 1m
+      - at: 2m
+        note: payments are fast again
+    assert:
+      - check: payment-provider.rate.in < 70/s
+        name: The provider gets what users send, slowdown or not
+        from: 1m15s
+        to: 2m
+      - check: system.latency.p50 > 3s
+        name: Checkouts take 3 s longer
+        from: 1m15s
+        to: 2m
+      - check: system.errorRatio < 1%
+        name: But they succeed
+        from: 1m15s
+        to: 2m
+      - check: ledger.rate.in > 55/s
+        name: Every order is recorded
+        from: 1m15s
+        to: 2m
+      - check: checkout.gauge.concurrent:max < 400
+        name: Nothing is abandoned, so the checkout needs a quarter of the concurrency
+        from: 1m15s
+        to: 2m
+  flash-sale:
+    name: Flash sale
+    description: A push notification brings five times the app traffic, 200 shoppers a second, for half a minute. The provider's rate limit of 150 a second pushes back with 429s, which every layer retries within a second, so the provider is asked some 2,500 times a second while orders stay capped at its limit, and one shopper in eight sees an error.
+    duration: 3m
+    warmup: 30s
+    timeline:
+      - at: 40s
+        note: a push notification announces a flash sale
+        set:
+          node: mobile-app
+          settings:
+            rps: 175
+      - at: 1m10s
+        note: the rush is over
+        set:
+          node: mobile-app
+          settings:
+            rps: 35
+    assert:
+      - check: payment-provider.rate.in > 1500/s
+        name: Retries turn 200 shoppers a second into over 1,500 calls a second on the provider
+        from: 40s
+        to: 1m10s
+      - check: ledger.rate.in < 165/s
+        name: Orders stay capped at the provider's rate limit
+        from: 40s
+        to: 1m10s
+      - check: system.errorRatio > 5%
+        name: Shoppers see errors
+        from: 40s
+        to: 1m10s
+      - check: system.errorRatio < 1%
+        name: Calm again after the rush
+        from: 1m30s
+  provider-errors:
+    name: Provider errors
+    description: Where retries earn their keep. The provider fails a quarter of payments for a minute, at random, without slowing down. The payments service's retries hide most of the failures, the checkout's retries hide the rest, and no shopper sees one. It costs a third more calls on the provider, a fair price for failures that are random and brief. Against a provider that is slow or overloaded, the same retries are the storm in the other scenarios.
+    duration: 3m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the provider fails a quarter of payments
+        inject:
+          target: node:payment-provider
+          fault: Errors(25%)
+          for: 1m
+      - at: 2m
+        note: the provider is healthy again
+    assert:
+      - check: payment-provider.errorRatio > 20%
+        name: The provider fails a quarter of payments
+        from: 1m
+        to: 2m
+      - check: payments-service.errorRatio < 3%
+        name: The payments service's retries hide most of them
+        from: 1m
+        to: 2m
+      - check: system.errorRatio < 0.5%
+        name: The checkout's retries hide the rest
+        from: 1m
+        to: 2m
+      - check: ledger.rate.in > 55/s
+        name: Every order is recorded
+        from: 1m
+        to: 2m
+      - check: payment-provider.rate.in > 70/s
+        name: At the cost of a third more calls on the provider
+        from: 1m
+        to: 2m

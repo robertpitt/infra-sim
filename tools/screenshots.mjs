@@ -74,7 +74,6 @@ const shot = async (page, name) => {
   await speed(page, 6) // 10x
   await pauseAt(page, 75)
   await page.keyboard.press("f")
-  await page.keyboard.press("-")
   await page.waitForTimeout(300)
   const left = await page.evaluate(() => Math.min(...[...document.querySelectorAll(".react-flow__node")].map((n) => n.getBoundingClientRect().left)))
   await page.mouse.move(700, 400)
@@ -94,13 +93,12 @@ const shot = async (page, name) => {
   await page.waitForSelector(".monaco-editor .view-lines", { timeout: 30000 })
   await page.waitForTimeout(1500)
   await page.locator(".monaco-editor textarea").focus()
-  // The Ingest Lambda's settings: after "memory: 512", start a new setting and ask what can go there.
-  // Scrolled to the top, Monaco renders lines in order from the first, so the index is the line number less one. (It
-  // draws spaces as non-breaking ones.)
-  const line = await page.evaluate(() => [...document.querySelectorAll(".monaco-editor .view-line")].findIndex((l) => l.textContent?.replace(/\u00a0/g, " ").trim() === "memory: 512"))
-  await page.keyboard.press("Control+g")
-  await page.keyboard.type(String(line + 1))
+  // The Collect Lambda's settings (the event ingestion platform opens first): find its "memory: 1024", then start a new
+  // setting after it and ask what can go there.
+  await page.keyboard.press("ControlOrMeta+f")
+  await page.keyboard.type("memory: 1024")
   await page.keyboard.press("Enter")
+  await page.keyboard.press("Escape")
   await page.waitForTimeout(400)
   await page.keyboard.press("End")
   await page.keyboard.press("Enter")

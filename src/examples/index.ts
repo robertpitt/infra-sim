@@ -8,7 +8,7 @@ import * as Scenario from "../simulator/Scenario.ts"
  * `Design.Doc` describes, so an example is just a design you can open, read and edit like any other. Bundled as text at
  * build time; parsed and checked against the `Doc` schema when asked for.
  *
- * A file's name sets its order and id: `03-multi-region.yaml` is the example `multi-region`, third in the list. Its
+ * A file's name sets its order and id: `05-multi-region.yaml` is the example `multi-region`, fifth in the list. Its
  * `name` is the title, and the first paragraph of its `description` is the blurb.
  */
 export interface Example {
@@ -50,7 +50,7 @@ export const examples: ReadonlyArray<Example> = Object.entries(files)
 /** Read a scenario from text (YAML or JSON). Throws with the reasons if it isn't one. */
 export const parseScenario = (text: string): Scenario.Scenario => Schema.decodeUnknownSync(Scenario.Scenario)(YAML.parse(text))
 
-/** The example a scenario's `design: ../01-orders.yaml` points at, matched by file name. */
+/** The example a scenario's `design: ../03-orders.yaml` points at, matched by file name. */
 export const designOf = (scenario: Scenario.Scenario): Example | undefined => {
   if (typeof scenario.design !== "string") return undefined
   const file = scenario.design.split(/[\\/]/).pop()

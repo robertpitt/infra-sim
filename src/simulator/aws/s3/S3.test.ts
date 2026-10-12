@@ -2,6 +2,7 @@ import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Builder from "../../Builder.ts"
 import { dist, frames, mean, sim } from "../../components/testing.ts"
+import type * as Simulation from "../../Simulation.ts"
 
 const READ = { request: { operation: "read" } }
 
@@ -23,6 +24,16 @@ const bucket = (s: Shape = {}) => {
   if (s.account !== undefined) b.account("aws:us-east-1", s.account)
   return b.build()
 }
+
+/** The client sends `rps` from `from` until `to`, then `after`, as a scenario's timeline would. The frames up to `to`. */
+const burst = (s: Simulation.Service, rps: number, from: number, to: number, after: number) =>
+  Effect.gen(function*() {
+    const before = yield* s.advanceTo(from)
+    yield* s.configureNode("web", { arrival: "constant", rps })
+    const during = yield* s.advanceTo(to)
+    yield* s.configureNode("web", { arrival: "constant", rps: after })
+    return [...before, ...during]
+  })
 
 /** Rates of the bucket's counters, averaged over the windows ending after `from`. */
 const rate = (all: Awaited<ReturnType<typeof frames>>, name: string, from = 5_000) => mean(all, "nodes", "bucket", "rates", name, from)
@@ -111,12 +122,10 @@ describe("aws.s3: gradual scale-up of a hot prefix", () => {
   })
 
   it("a brief spike does not count as sustained pressure", async () => {
-    const run = bucket({
-      load: { rps: 2_000, spike: { multiplier: 3, start: "5 seconds", duration: "2 seconds" } },
-      bucket: { prefixScaling: { enabled: true, splitAfter: "5 seconds", maxSplits: 3 } }
-    })
+    const run = bucket({ load: { rps: 2_000 }, bucket: { prefixScaling: { enabled: true, splitAfter: "5 seconds", maxSplits: 3 } } })
     await sim(run, (s) =>
       Effect.gen(function*() {
+        yield* burst(s, 6_000, 5_000, 7_000, 2_000)
         yield* s.advanceTo(30_000)
         const state = (yield* s.probe("bucket")).state as { scaled: { prefixes: number } }
         expect(state.scaled.prefixes).toBe(0)
@@ -456,9 +465,14 @@ describe("aws.s3: probe state", () => {
 describe("aws.s3: failures a client sees", () => {
   it("a throttled request is Throttled (503), which the edge's retry policy retries", async () => {
     // A 3-second spike to 5,000 a second on a 3,500 a second prefix.
-    const load = { rps: 2_500, spike: { multiplier: 2, start: "5 seconds", duration: "3 seconds" } }
-    const plain = await frames(bucket({ load }), 20_000)
-    const retried = await frames(bucket({ load, edge: { retry: { maxAttempts: 6, backoff: 200, jitter: true } } }), 20_000)
+    const run = (doc: ReturnType<typeof bucket>) =>
+      sim(doc, (s) =>
+        Effect.gen(function*() {
+          const during = yield* burst(s, 5_000, 5_000, 8_000, 2_500)
+          return [...during, ...(yield* s.advanceTo(20_000))]
+        }))
+    const plain = await run(bucket({ load: { rps: 2_500 } }))
+    const retried = await run(bucket({ load: { rps: 2_500 }, edge: { retry: { maxAttempts: 6, backoff: 200, jitter: true } } }))
     const failed = (all: Awaited<ReturnType<typeof frames>>) => mean(all, "nodes", "web", "rates", "fail", 0)
     expect(mean(plain, "nodes", "web", "rates", "fail.Throttled", 0)).toBeGreaterThan(0)
     expect(failed(retried)).toBeLessThan(failed(plain) / 3)

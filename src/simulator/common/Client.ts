@@ -4,7 +4,7 @@ import * as Edge from "../Edge.ts"
 import { type CallFailure, failureCounter, type Message } from "../Message.ts"
 import * as Setting from "../Setting.ts"
 
-/** Longest the generator naps before re-reading its settings, so edits and spikes take effect promptly. */
+/** Longest the generator naps before re-reading its settings, so edits (a scenario changing the rate) take effect promptly. */
 const MAX_NAP = Duration.millis(500)
 
 const Config = Schema.Struct({
@@ -20,15 +20,7 @@ const Config = Schema.Struct({
     help: "Fraction of requests that use the same partition key. Stores and streams partition by key, so a hot key can overload one partition while the rest sit idle."
   }),
   messageGroups: Setting.int({ default: 0, min: 0, max: 100_000, label: "FIFO message groups", help: "Spread requests across this many message groups (0 for none). FIFO queues process one message per group at a time." }),
-  invocation: Setting.choice(["sync", "async"], { default: "sync", help: "How requests invoke what they call. Lambda queues async invocations and retries them; sync ones are answered or throttled at once." }),
-  spike: Setting.group(
-    {
-      multiplier: Setting.number({ default: 1, min: 0, max: 1000, step: 0.5, help: "Rate is multiplied by this during the spike. 1 means no spike." }),
-      start: Setting.duration({ default: "30 seconds", min: 0, max: "1 day", label: "Starts at" }),
-      duration: Setting.duration({ default: "30 seconds", min: 0, max: "1 day", label: "Lasts" })
-    },
-    { label: "Traffic spike" }
-  )
+  invocation: Setting.choice(["sync", "async"], { default: "sync", help: "How requests invoke what they call. Lambda queues async invocations and retries them; sync ones are answered or throttled at once." })
 })
 
 export const Client = Component.make({
@@ -57,12 +49,6 @@ export const Client = Component.make({
       let sent = 0
       let inflight = 0
       node.meter.gaugeUnsafe("inflight", () => inflight)
-
-      const rateAt = (c: typeof Config.Type, t: number): number => {
-        const spiking = c.spike.multiplier !== 1 && t >= Duration.toMillis(c.spike.start) &&
-          t < Duration.toMillis(c.spike.start) + Duration.toMillis(c.spike.duration)
-        return c.rps * (spiking ? c.spike.multiplier : 1)
-      }
 
       const done = (message: Message) => (failure: CallFailure | undefined) => {
         inflight--
@@ -104,8 +90,7 @@ export const Client = Component.make({
       let last = fast.now()
       const arrive = (due: number): void => {
         // If we fell behind, don't try to catch up with a burst.
-        const c = fast.settings()
-        const rate = rateAt(c, fast.now())
+        const rate = fast.settings().rps
         last = rate > 0 ? Math.max(due, fast.now() - 1000 / rate) : fast.now()
         emit()
         step()
@@ -114,7 +99,7 @@ export const Client = Component.make({
       const step = (): void => {
         const t = fast.now()
         const c = fast.settings()
-        const rate = rateAt(c, t)
+        const rate = c.rps
         if (!(rate > 0)) {
           last = t + 100
           fast.after(100, nap, undefined)
@@ -135,7 +120,7 @@ export const Client = Component.make({
       fast.after(0, nap, undefined)
 
       return {
-        probe: Effect.sync(() => ({ rate: rateAt(fast.settings(), fast.now()), sent, inflight }))
+        probe: Effect.sync(() => ({ rate: fast.settings().rps, sent, inflight }))
       }
     })
 })

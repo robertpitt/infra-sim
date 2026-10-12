@@ -1,4 +1,4 @@
-import { examples } from "#examples"
+import { type Example, examples } from "#examples"
 import { Design, type Scenario } from "#simulator"
 import type { Doc, Position } from "./types.ts"
 import { createStore } from "../lib/store.ts"
@@ -14,25 +14,50 @@ export interface DocState {
   readonly future: ReadonlyArray<Doc>
   /** Bumped when the whole design is replaced, so the simulation restarts even if the structure is identical. */
   readonly epoch: number
+  /** The example that was opened, and the design it opened as. While `design` is still that one, nothing was edited. */
+  readonly opened: { readonly example: string; readonly design: Doc } | undefined
 }
 
-// v2: designs saved by the earlier engine used different setting names.
-const STORAGE_KEY = "sim:design:v2"
+// v3 remembers an example that hasn't been edited by its id, so it opens as the example is now, not as it was when
+// first seen. A design that has been edited or imported is remembered whole.
+const STORAGE_KEY = "sim:design:v3"
+// v2 remembered every design whole, edited or not, so returning visitors kept whichever example they last had open.
+const LEGACY_KEY = "sim:design:v2"
+/** The examples' names in v2's time. A v2 design with one of them is taken to be that example, unedited, and dropped. */
+const LEGACY_EXAMPLES = new Set(["Order pipeline", "Retry storm", "Multi-region", "Fan-out", "POS Hub", "Autoscaled cluster", "Blank canvas"])
 const HISTORY_LIMIT = 100
 
-const loadSaved = (): Doc | undefined => {
+/** What someone sees on their first visit: the largest example, so the first impression is a whole system at work. */
+const FIRST_EXAMPLE = "ingestion"
+
+type Saved = { readonly example: string } | { readonly design: unknown }
+
+const fromStorage = (): Pick<DocState, "design" | "opened"> | undefined => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw === null) return undefined
-    const parsed = Design.parse(JSON.parse(raw))
-    return parsed.ok ? parsed.doc : undefined
+    if (raw !== null) {
+      const saved = JSON.parse(raw) as Saved
+      if ("example" in saved) return opening(examples.find((e) => e.id === saved.example))
+      const parsed = Design.parse(saved.design)
+      return parsed.ok ? { design: parsed.doc, opened: undefined } : undefined
+    }
+    const legacy = localStorage.getItem(LEGACY_KEY)
+    if (legacy === null) return undefined
+    const parsed = Design.parse(JSON.parse(legacy))
+    return parsed.ok && !LEGACY_EXAMPLES.has(parsed.doc.name ?? "") ? { design: parsed.doc, opened: undefined } : undefined
   } catch {
     return undefined
   }
 }
 
+const opening = (example: Example | undefined): Pick<DocState, "design" | "opened"> | undefined => {
+  if (example === undefined) return undefined
+  const design = example.design()
+  return { design, opened: { example: example.id, design } }
+}
+
 export const doc = createStore<DocState>({
-  design: loadSaved() ?? examples[0]!.design(),
+  ...(fromStorage() ?? opening(examples.find((e) => e.id === FIRST_EXAMPLE) ?? examples[0])!),
   selection: undefined,
   past: [],
   future: [],
@@ -40,8 +65,11 @@ export const doc = createStore<DocState>({
 })
 
 const save = () => {
+  const { design, opened } = doc.get()
+  const saved: Saved = opened !== undefined && opened.design === design ? { example: opened.example } : { design }
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(doc.get().design))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(saved))
+    localStorage.removeItem(LEGACY_KEY)
   } catch {
     // Storage may be full or blocked; the design simply isn't remembered.
   }
@@ -105,10 +133,10 @@ export const redo = (): void =>
     return { ...s, design: next, selection: valid(next, s.selection), past: [...s.past, s.design], future: s.future.slice(1) }
   })
 
-/** Replace the whole design (examples, import). Clears history and selection. */
-export const replaceDesign = (design: Doc): void => {
+/** Replace the whole design (examples, import). Clears history and selection. `example` names the example it is. */
+export const replaceDesign = (design: Doc, example?: string): void => {
   lastKey = undefined
-  doc.set((s) => ({ design, selection: undefined, past: [], future: [], epoch: s.epoch + 1 }))
+  doc.set((s) => ({ design, selection: undefined, past: [], future: [], epoch: s.epoch + 1, opened: example === undefined ? undefined : { example, design } }))
 }
 
 const uniqueName = (design: Doc, base: string): string => {

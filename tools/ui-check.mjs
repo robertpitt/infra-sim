@@ -20,10 +20,12 @@ const check = (name, ok, detail = "") => {
   if (!ok) failed++
 }
 const count = (sel) => page.locator(sel).count()
-const saved = async () => {
+/** What the app remembers: `{ example }` for an example as it opened, `{ design }` once it is edited. */
+const stored = async () => {
   await page.waitForTimeout(600)
-  return page.evaluate(() => JSON.parse(localStorage.getItem("sim:design:v2")))
+  return page.evaluate(() => JSON.parse(localStorage.getItem("sim:design:v3")))
 }
+const saved = async () => (await stored()).design
 
 await page.goto("http://localhost:5173/")
 await page.evaluate(() => localStorage.clear())
@@ -86,8 +88,8 @@ await page.waitForTimeout(500)
 check("multi-region draws two region boxes", (await count(".group-box")) === 2)
 check("no design errors", (await count(".banner.error")) === 0)
 await page.screenshot({ path: `${shots}/3-multiregion.png` })
-const d3 = await saved()
-check("nodes are parented to their region", d3.nodes["api-us"].parent === "region-us" && d3.nodes["fn-eu"].parent === "region-eu")
+const d3 = await stored()
+check("an example as it opened is remembered by name", d3.example === "multi-region" && d3.design === undefined, JSON.stringify(d3).slice(0, 80))
 
 // 5. Selecting a region box shows its quotas and region faults.
 await page.locator('[data-node-id="region-us"]').dblclick()
@@ -99,6 +101,7 @@ await lc.locator(".number-box input").fill("250")
 await page.waitForTimeout(250)
 const d4 = await saved()
 check("editing a quota stores an account override", d4.accounts?.["aws:us-east-1"]?.lambdaConcurrency === 250, JSON.stringify(d4.accounts))
+check("nodes are parented to their region", d4.nodes["api-us"].parent === "region-us" && d4.nodes["fn-eu"].parent === "region-eu")
 await page.screenshot({ path: `${shots}/4-region.png` })
 
 // 6. Regional outage shows on the box.

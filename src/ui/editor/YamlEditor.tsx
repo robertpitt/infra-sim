@@ -131,7 +131,7 @@ function Status() {
 // ---------------------------------------------------------------------------------------------------------
 
 /** Problems the schema already marks, more precisely, where the value is. */
-const SCHEMA_CHECKED = new Set(["bad-settings", "bad-controller-settings", "unknown-component", "unknown-controller"])
+const SCHEMA_CHECKED = new Set(["bad-settings", "unknown-setting", "bad-controller-settings", "unknown-component", "unknown-controller"])
 
 const SEVERITY = { error: monaco.MarkerSeverity.Error, warning: monaco.MarkerSeverity.Warning, info: monaco.MarkerSeverity.Info } as const
 

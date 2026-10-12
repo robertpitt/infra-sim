@@ -12,8 +12,8 @@ const decode = Schema.decodeUnknownSync(codec)
 
 const pipeline = () => {
   const b = Builder.make("Orders", { seed: 7 })
-  const web = b.add("common.client", { id: "web", settings: { rps: 120, spike: { multiplier: 3, start: "10 seconds" } } })
-  const api = b.add("aws.lambda", { id: "api", settings: { memory: 512 } })
+  const web = b.add("common.client", { id: "web", settings: { rps: 120 } })
+  const api = b.add("aws.lambda", { id: "api", settings: { memory: 512, async: { firstRetryDelay: "10 seconds" } } })
   const q = b.add("aws.sqs", { id: "q", settings: { visibilityTimeout: "45 seconds" } })
   const dlq = b.add("aws.sqs", { id: "dlq" })
   b.connect(web, api, { timeout: "3 seconds", retry: { maxAttempts: 3 } })
@@ -33,11 +33,12 @@ describe("Design codec: JSON in, configured instance out", () => {
     expect(design.seed).toBe(7)
     expect(Graph.nodeCount(design.graph)).toBe(4)
     expect(Graph.edgeCount(design.graph)).toBe(3)
-    const web = nodeOf(design, "web").config as { rps: number; arrival: string; spike: { multiplier: number; start: Duration.Duration; duration: Duration.Duration } }
+    const web = nodeOf(design, "web").config as { rps: number; arrival: string }
     expect(web.rps).toBe(120)
     expect(web.arrival).toBe("poisson") // default, not in the document
-    expect(Duration.toMillis(web.spike.start)).toBe(10_000) // "10 seconds" became a real Duration
-    expect(Duration.toMillis(web.spike.duration)).toBe(30_000) // default
+    const api = nodeOf(design, "api").config as { async: { firstRetryDelay: Duration.Duration; secondRetryDelay: Duration.Duration } }
+    expect(Duration.toMillis(api.async.firstRetryDelay)).toBe(10_000) // "10 seconds" became a real Duration
+    expect(Duration.toMillis(api.async.secondRetryDelay)).toBe(120_000) // default
     expect(Duration.toMillis((nodeOf(design, "q").config as { visibilityTimeout: Duration.Duration }).visibilityTimeout)).toBe(45_000)
   })
 
@@ -136,6 +137,16 @@ describe("diagnostics", () => {
     expect(codes({ ...Design.empty(), edges: { x: { from: { node: "a" }, to: "b" } } })).toEqual(["dangling-edge"])
   })
 
+  it("warns about a setting the component doesn't have, which is ignored, and says where traffic spikes went", () => {
+    const b = Builder.make()
+    const web = b.add("common.client", { id: "web", settings: { rps: 10, rsp: 20, spike: { multiplier: 3 } } })
+    b.connect(web, b.add("aws.lambda"))
+    const found = diagnose(b.build(), registry).filter((d) => d.code === "unknown-setting")
+    expect(found.map((d) => [d.level, d.node])).toEqual([["warning", "web"], ["warning", "web"]])
+    expect(found[0]!.message).toMatch(/"rsp" isn't one of its settings/)
+    expect(found[1]!.message).toMatch(/scenario/)
+  })
+
   it("enforces single-connection ports", () => {
     const b = Builder.make()
     const q = b.add("aws.sqs")
@@ -155,6 +166,16 @@ describe("diagnostics", () => {
     const found = diagnose(b.build(), registry).find((d) => d.code === "feedback-loop")
     expect(found?.level).toBe("warning")
     expect(found?.message).toMatch(/a → c/)
+  })
+
+  it("doesn't take two stores replicating to each other for a loop: a replica isn't replicated on", () => {
+    const b = Builder.make()
+    const us = b.add("aws.dynamodb", { id: "us" })
+    const eu = b.add("aws.dynamodb", { id: "eu" })
+    b.connect(b.add("common.client"), us)
+    b.connect(us.port("replicas"), eu)
+    b.connect(eu.port("replicas"), us)
+    expect(codes(b.build())).not.toContain("feedback-loop")
   })
 
   it("flags nodes no client can reach, and clients wired to nothing", () => {

@@ -390,53 +390,6 @@
             "async"
           ],
           "default": "sync"
-        },
-        "spike": {
-          "title": "Traffic spike",
-          "type": "object",
-          "properties": {
-            "multiplier": {
-              "title": "Multiplier",
-              "description": "Rate is multiplied by this during the spike. 1 means no spike.",
-              "type": "number",
-              "default": 1,
-              "minimum": 0,
-              "maximum": 1000
-            },
-            "start": {
-              "title": "Starts at",
-              "description": "A duration: a number of milliseconds, or text such as \"30 seconds\" or \"2 minutes\".",
-              "default": 30000,
-              "anyOf": [
-                {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 86400000
-                },
-                {
-                  "type": "string",
-                  "pattern": "^-?\\d+(\\.\\d+)?\\s+(nanos?|micros?|millis?|seconds?|minutes?|hours?|days?|weeks?)$"
-                }
-              ]
-            },
-            "duration": {
-              "title": "Lasts",
-              "description": "A duration: a number of milliseconds, or text such as \"30 seconds\" or \"2 minutes\".",
-              "default": 30000,
-              "anyOf": [
-                {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 86400000
-                },
-                {
-                  "type": "string",
-                  "pattern": "^-?\\d+(\\.\\d+)?\\s+(nanos?|micros?|millis?|seconds?|minutes?|hours?|days?|weeks?)$"
-                }
-              ]
-            }
-          },
-          "additionalProperties": false
         }
       },
       "additionalProperties": false

@@ -53,6 +53,11 @@ export interface PortDef<C extends Schema.Struct<Schema.Struct.Fields> | undefin
   readonly many: boolean
   readonly protocol: Protocol
   readonly config: C
+  /**
+   * It sends copies to replicas, which never send a replica on through the same port: two stores replicating to each
+   * other (a global table, two-way bucket replication) pass nothing round, so they are not a loop.
+   */
+  readonly replication?: true
 }
 export type PortDefs = Readonly<Record<string, PortDef>>
 
@@ -61,8 +66,8 @@ type PortMaker = {
   <C extends Schema.Struct<Schema.Struct.Fields>>(label: string, config: C): PortDef<C>
 }
 
-const portOf = (protocol: Protocol, many: boolean): PortMaker =>
-  ((label: string, config?: Schema.Struct<Schema.Struct.Fields>) => ({ label, many, protocol, config })) as PortMaker
+const portOf = (protocol: Protocol, many: boolean, replication = false): PortMaker =>
+  ((label: string, config?: Schema.Struct<Schema.Struct.Fields>) => ({ label, many, protocol, config, ...(replication ? { replication: true } : {}) })) as PortMaker
 
 export const port = {
   /** Calls to any number of edges. */
@@ -70,7 +75,9 @@ export const port = {
   /** Calls to at most one edge. */
   one: portOf("invoke", false),
   /** Work offered to be taken by whatever is wired here; each edge's connector takes from the same source. */
-  pull: portOf("pull", true)
+  pull: portOf("pull", true),
+  /** Copies to any number of replicas, which don't copy them on again (see `PortDef.replication`). */
+  replication: portOf("invoke", true, true)
 }
 
 /** The settings an edge leaving this port carries: the universal edge policy plus the port's own. */

@@ -1,0 +1,435 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Multi-region
+description: |-
+  Users in the US and Europe each hit a regional stack, and both write synchronously to a ledger in us-east-1. Around that one cross-region call sits the multi-region toolkit, done properly: a web app on CloudFront with a replica origin in Europe, orders in a DynamoDB global table, and each region's own email. Take a region away and see which parts carry on, and what that one synchronous call costs.
+
+  How it is wired: in each region, an HTTP API runs an order handler that writes the order to the region's table, sends an entry to the ledger queue in us-east-1 and waits for it, then queues a confirmation email that a mailer sends through the region's SES. A bookkeeper in us-east-1 drains the ledger queue into the ledger table. The two orders tables are one global table: each copies its writes to the other about a second later, and keeps retrying while the other region is unreachable. Order lookups go through a REST API in each region that reads the region's own table directly (a DynamoDB service integration, no function). Visitors on both sides of the Atlantic load the web app from CloudFront, whose origin group reads from the bucket in us-east-1 and fails over to a replica bucket in eu-west-1; S3 replication copies the product images uploaded in us-east-1 across.
+
+  What the simulator cannot show: CloudFront as a global service (it runs in one region like everything else; here us-east-2, outside both boxes and out of reach of either outage), DNS failover between the regions (Route 53 would send Europe's users to the US stack when Europe is down), and what each replica holds: nothing checks which order a lookup asks for, so stale reads and last-writer-wins conflicts between the two tables don't show, and nor do the orders a failed ledger write leaves behind, already in the regional table without a ledger entry.
+seed: 5
+accounts:
+  aws:us-east-1:
+    sesSendingRate: 400
+    sesDailyQuota: 20000000
+  aws:eu-west-1:
+    sesSendingRate: 400
+    sesDailyQuota: 20000000
+nodes:
+  region-us:
+    type: aws.region
+    name: US
+    settings:
+      region: us-east-1
+    position: { x: 632, y: -66 }
+    size: { w: 1892, h: 730 }
+  region-eu:
+    type: aws.region
+    name: Europe
+    settings:
+      region: eu-west-1
+    position: { x: 632, y: 704 }
+    size: { w: 1572, h: 648 }
+  lookups-us:
+    type: common.client
+    name: Lookups (us-east)
+    region: us-east
+    settings:
+      rps: 120
+    position: { x: 0, y: 28 }
+  users-us:
+    type: common.client
+    name: Users (us-east)
+    region: us-east
+    settings:
+      rps: 150
+    position: { x: 0, y: 218 }
+  uploads:
+    type: common.client
+    name: Image uploads
+    region: us-east
+    settings:
+      rps: 2
+      payload: 400
+    position: { x: 0, y: 428 }
+  visitors-us:
+    type: common.client
+    name: Web visitors (us-east)
+    region: us-east
+    settings:
+      rps: 300
+      payload: 1
+    position: { x: 0, y: 646 }
+  visitors-eu:
+    type: common.client
+    name: Web visitors (eu-west)
+    region: eu-west
+    settings:
+      rps: 200
+      payload: 1
+    position: { x: 0, y: 778 }
+  lookups-eu:
+    type: common.client
+    name: Lookups (eu-west)
+    region: eu-west
+    settings:
+      rps: 80
+    position: { x: 0, y: 908 }
+  users-eu:
+    type: common.client
+    name: Users (eu-west)
+    region: eu-west
+    settings:
+      rps: 100
+    position: { x: 0, y: 1104 }
+  cdn:
+    type: aws.cloudfront
+    name: Web app CDN
+    region: us-east-2
+    settings:
+      objects: 4000
+      objectSize: 60
+      cache: { defaultTtl: 60 seconds }
+      failover:
+        clientErrors: true
+    position: { x: 330, y: 712 }
+  lookup-api-us:
+    type: aws.apigateway
+    name: Lookup API us-east-1
+    parent: region-us
+    settings:
+      apiType: rest
+    position: { x: 660, y: 0 }
+  api-us:
+    type: aws.apigateway
+    name: API us-east-1
+    parent: region-us
+    settings:
+      apiType: http
+    position: { x: 660, y: 190 }
+  fn-us:
+    type: aws.lambda
+    name: Handler us-east-1
+    parent: region-us
+    settings:
+      memory: 1024
+      timeout: 10 seconds
+      duration: { mean: 50 }
+    position: { x: 980, y: 214 }
+  table-us:
+    type: aws.dynamodb
+    name: Orders us-east-1
+    parent: region-us
+    settings:
+      mode: on-demand
+    position: { x: 1620, y: 226 }
+  emails-us:
+    type: aws.sqs
+    name: Emails us-east-1
+    parent: region-us
+    position: { x: 1300, y: 0 }
+  mailer-us:
+    type: aws.lambda
+    name: Mailer us-east-1
+    parent: region-us
+    settings:
+      memory: 256
+      duration: { mean: 40 }
+    position: { x: 1620, y: 24 }
+  ses-us:
+    type: aws.ses
+    name: SES us-east-1
+    parent: region-us
+    position: { x: 1940, y: 88 }
+  ledger:
+    type: aws.sqs
+    name: Ledger queue
+    parent: region-us
+    position: { x: 1300, y: 400 }
+  bookkeeper:
+    type: aws.lambda
+    name: Bookkeeper
+    parent: region-us
+    settings:
+      memory: 512
+      duration: { mean: 80 }
+    position: { x: 1940, y: 424 }
+  ledger-table:
+    type: aws.dynamodb
+    name: Ledger table
+    parent: region-us
+    settings:
+      mode: on-demand
+    position: { x: 2260, y: 436 }
+  site-us:
+    type: aws.s3
+    name: Web app us-east-1
+    parent: region-us
+    settings:
+      replicationTimeControl: true
+    position: { x: 660, y: 400 }
+  site-eu:
+    type: aws.s3
+    name: Web app eu-west-1
+    parent: region-eu
+    position: { x: 980, y: 770 }
+  lookup-api-eu:
+    type: aws.apigateway
+    name: Lookup API eu-west-1
+    parent: region-eu
+    settings:
+      apiType: rest
+    position: { x: 660, y: 880 }
+  table-eu:
+    type: aws.dynamodb
+    name: Orders eu-west-1
+    parent: region-eu
+    settings:
+      mode: on-demand
+    position: { x: 1300, y: 892 }
+  api-eu:
+    type: aws.apigateway
+    name: API eu-west-1
+    parent: region-eu
+    settings:
+      apiType: http
+    position: { x: 660, y: 1076 }
+  fn-eu:
+    type: aws.lambda
+    name: Handler eu-west-1
+    parent: region-eu
+    settings:
+      memory: 1024
+      timeout: 10 seconds
+      duration: { mean: 50 }
+    position: { x: 980, y: 1100 }
+  emails-eu:
+    type: aws.sqs
+    name: Emails eu-west-1
+    parent: region-eu
+    position: { x: 1300, y: 1124 }
+  mailer-eu:
+    type: aws.lambda
+    name: Mailer eu-west-1
+    parent: region-eu
+    settings:
+      memory: 256
+      duration: { mean: 40 }
+    position: { x: 1620, y: 1148 }
+  ses-eu:
+    type: aws.ses
+    name: SES eu-west-1
+    parent: region-eu
+    position: { x: 1940, y: 1212 }
+edges:
+  visitors-us.out->cdn:
+    from: { node: visitors-us }
+    to: cdn
+    settings:
+      latency: { mean: 8 }
+      request: { operation: read }
+  visitors-eu.out->cdn:
+    from: { node: visitors-eu }
+    to: cdn
+    settings:
+      latency: { mean: 8 }
+      request: { operation: read }
+  cdn.out->site-us:
+    from: { node: cdn }
+    to: site-us
+    settings:
+      originType: s3
+      role: primary
+      request: { operation: read }
+  cdn.out->site-eu:
+    from: { node: cdn }
+    to: site-eu
+    settings:
+      originType: s3
+      role: secondary
+      request: { operation: read }
+  uploads.out->site-us:
+    from: { node: uploads }
+    to: site-us
+    settings:
+      timeout: 30 seconds
+  site-us.replication->site-eu:
+    from: { node: site-us, port: replication }
+    to: site-eu
+    settings:
+      retry: { maxAttempts: 100 }
+  users-us.out->api-us:
+    from: { node: users-us }
+    to: api-us
+  api-us.out->fn-us:
+    from: { node: api-us }
+    to: fn-us
+  fn-us.out->table-us:
+    from: { node: fn-us }
+    to: table-us
+  fn-us.out->ledger:
+    from: { node: fn-us }
+    to: ledger
+  fn-us.out->emails-us:
+    from: { node: fn-us }
+    to: emails-us
+  lookups-us.out->lookup-api-us:
+    from: { node: lookups-us }
+    to: lookup-api-us
+    settings:
+      request: { operation: read }
+  lookup-api-us.out->table-us:
+    from: { node: lookup-api-us }
+    to: table-us
+    settings:
+      request: { operation: read }
+  users-eu.out->api-eu:
+    from: { node: users-eu }
+    to: api-eu
+  api-eu.out->fn-eu:
+    from: { node: api-eu }
+    to: fn-eu
+  fn-eu.out->table-eu:
+    from: { node: fn-eu }
+    to: table-eu
+  fn-eu.out->ledger:
+    from: { node: fn-eu }
+    to: ledger
+  fn-eu.out->emails-eu:
+    from: { node: fn-eu }
+    to: emails-eu
+  lookups-eu.out->lookup-api-eu:
+    from: { node: lookups-eu }
+    to: lookup-api-eu
+    settings:
+      request: { operation: read }
+  lookup-api-eu.out->table-eu:
+    from: { node: lookup-api-eu }
+    to: table-eu
+    settings:
+      request: { operation: read }
+  table-us.replicas->table-eu:
+    from: { node: table-us, port: replicas }
+    to: table-eu
+    settings:
+      retry: { maxAttempts: 100 }
+  table-eu.replicas->table-us:
+    from: { node: table-eu, port: replicas }
+    to: table-us
+    settings:
+      retry: { maxAttempts: 100 }
+  ledger.deliver->bookkeeper:
+    from: { node: ledger, port: deliver }
+    to: bookkeeper
+  bookkeeper.out->ledger-table:
+    from: { node: bookkeeper }
+    to: ledger-table
+  emails-us.deliver->mailer-us:
+    from: { node: emails-us, port: deliver }
+    to: mailer-us
+  mailer-us.out->ses-us:
+    from: { node: mailer-us }
+    to: ses-us
+  emails-eu.deliver->mailer-eu:
+    from: { node: emails-eu, port: deliver }
+    to: mailer-eu
+  mailer-eu.out->ses-eu:
+    from: { node: mailer-eu }
+    to: ses-eu
+scenarios:
+  lose-us-east-1:
+    name: Lose us-east-1
+    description: Lose the US region for two minutes and see who notices. Europe goes down with it, because its handler writes to the US ledger synchronously, a call that already cost every European order a transatlantic round trip. What the multi-region toolkit is for still works. CloudFront fails over to the bucket in eu-west-1, so the web app stays up; European lookups read their own replica; and the European orders written before the ledger call failed queue for the US replica and catch up when it is back. Send the ledger entry through a queue in eu-west-1 instead, and Europe would keep taking orders.
+    seed: 5
+    duration: 6m
+    warmup: 30s
+    timeline:
+      - at: 2m
+        note: us-east-1 goes down
+        inject:
+          target: region:aws:us-east-1
+          fault: Outage
+          for: 2m
+      - at: 4m
+        note: us-east-1 is back
+    assert:
+      - check: users-us.errorRatio > 90%
+        name: US users see the outage
+        from: 2m30s
+        to: 4m
+      - check: users-eu.errorRatio > 90%
+        name: Europe is dragged down by its synchronous ledger write
+        from: 2m30s
+        to: 4m
+      - check: visitors-us.errorRatio < 0.5%
+        name: The web app stays up
+        from: 2m
+        to: 4m
+      - check: cdn.rate.failover > 30/s
+        name: CloudFront fails over to the replica bucket in eu-west-1
+        from: 2m30s
+        to: 4m
+      - check: lookups-eu.errorRatio < 0.5%
+        name: European order lookups keep working off their own replica
+        from: 2m
+        to: 4m
+      - check: table-eu.gauge.replicating:max > 5000
+        name: European writes queue up for the US replica
+        from: 2m
+        to: 4m
+      - check: table-eu.gauge.replicating:last < 100
+        name: The US replica catches up once it is back
+        from: 5m
+      - check: users-eu.latency.p50 > 150ms
+        name: Before the outage, each European order waits on a call to us-east-1
+        from: 30s
+        to: 2m
+      - check: system.errorRatio < 2%
+        name: Both recover afterwards
+        from: 5m
+  lose-eu-west-1:
+    name: Lose eu-west-1
+    description: Lose Europe instead, for two minutes. European users see the outage, and so do European lookups, since nothing sends them to the US replica. Nobody else notices, because nothing in the US waits on Europe, and CloudFront's primary origin is in us-east-1. US orders and product images queue for the European replicas, and catch up when Europe is back.
+    seed: 5
+    duration: 6m
+    warmup: 30s
+    timeline:
+      - at: 2m
+        note: eu-west-1 goes down
+        inject:
+          target: region:aws:eu-west-1
+          fault: Outage
+          for: 2m
+      - at: 4m
+        note: eu-west-1 is back
+    assert:
+      - check: users-eu.errorRatio > 90%
+        name: European users see the outage
+        from: 2m30s
+        to: 4m
+      - check: lookups-eu.errorRatio > 90%
+        name: "So do European lookups: nothing sends them to the US replica"
+        from: 2m30s
+        to: 4m
+      - check: users-us.errorRatio < 0.5%
+        name: The US carries on
+        from: 2m
+        to: 4m
+      - check: visitors-eu.errorRatio < 0.5%
+        name: The web app stays up, from its primary origin in us-east-1
+        from: 2m
+        to: 4m
+      - check: table-us.gauge.replicating:max > 5000
+        name: US writes queue up for the European replica
+        from: 2m
+        to: 4m
+      - check: table-us.gauge.replicating:last < 100
+        name: The European replica catches up once it is back
+        from: 5m
+      - check: site-us.gauge.replicating:max > 150
+        name: Product images queue for the replica bucket
+        from: 2m
+        to: 4m
+      - check: system.errorRatio < 1%
+        name: Both recover afterwards
+        from: 5m

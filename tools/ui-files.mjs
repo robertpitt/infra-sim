@@ -37,18 +37,21 @@ check("File menu offers Open, Save (YAML), Save as JSON and an Import section", 
 await page.keyboard.press("Escape")
 await page.mouse.click(700, 400)
 
+/** How many cards a design file draws: its nodes less the boxes (regions and VPCs). */
+const cards = (file) => Object.values(YAML.parse(fs.readFileSync(file, "utf8")).nodes).filter((n) => n.type !== "aws.region" && n.type !== "aws.vpc").length
+
 // Open a YAML design
-await open("Open…", "examples/03-multi-region.yaml")
+await open("Open…", "examples/05-multi-region.yaml")
 await page.waitForTimeout(500)
-check("Open reads a YAML design", (await nodes()) === 11 || (await nodes()) >= 9, `${await nodes()} nodes`)
+check("Open reads a YAML design", (await nodes()) === cards("examples/05-multi-region.yaml"), `${await nodes()} nodes`)
 check("no import dialog for a design file", (await page.locator(".dialog").count()) === 0)
 
 // Open a JSON design
-const json = JSON.stringify(YAML.parse(fs.readFileSync("examples/01-orders.yaml", "utf8")))
+const json = JSON.stringify(YAML.parse(fs.readFileSync("examples/03-orders.yaml", "utf8")))
 fs.writeFileSync(".tmp/orders.json", json)
 await open("Open…", ".tmp/orders.json")
 await page.waitForTimeout(500)
-check("Open reads a JSON design", (await nodes()) === 7, `${await nodes()} nodes`)
+check("Open reads a JSON design", (await nodes()) === cards("examples/03-orders.yaml"), `${await nodes()} nodes`)
 
 // Save as YAML and JSON
 let dl = page.waitForEvent("download")
@@ -57,7 +60,7 @@ let d = await dl
 check("Save writes a .yaml file", d.suggestedFilename().endsWith(".yaml"), d.suggestedFilename())
 await d.saveAs(".tmp/saved.yaml")
 const saved = YAML.parse(fs.readFileSync(".tmp/saved.yaml", "utf8"))
-check("the saved YAML is the design", saved.version === 1 && Object.keys(saved.nodes).length === 7)
+check("the saved YAML is the design", saved.version === 1 && Object.keys(saved.nodes).length === Object.keys(YAML.parse(fs.readFileSync("examples/03-orders.yaml", "utf8")).nodes).length)
 check("it is YAML, not JSON", !fs.readFileSync(".tmp/saved.yaml", "utf8").trimStart().startsWith("{"))
 dl = page.waitForEvent("download")
 await menu("Save as JSON")

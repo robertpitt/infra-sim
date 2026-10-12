@@ -211,7 +211,7 @@ export type Config = typeof config.Type
 
 export const ports = {
   events: Component.port.many("Event notifications", Destination),
-  replication: Component.port.many("Replication destinations", Replica)
+  replication: Component.port.replication("Replication destinations", Replica)
 }
 
 export const state = Schema.Struct({

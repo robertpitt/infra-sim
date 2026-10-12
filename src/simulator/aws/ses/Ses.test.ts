@@ -212,8 +212,13 @@ describe("what becomes of an accepted message", () => {
 
   it("delivers, bounces, complains, delays and rejects in the proportions the settings give", async () => {
     // 120 s at 100 a second is 12,000 recipients, then the client stops and the retry window (5 minutes) runs out.
-    const stop = { spike: { multiplier: 0, start: "120 seconds", duration: "1 day" } }
-    const { state } = await stateAfter(mail({ ses: { recipients, timing: FAST, reputation: { enforcement: false } }, load: { rps: 100, ...stop } }), 450_000)
+    const state = await sim(mail({ ses: { recipients, timing: FAST, reputation: { enforcement: false } }, load: { rps: 100 } }), (s) =>
+      Effect.gen(function*() {
+        yield* s.advanceTo(120_000)
+        yield* s.configureNode("web", { arrival: "constant", rps: 0 })
+        yield* s.advanceTo(450_000)
+        return (yield* s.probe("ses")).state as State
+      }))
     const n = state.recipients
     expect(n).toBeGreaterThan(11_000)
     const share = (x: number) => x / n

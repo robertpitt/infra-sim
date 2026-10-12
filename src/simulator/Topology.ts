@@ -1,5 +1,5 @@
 import { Graph, Option } from "effect"
-import type { AnyComponent } from "./Component.ts"
+import type { AnyComponent, PortDefs } from "./Component.ts"
 import type { Doc } from "./Design.ts"
 import { DEFAULT_PORT } from "./Design.ts"
 import type { Components } from "./Registry.ts"
@@ -108,16 +108,26 @@ export const reachable = (top: Topology): ReadonlySet<string> => new Set(reach(t
 
 /**
  * Groups of nodes that can reach each other, plus self-loops. This is where retries and redelivery can feed
- * back into the load that caused them.
+ * back into the load that caused them. Replication doesn't count: a replica is never replicated on, so two stores
+ * replicating to each other (a global table) pass nothing round.
  */
-export const feedbackLoops = (top: Topology): ReadonlyArray<ReadonlyArray<string>> =>
-  Graph.stronglyConnectedComponents(top.graph)
+export const feedbackLoops = (top: Topology): ReadonlyArray<ReadonlyArray<string>> => {
+  const replication = new Set<string>()
+  for (const [id, index] of top.nodeIndex) {
+    const ports: PortDefs | undefined = nodeAt(top, index).component?.ports
+    for (const edge of outgoing(top, id)) if (ports?.[edge.port]?.replication === true) replication.add(edge.id)
+  }
+  const graph = replication.size === 0 ? top.graph : Graph.mutate(top.graph, (g) => {
+    Graph.filterEdges(g, (e) => !replication.has(e.id))
+  })
+  return Graph.stronglyConnectedComponents(graph)
     .filter((component) => {
       if (component.length > 1) return true
       const only = component[0]
-      return only !== undefined && Graph.hasEdge(top.graph, only, only)
+      return only !== undefined && Graph.hasEdge(graph, only, only)
     })
     .map((component) => component.map((i) => nodeAt(top, i).id).sort())
+}
 
 /** A Mermaid flowchart of the design: handy for docs, issues and sanity-checking an import. */
 export const toMermaid = (top: Topology): string =>

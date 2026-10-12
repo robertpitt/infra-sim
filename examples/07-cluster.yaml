@@ -1,0 +1,442 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Autoscaled cluster
+description: |-
+  A shop's backend on a cluster of its own, with no cloud at all: web and mobile shoppers, an edge gateway, an API, auth with a session object per shopper, a catalog with a cache, recommendations, carts, checkout with an outside payment provider, and a primary database with a read replica. When traffic triples (the Surge scenario), the API's autoscaler adds replicas, but each takes 20 seconds to start, so the queue in front of the API fills first and some shoppers are turned away until they are ready; then it keeps up, and gives the replicas back a couple of minutes later.
+
+  How it is wired: the gateway (Envoy or NGINX, say) calls auth and then the API, one after the other. Auth looks up the request's session, a keyed object per shopper (actors: Durable Objects or Orleans grains would do the same) that reads it from the primary database. The API is a service of replicas (a Kubernetes Deployment) that sends each request to one backend by its route, as edge weights: browsing to the catalog (55%), whose cache answers nine reads in ten and the read replica the rest; recommendations (15%), which read the shopper's history from the replica; cart changes (25%) to the shopper's cart object, kept in the primary database; and checkouts (5%), which charge the card with the payment provider and then write the order. Two autoscalers, on different metrics: the API's tracks busy workers per replica against 6 of 10, as a CPU target would, counting replicas still starting as idle; the recommendations' tracks requests per second per replica (15), as a load balancer's request count per target does. A few heavy shoppers are one session object each, and an object runs one request at a time, so their requests wait on their own however many replicas there are. The network inside the cluster is set on each edge (1 ms), because placement only knows regions.
+
+  What the simulator cannot show: a cache warming up, or filling on a miss (the cache is an endpoint that answers every read it gets, and the misses are a fixed share sent to the replica instead); replication from the primary to the replica, and its lag; a page that renders without its recommendations when they fail (here a failed call fails the request); and the callers' connection pools (the databases' limit on concurrent queries, past which they refuse, stands in for them).
+seed: 31
+nodes:
+  web:
+    type: common.client
+    name: Web shoppers
+    region: eu-west
+    settings:
+      rps: 90
+      hotKeys: 0.05
+    position: { x: 0, y: 95 }
+  mobile:
+    type: common.client
+    name: Mobile app
+    region: eu-west
+    settings:
+      rps: 60
+      hotKeys: 0.05
+    position: { x: 0, y: 225 }
+  gateway:
+    type: common.service
+    name: Edge gateway
+    region: eu-west
+    settings:
+      replicas: 2
+      concurrency: 200
+      serviceTime: { mean: 1, cv: 0.5 }
+      queueLimit: 1000
+      fanOut: sequential
+    position: { x: 320, y: 160 }
+  auth:
+    type: common.service
+    name: Auth
+    region: eu-west
+    settings:
+      replicas: 3
+      concurrency: 16
+      serviceTime: { mean: 4, cv: 0.5 }
+      queueLimit: 500
+    position: { x: 640, y: 0 }
+  sessions:
+    type: common.actor
+    name: Sessions
+    region: eu-west
+    settings:
+      objects: 5000
+      handlerTime: { mean: 3, cv: 0.5 }
+      idle: 2 minutes
+    position: { x: 960, y: 0 }
+  api:
+    type: common.service
+    name: API
+    region: eu-west
+    settings:
+      replicas: 2
+      concurrency: 10
+      serviceTime: { mean: 100, cv: 0.5 }
+      queueLimit: 200
+      startup: 20 seconds
+      fanOut: weighted
+    position: { x: 640, y: 325 }
+  catalog:
+    type: common.service
+    name: Catalog
+    region: eu-west
+    settings:
+      replicas: 3
+      concurrency: 20
+      serviceTime: { mean: 8, cv: 0.5 }
+      queueLimit: 500
+      fanOut: weighted
+    position: { x: 960, y: 390 }
+  catalog-cache:
+    type: common.http-endpoint
+    name: Catalog cache
+    region: eu-west
+    settings:
+      latency: { mean: 1, cv: 0.3 }
+      maxConcurrency: 1000
+    position: { x: 1280, y: 390 }
+  recommendations:
+    type: common.service
+    name: Recommendations
+    region: eu-west
+    settings:
+      replicas: 2
+      concurrency: 4
+      serviceTime: { mean: 100, cv: 0.4 }
+      queueLimit: 100
+      startup: 40 seconds
+    position: { x: 960, y: 520 }
+  carts:
+    type: common.actor
+    name: Carts
+    region: eu-west
+    settings:
+      objects: 5000
+      handlerTime: { mean: 4, cv: 0.5 }
+      idle: 5 minutes
+    position: { x: 960, y: 130 }
+  checkout:
+    type: common.service
+    name: Checkout
+    region: eu-west
+    settings:
+      replicas: 2
+      concurrency: 20
+      serviceTime: { mean: 15, cv: 0.5 }
+      queueLimit: 200
+      fanOut: sequential
+    position: { x: 960, y: 260 }
+  payments:
+    type: common.http-endpoint
+    name: Payment provider
+    region: eu-west
+    settings:
+      latency: { mean: 300, cv: 0.5 }
+      rateLimit: 100
+    position: { x: 1280, y: 260 }
+  primary-db:
+    type: common.http-endpoint
+    name: Primary database
+    region: eu-west
+    settings:
+      latency: { mean: 8, cv: 0.4 }
+      maxConcurrency: 100
+    position: { x: 1280, y: 130 }
+  read-replica:
+    type: common.http-endpoint
+    name: Read replica
+    region: eu-west
+    settings:
+      latency: { mean: 6, cv: 0.4 }
+      maxConcurrency: 100
+    position: { x: 1280, y: 520 }
+edges:
+  web.out->gateway:
+    from: { node: web }
+    to: gateway
+    settings:
+      timeout: 10 seconds
+  mobile.out->gateway:
+    from: { node: mobile }
+    to: gateway
+    settings:
+      timeout: 10 seconds
+  gateway.out->auth:
+    from: { node: gateway }
+    to: auth
+    settings:
+      timeout: 2 seconds
+      latency: { mean: 1, cv: 0.3 }
+  gateway.out->api:
+    from: { node: gateway }
+    to: api
+    settings:
+      timeout: 8 seconds
+      latency: { mean: 1, cv: 0.3 }
+  auth.out->sessions:
+    from: { node: auth }
+    to: sessions
+    settings:
+      timeout: 2 seconds
+      latency: { mean: 1, cv: 0.3 }
+  sessions.out->primary-db:
+    from: { node: sessions }
+    to: primary-db
+    settings:
+      latency: { mean: 1, cv: 0.3 }
+  api.out->catalog:
+    from: { node: api }
+    to: catalog
+    settings:
+      weight: 55
+      timeout: 2 seconds
+      latency: { mean: 1, cv: 0.3 }
+  api.out->recommendations:
+    from: { node: api }
+    to: recommendations
+    settings:
+      weight: 15
+      timeout: 1 second
+      latency: { mean: 1, cv: 0.3 }
+  api.out->carts:
+    from: { node: api }
+    to: carts
+    settings:
+      weight: 25
+      timeout: 2 seconds
+      latency: { mean: 1, cv: 0.3 }
+  api.out->checkout:
+    from: { node: api }
+    to: checkout
+    settings:
+      weight: 5
+      timeout: 5 seconds
+      latency: { mean: 1, cv: 0.3 }
+  catalog.out->catalog-cache:
+    from: { node: catalog }
+    to: catalog-cache
+    settings:
+      weight: 9
+      latency: { mean: 1, cv: 0.3 }
+      request: { operation: read }
+  catalog.out->read-replica:
+    from: { node: catalog }
+    to: read-replica
+    settings:
+      weight: 1
+      latency: { mean: 1, cv: 0.3 }
+      request: { operation: read }
+  recommendations.out->read-replica:
+    from: { node: recommendations }
+    to: read-replica
+    settings:
+      latency: { mean: 1, cv: 0.3 }
+      request: { operation: read }
+  carts.out->primary-db:
+    from: { node: carts }
+    to: primary-db
+    settings:
+      latency: { mean: 1, cv: 0.3 }
+  checkout.out->payments:
+    from: { node: checkout }
+    to: payments
+    settings:
+      timeout: 3 seconds
+  checkout.out->primary-db:
+    from: { node: checkout }
+    to: primary-db
+    settings:
+      latency: { mean: 1, cv: 0.3 }
+controllers:
+  api-autoscaler:
+    type: core.target-tracking
+    target: api
+    name: API autoscaler
+    settings:
+      metric: busy
+      per: unit
+      targetValue: 6
+      setting: replicas
+      min: 2
+      max: 30
+      window: 30 seconds
+      period: 15 seconds
+      scaleOutCooldown: 0
+      scaleInCooldown: 2 minutes
+  recommendations-autoscaler:
+    type: core.target-tracking
+    target: recommendations
+    name: Recommendations autoscaler
+    settings:
+      metric: in
+      per: unit
+      targetValue: 15
+      setting: replicas
+      min: 2
+      max: 12
+      window: 30 seconds
+      period: 15 seconds
+      scaleOutCooldown: 0
+      scaleInCooldown: 3 minutes
+scenarios:
+  # Run in the app's Scenario tab, or: infra-sim run @cluster --scenario surge
+  surge:
+    name: Traffic surge
+    description: Three times the traffic for two minutes. The API's autoscaler adds replicas, but each takes 20 seconds to start, so for the first minute its queue overflows and some shoppers are turned away; then it keeps up, and scales back in afterwards. Recommendations scale too, in step with their requests, and the rest of the cluster has room to spare.
+    duration: 6m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: traffic triples
+        set:
+          node: web
+          settings:
+            rps: 270
+      - at: 1m
+        set:
+          node: mobile
+          settings:
+            rps: 180
+      - at: 3m
+        note: traffic back to normal
+        set:
+          node: web
+          settings:
+            rps: 90
+      - at: 3m
+        set:
+          node: mobile
+          settings:
+            rps: 60
+    assert:
+      - check: system.errorRatio > 10%
+        name: Shoppers are turned away while new replicas start
+        from: 1m
+        to: 1m30s
+      - check: api.rate.fail.Unavailable > 50/s
+        name: Its queue full, the API refuses them
+        from: 1m
+        to: 1m30s
+      - check: api.gauge.replicas:max >= 6
+        name: The autoscaler adds replicas
+        from: 1m
+        to: 3m
+      - check: recommendations.gauge.replicas:max >= 4
+        name: Recommendations scale with their requests
+        from: 1m
+        to: 3m
+      - check: system.errorRatio < 1%
+        name: Once scaled out it keeps up
+        from: 2m
+        to: 3m
+      - check: system.latency.p95 < 500ms
+        name: Latency settles
+        from: 2m30s
+        to: 3m
+      - check: api.gauge.replicas:last <= 4
+        name: It scales back in
+        from: 5m30s
+  slow-database:
+    name: Database slowdown
+    description: For two minutes every query on the primary database takes half a second instead of 8 ms (a migration holding locks, say). Every request waits on it, so the median goes from under 200 ms to three quarters of a second; the database runs at its limit and refuses some queries; and the heavy shopper's session object, which waits on the database for each request in turn, fills its queue and refuses theirs outright. The API's autoscaler sees nothing to do. Its replicas are no busier, since they don't wait on the calls they make, and more of them wouldn't help.
+    duration: 6m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the primary database slows down
+        set:
+          node: primary-db
+          settings:
+            latency: { mean: 500 }
+      - at: 3m
+        note: the database recovers
+        set:
+          node: primary-db
+          settings:
+            latency: { mean: 8 }
+    assert:
+      - check: system.latency.p50 > 500ms
+        name: Everyone waits on the database
+        from: 1m30s
+        to: 3m
+      - check: primary-db.gauge.inflight:max >= 100
+        name: It runs at its limit
+        from: 1m
+        to: 3m
+      - check: primary-db.rate.fail.Unavailable > 2/s
+        name: and refuses queries past it
+        from: 1m30s
+        to: 3m
+      - check: sessions.rate.overloaded > 2/s
+        name: The heavy shopper's session object is overloaded
+        from: 1m30s
+        to: 3m
+      - check: system.errorRatio > 5%
+        name: Shoppers see errors
+        from: 1m30s
+        to: 3m
+      - check: api.gauge.busy < 18
+        name: The API's replicas are no busier
+        from: 1m
+        to: 3m
+      - check: api.gauge.replicas:max <= 3
+        name: so its autoscaler adds none
+        from: 1m
+        to: 3m
+      - check: system.errorRatio < 0.5%
+        name: All is well once the database is
+        from: 3m30s
+      - check: system.latency.p50 < 250ms
+        name: and latency is back
+        from: 3m30s
+  heavier-model:
+    name: A heavier recommendation model
+    description: A new recommendation model ships that takes four times as long per request. The requests haven't changed, so the recommendations autoscaler, counting requests per replica, sees nothing to do while the replicas are flat out. Their queue fills, every request waits longer than the API's one-second timeout, and they all fail; the replicas keep working, on answers nobody is waiting for. Replicas added by hand are taken away again within fifteen seconds, before they have started, since by the autoscaler's metric nothing changed. Busy workers, which the API's autoscaler tracks, would have shown it. Rolling the model back clears it; browsing, carts and checkout never notice.
+    duration: 6m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: a heavier model ships
+        set:
+          node: recommendations
+          settings:
+            serviceTime: { mean: 400 }
+      - at: 2m30s
+        note: the on-call engineer adds replicas by hand
+        set:
+          node: recommendations
+          settings:
+            replicas: 6
+      - at: 4m
+        note: the model is rolled back
+        set:
+          node: recommendations
+          settings:
+            serviceTime: { mean: 100 }
+    assert:
+      - check: recommendations.gauge.utilization > 95%
+        name: The replicas are flat out
+        from: 1m30s
+        to: 4m
+      - check: recommendations.rate.in < 30/s
+        name: but their requests are as many as before
+        from: 1m30s
+        to: 4m
+      - check: recommendations.gauge.ready:max <= 2
+        name: so the autoscaler starts no replica
+        from: 1m
+        to: 4m
+      - check: edge:api.out->recommendations.errorRatio > 90%
+        name: Every recommendation times out
+        from: 1m30s
+        to: 4m
+      - check: system.errorRatio < 20%
+        name: Only the recommendations' share of requests fails
+        from: 1m30s
+        to: 4m
+      - check: edge:api.out->catalog.errorRatio < 0.1%
+        name: Browsing never notices
+        from: 1m
+        to: 4m
+      - check: recommendations.gauge.replicas:max >= 6
+        name: Replicas are added by hand
+        from: 2m30s
+        to: 2m45s
+      - check: recommendations.gauge.replicas:max <= 2
+        name: and the autoscaler takes them away
+        from: 3m
+        to: 4m
+      - check: edge:api.out->recommendations.errorRatio < 1%
+        name: After the rollback recommendations recover
+        from: 4m30s

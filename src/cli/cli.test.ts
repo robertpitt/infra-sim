@@ -96,9 +96,9 @@ describe("help and usage", () => {
 describe("discovering what exists", () => {
   it("lists the examples, and prints one", async () => {
     const listed = json<Array<{ id: string }>>((await cli(["examples", "--json"])).out)
-    expect(listed.map((e) => e.id)).toEqual(["orders", "retry-storm", "multi-region", "fan-out", "poshub", "cluster", "blank"])
+    expect(listed.map((e) => e.id)).toEqual(["ingestion", "url-shortener", "orders", "retry-storm", "multi-region", "fan-out", "cluster", "blank"])
     expect((await cli(["examples", "show", "orders"])).out).toMatch(/^# yaml-language-server: \$schema=\.\.\/schema\/design\.schema\.json\nversion: 1/)
-    expect((await cli(["examples", "path", "orders"])).out).toMatch(/01-orders\.yaml/)
+    expect((await cli(["examples", "path", "orders"])).out).toMatch(/03-orders\.yaml/)
   })
 
   it("lists components, filtered, as data", async () => {
@@ -299,7 +299,7 @@ describe("import and convert", () => {
     const data = json((await cli(["import", "examples/imports/orders-sam.yaml", "--json"])).out)
     expect(Object.keys(data)).toEqual(["design", "report"])
     expect(data.report.settings.preserved).toBeGreaterThan(10)
-    expect(await cli(["import", "examples/01-orders.yaml"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("isn't a CloudFormation template") })
+    expect(await cli(["import", "examples/03-orders.yaml"])).toMatchObject({ code: EXIT.usage, err: expect.stringContaining("isn't a CloudFormation template") })
   })
 
   it("converts between YAML and JSON, losing nothing", async () => {

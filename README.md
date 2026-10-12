@@ -8,9 +8,9 @@ Simulate cloud infrastructure under traffic and faults. Draw a design (clients, 
 
 The engine is pure [Effect](https://effect.website) (`src/simulator`, no DOM) and runs in a Web Worker in the browser; the UI (`src/ui`) is a client of it. How it works, and why it is fast: [SIMULATOR.md](SIMULATOR.md). Where every number comes from: [docs/AWS-LIMITS.md](docs/AWS-LIMITS.md).
 
-<a href="https://robertpitt.github.io/infra-sim/"><img src="docs/screenshots/scenario.png" alt="The Multi-region example losing us-east-1: the US stack and, through its synchronous ledger write, the European one fail; the header shows 100% errors and seven alerts firing, and the scenario panel shows its timeline and checks." width="100%"></a>
+<a href="https://robertpitt.github.io/infra-sim/"><img src="docs/screenshots/scenario.png" alt="The Multi-region example losing us-east-1: the US stack fails, and so do European orders, through their synchronous ledger write to us-east-1, while the website (CloudFront failing over to the European bucket) and European lookups (the global table's replica) stay up; the header shows 40% errors and thirteen alerts firing, and the scenario panel shows its timeline and checks." width="100%"></a>
 
-<sub>The Multi-region example playing its <em>Lose us-east-1</em> scenario. The US region is down, and Europe fails with it because its handler writes to the US ledger synchronously. The header shows what the clients see (100% errors, seven alerts firing); the scenario panel shows the outage on its timeline and the checks it makes.</sub>
+<sub>The Multi-region example playing its <em>Lose us-east-1</em> scenario. The US region is down, and European orders fail with it because their handler writes to the US ledger synchronously. What was built for it holds: the website stays up as CloudFront fails over to the European bucket, and European lookups read the global table's European replica. The header shows what the clients see (40% errors, thirteen alerts firing); the scenario panel shows the outage on its timeline and the checks it makes.</sub>
 
 ## A quick tour
 
@@ -42,7 +42,7 @@ npm run dev        # http://localhost:5173
 | `npm run typecheck` | Type-checks the engine (with no DOM types) and the app. |
 | `npm run cli -- <command>` | The command line: run, check, import, describe. See below. |
 | `npm run build:cli` | Bundles the command line to `dist-cli/infra-sim.mjs`. |
-| `npm run bench -- poshub 60000 10` | CPU cost of simulating an example, at a multiple of its traffic. See `tools/`. |
+| `npm run bench -- ingestion 60000 10` | CPU cost of simulating an example, at a multiple of its traffic. See `tools/`. |
 | `node tools/screenshots.mjs` | Retakes the README's screenshots from the running app (`npm run dev` first; or `URL=<site>` to use the live demo). |
 
 ## Deployment
@@ -132,7 +132,7 @@ npm run build:cli                                        # dist-cli/infra-sim.mj
 
 A **scenario** is what happens to a design: duration, traffic, setting overrides, a timeline of faults and live changes, and
 assertions (`api.errorRatio < 1%`, `orders-queue.gauge.depth:max < 5000`, `system.latency.p99 < 800ms`). A design carries
-the scenarios written for it under `scenarios` (every example has one: a retry storm, a lost region, a provider outage, a
+the scenarios written for it under `scenarios` (every example has at least one: a link going viral, a retry storm, a lost region, a provider outage, a
 traffic surge), and `--scenario <id>` plays one; a scenario can also be a file of its own that names its design.
 The app plays the open design's scenarios live (the dock's **Scenario** tab): the timeline happens at its times, each check shows whether
 it is holding, and the run stops at the end with a verdict. Every run is also watched by standard **alarms** (errors,

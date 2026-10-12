@@ -1,0 +1,446 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Fan-out
+description: |-
+  An order event fanned out by SNS to email, SMS and push notifications, partner webhooks, a search index, an audit table and an analytics lake, each through a subscription of its own, so that one subscriber's trouble stays with that subscriber. About two dozen components in one region.
+
+  How it is wired: the shop invokes the place-order function asynchronously, and an order it still cannot place after Lambda's two retries goes to its on-failure destination, a queue of failed orders. The function publishes to the order-placed topic, whose filter policies decide who hears about what: every order gets an email, a quarter of them a text (the customers who asked for one), orders from the app a push notification and orders from partner channels a webhook. Email, SMS and webhooks are queue-backed, each queue drained by a sender function of its own toward an external provider: the email provider takes 200 calls a second, the SMS gateway only 50. Their retry budgets differ too: an email is tried ten times a minute apart before it goes to the notifications dead-letter queue, a text five times, and a webhook four times thirty seconds apart before it goes to a DLQ of its own, kept for replaying to the partners. The webhook sender reports partial batch failures; the emailer and the SMS sender fail a whole batch when one message in it fails. The push sender and the search indexer are subscribed directly, so Lambda's asynchronous queue and retries stand in for SQS (a push still failing after them is dropped: a late push is worse than none). Every event is written to the audit table, and the analytics loader batches events from its queue into the S3 lake.
+
+  What the simulator cannot show: filter policies as rules (each subscription lets a share of the events through), SMS and mobile push as SNS protocols (here they are a function calling an external gateway), and the audit table written straight from the topic (in AWS a small function or EventBridge Pipes would do it). The search cluster is an HTTP endpoint standing in for OpenSearch.
+seed: 3
+nodes:
+  aws-eu-west-1:
+    type: aws.region
+    name: eu-west-1 (Ireland)
+    settings:
+      region: eu-west-1
+    position: { x: 332, y: -66 }
+    size: { w: 1572, h: 1786 }
+  app:
+    type: common.client
+    name: Shop (web and app)
+    region: eu-west
+    settings:
+      rps: 120
+      invocation: async
+    position: { x: 0, y: 774 }
+  place-order:
+    type: aws.lambda
+    name: Place order
+    parent: aws-eu-west-1
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 30 }
+    position: { x: 360, y: 734 }
+  order-failures:
+    type: aws.sqs
+    name: Failed orders
+    parent: aws-eu-west-1
+    settings:
+      retention: 14 days
+    position: { x: 680, y: 960 }
+  order-placed:
+    type: aws.sns
+    name: Order placed
+    parent: aws-eu-west-1
+    position: { x: 680, y: 770 }
+  email-queue:
+    type: aws.sqs
+    name: Email queue
+    parent: aws-eu-west-1
+    settings:
+      visibilityTimeout: 60 seconds
+      maxReceives: 10
+    position: { x: 1000, y: 0 }
+  emailer:
+    type: aws.lambda
+    name: Emailer
+    parent: aws-eu-west-1
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 300, cv: 0.6 }
+    position: { x: 1320, y: 24 }
+  mail-provider:
+    type: common.http-endpoint
+    name: Email provider
+    region: us-east
+    settings:
+      latency: { mean: 250 }
+      rateLimit: 200
+    position: { x: 2000, y: 88 }
+  notifications-dlq:
+    type: aws.sqs
+    name: Notifications DLQ
+    parent: aws-eu-west-1
+    settings:
+      retention: 14 days
+    position: { x: 1320, y: 236 }
+  audit-log:
+    type: aws.dynamodb
+    name: Audit log
+    parent: aws-eu-west-1
+    settings:
+      mode: on-demand
+    position: { x: 1000, y: 206 }
+  sms-queue:
+    type: aws.sqs
+    name: SMS queue
+    parent: aws-eu-west-1
+    settings:
+      visibilityTimeout: 60 seconds
+      maxReceives: 5
+    position: { x: 1000, y: 436 }
+  sms-sender:
+    type: aws.lambda
+    name: SMS sender
+    parent: aws-eu-west-1
+    settings:
+      memory: 256
+      timeout: 10 seconds
+      duration: { mean: 40 }
+    position: { x: 1320, y: 460 }
+  sms-provider:
+    type: common.http-endpoint
+    name: SMS gateway
+    region: eu-west
+    settings:
+      latency: { mean: 400, cv: 0.5 }
+      rateLimit: 50
+      burst: 50
+    position: { x: 2000, y: 524 }
+  push-sender:
+    type: aws.lambda
+    name: Push sender
+    parent: aws-eu-west-1
+    settings:
+      memory: 256
+      timeout: 10 seconds
+      duration: { mean: 40 }
+      async:
+        maxEventAge: 10 minutes
+    position: { x: 1000, y: 666 }
+  push-service:
+    type: common.http-endpoint
+    name: Push service (APNs, FCM)
+    region: us-east
+    settings:
+      latency: { mean: 90, cv: 0.5 }
+    position: { x: 2000, y: 730 }
+  search-indexer:
+    type: aws.lambda
+    name: Search indexer
+    parent: aws-eu-west-1
+    settings:
+      memory: 512
+      duration: { mean: 25 }
+    position: { x: 1000, y: 872 }
+  search-cluster:
+    type: common.http-endpoint
+    name: Search cluster (OpenSearch stand-in)
+    region: eu-west
+    settings:
+      latency: { mean: 20, cv: 0.5 }
+      maxConcurrency: 200
+    position: { x: 2000, y: 936 }
+  analytics-queue:
+    type: aws.sqs
+    name: Analytics queue
+    parent: aws-eu-west-1
+    settings:
+      visibilityTimeout: 2 minutes
+    position: { x: 1000, y: 1078 }
+  analytics-loader:
+    type: aws.lambda
+    name: Analytics loader
+    parent: aws-eu-west-1
+    settings:
+      memory: 1024
+      timeout: 60 seconds
+      duration: { mean: 800 }
+      batchCalls: once
+    position: { x: 1320, y: 1102 }
+  order-lake:
+    type: aws.s3
+    name: Order events lake
+    parent: aws-eu-west-1
+    position: { x: 1640, y: 1138 }
+  webhook-queue:
+    type: aws.sqs
+    name: Webhook queue
+    parent: aws-eu-west-1
+    settings:
+      visibilityTimeout: 30 seconds
+      maxReceives: 4
+    position: { x: 1000, y: 1284 }
+  webhook-sender:
+    type: aws.lambda
+    name: Webhook sender
+    parent: aws-eu-west-1
+    settings:
+      memory: 256
+      timeout: 15 seconds
+      duration: { mean: 20 }
+      batch:
+        errors: report
+    position: { x: 1320, y: 1308 }
+  partner-endpoints:
+    type: common.http-endpoint
+    name: Partner webhook endpoints
+    region: us-east
+    settings:
+      latency: { mean: 300, cv: 1 }
+    position: { x: 2000, y: 1372 }
+  webhook-dlq:
+    type: aws.sqs
+    name: Webhook DLQ
+    parent: aws-eu-west-1
+    settings:
+      retention: 14 days
+    position: { x: 1320, y: 1516 }
+edges:
+  app.out->place-order:
+    from: { node: app }
+    to: place-order
+  place-order.out->order-placed:
+    from: { node: place-order }
+    to: order-placed
+  place-order.onFailure->order-failures:
+    from: { node: place-order, port: onFailure }
+    to: order-failures
+  order-placed.out->email-queue:
+    from: { node: order-placed }
+    to: email-queue
+  order-placed.out->audit-log:
+    from: { node: order-placed }
+    to: audit-log
+  order-placed.out->sms-queue:
+    from: { node: order-placed }
+    to: sms-queue
+    settings:
+      filterMatch: 0.25
+  order-placed.out->push-sender:
+    from: { node: order-placed }
+    to: push-sender
+    settings:
+      filterMatch: 0.6
+  order-placed.out->search-indexer:
+    from: { node: order-placed }
+    to: search-indexer
+  order-placed.out->analytics-queue:
+    from: { node: order-placed }
+    to: analytics-queue
+  order-placed.out->webhook-queue:
+    from: { node: order-placed }
+    to: webhook-queue
+    settings:
+      filterMatch: 0.2
+  email-queue.deliver->emailer:
+    from: { node: email-queue, port: deliver }
+    to: emailer
+  email-queue.dlq->notifications-dlq:
+    from: { node: email-queue, port: dlq }
+    to: notifications-dlq
+  emailer.out->mail-provider:
+    from: { node: emailer }
+    to: mail-provider
+    settings:
+      retry: { maxAttempts: 3 }
+  sms-queue.deliver->sms-sender:
+    from: { node: sms-queue, port: deliver }
+    to: sms-sender
+    settings:
+      maxConcurrency: 5
+  sms-queue.dlq->notifications-dlq:
+    from: { node: sms-queue, port: dlq }
+    to: notifications-dlq
+  sms-sender.out->sms-provider:
+    from: { node: sms-sender }
+    to: sms-provider
+    settings:
+      retry: { maxAttempts: 3 }
+  push-sender.out->push-service:
+    from: { node: push-sender }
+    to: push-service
+    settings:
+      retry: { maxAttempts: 2 }
+  search-indexer.out->search-cluster:
+    from: { node: search-indexer }
+    to: search-cluster
+    settings:
+      retry: { maxAttempts: 2 }
+  analytics-queue.deliver->analytics-loader:
+    from: { node: analytics-queue, port: deliver }
+    to: analytics-loader
+    settings:
+      batchSize: 500
+      batchWindow: 20 seconds
+      maxConcurrency: 4
+  analytics-loader.out->order-lake:
+    from: { node: analytics-loader }
+    to: order-lake
+    settings:
+      request: { operation: write, payload: 400 }
+  webhook-queue.deliver->webhook-sender:
+    from: { node: webhook-queue, port: deliver }
+    to: webhook-sender
+    settings:
+      batchSize: 5
+      maxConcurrency: 10
+      reportBatchItemFailures: true
+  webhook-queue.dlq->webhook-dlq:
+    from: { node: webhook-queue, port: dlq }
+    to: webhook-dlq
+  webhook-sender.out->partner-endpoints:
+    from: { node: webhook-sender }
+    to: partner-endpoints
+    settings:
+      timeout: 5 seconds
+scenarios:
+  # Run in the app's Scenario tab, or: infra-sim run @fan-out --scenario mail-provider-down
+  mail-provider-down:
+    name: Mail provider down
+    description: "The external mail provider is unreachable for two minutes. Orders keep flowing, and the emails of those two minutes wait in their queue instead of being lost, as an email is tried ten times a minute apart, longer than the outage. Catching up is slow, though. The provider takes 200 calls a second against 120 a second of new mail, and the emailer fails a whole batch when one email in it is throttled, so emails that already went out go out again: the provider accepts some 87,000 for the 76,000 queued in the run. Texts, pushes, webhooks and everything else carry on as if nothing happened."
+    duration: 11m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the mail provider goes down
+        inject:
+          target: node:mail-provider
+          fault: Outage
+          for: 2m
+      - at: 3m
+        note: the mail provider is back
+    assert:
+      - check: app.errorRatio < 0.1%
+        name: Orders keep being placed
+      - check: email-queue.gauge.depth:max > 5000
+        name: Emails wait in the queue
+        from: 1m
+        to: 3m
+      - check: email-queue.total.deadLettered == 0
+        name: No email is lost
+      - check: sms-queue.gauge.depth:max < 60
+        name: Texts don't wait
+        from: 1m
+        to: 3m
+      - check: push-service.rate.ok > 60/s
+        name: Pushes go out
+        from: 1m
+        to: 3m
+      - check: partner-endpoints.rate.ok > 20/s
+        name: Webhooks go out
+        from: 1m
+        to: 3m
+      - check: email-queue.gauge.depth:last > 1000
+        name: The rate limit holds back the catch-up
+        from: 6m
+        to: 7m
+      - check: mail-provider.total.ok > 80000
+        name: The provider accepts more emails than were queued
+      - check: email-queue.gauge.depth:last < 100
+        name: Caught up within seven minutes of the outage ending
+        from: 9m
+        to: 10m
+  partner-down:
+    name: Partner endpoint down
+    description: The partners' webhook endpoint is down for four minutes, twice as long as a webhook's retry budget of four tries thirty seconds apart. Webhooks from the first two and a half minutes give up and land in the webhook DLQ, kept to be replayed to the partners; later ones wait and go out once the endpoint is back. Meanwhile the retries call the dead endpoint four times as often as usual. Nothing else notices. Emails, texts and pushes go out on time, search and audit keep up, and nothing lands in the notifications DLQ.
+    duration: 9m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the partners' endpoint goes down
+        inject:
+          target: node:partner-endpoints
+          fault: Outage
+          for: 4m
+      - at: 5m
+        note: it is back
+    assert:
+      - check: app.errorRatio < 0.1%
+        name: Orders keep being placed
+      - check: partner-endpoints.rate.in > 70/s
+        name: Retries call the dead endpoint four times as often
+        from: 2m
+        to: 5m
+      - check: webhook-queue.total.deadLettered > 3000
+        name: Webhooks give up and are dead-lettered
+        from: 1m
+        to: 6m
+      - check: webhook-dlq.gauge.depth:last > 3000
+        name: They wait in the webhook DLQ for a replay
+        from: 8m
+      - check: notifications-dlq.gauge.depth:max == 0
+        name: Nothing else is dead-lettered
+      - check: email-queue.gauge.depth:max < 100
+        name: Emails don't wait
+        from: 1m
+        to: 5m
+      - check: sms-queue.gauge.depth:max < 60
+        name: Texts don't wait
+        from: 1m
+        to: 5m
+      - check: push-service.rate.ok > 60/s
+        name: Pushes go out
+        from: 1m
+        to: 5m
+      - check: search-cluster.rate.ok > 100/s
+        name: The search index keeps up
+        from: 1m
+        to: 5m
+      - check: partner-endpoints.rate.ok > 20/s
+        name: Webhooks flow again once it is back
+        from: 6m
+  sms-throttled:
+    name: SMS gateway throttles
+    description: "The SMS gateway cuts us to 10 texts a second for four minutes. Texts wait in their queue, and every batch with a throttled text in it fails as a whole and comes back, the texts in it that did go out included. When the limit is back to 50 the backlog keeps it saturated: five batches of ten at once is all the gateway takes in a second, any retry tips it over, and most batches still fail. The gateway accepts about as many texts as were queued, yet only a third of them are done with: the rest went out two and three times, and those still failing after five tries are dead-lettered. Partial batch responses, which the webhook sender uses, avoid it: with them the backlog clears within four minutes of the limit coming back and nothing is sent twice. Email, push and everything else carry on as normal."
+    duration: 10m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the SMS gateway cuts us to 10 a second
+        set:
+          node: sms-provider
+          settings:
+            rateLimit: 10
+            burst: 10
+      - at: 5m
+        note: back to 50 a second
+        set:
+          node: sms-provider
+          settings:
+            rateLimit: 50
+            burst: 50
+    assert:
+      - check: app.errorRatio < 0.1%
+        name: Orders keep being placed
+      - check: sms-queue.gauge.oldestAgeMs:max > 100s
+        name: Texts wait
+        from: 1m
+        to: 5m
+      - check: sms-provider.rate.ok > 40/s
+        name: The gateway is back at full speed
+        from: 6m
+      - check: sms-provider.rate.fail.Throttled > 100/s
+        name: Yet the backlog keeps it throttled
+        from: 6m
+      - check: sms-provider.total.ok > 14000
+        name: The gateway accepts about as many texts as were queued
+        from: 1m
+      - check: sms-queue.total.deleted < 8000
+        name: But only a third leave the queue
+        from: 1m
+      - check: sms-queue.total.deadLettered > 3000
+        name: Texts are dead-lettered after the limit is back
+        from: 5m
+      - check: email-queue.gauge.depth:max < 100
+        name: Emails don't wait
+        from: 1m
+      - check: push-service.rate.ok > 60/s
+        name: Pushes go out
+        from: 1m
+      - check: partner-endpoints.rate.ok > 20/s
+        name: Webhooks go out
+        from: 1m

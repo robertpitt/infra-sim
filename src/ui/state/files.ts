@@ -15,15 +15,15 @@ import { run } from "./run.ts"
  * Replace the design and frame it on screen. Asks first when there is edit history that would be lost; false if the
  * answer was no. A scenario playing against the old design stops: it was written for that one.
  */
-export const openDesign = (design: Doc, confirmReplace = true): boolean => {
+export const openDesign = (design: Doc, confirmReplace = true, example?: string): boolean => {
   if (confirmReplace && doc.get().past.length > 0 && !window.confirm("Replace the current design? Your edits will be lost.")) return false
   if (run.get().scenario !== undefined) client.send({ _tag: "clearScenario" })
-  replaceDesign(design)
+  replaceDesign(design, example)
   requestAnimationFrame(() => fit(boundsOf(doc.get().design, catalog.get().byType)))
   return true
 }
 
-export const openExample = (example: Example): void => void openDesign(example.design())
+export const openExample = (example: Example): void => void openDesign(example.design(), true, example.id)
 
 export const fitView = (): void => fit(boundsOf(doc.get().design, catalog.get().byType))
 

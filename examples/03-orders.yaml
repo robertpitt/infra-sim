@@ -1,0 +1,517 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: Order pipeline
+description: |-
+  An online shop's order backend, about twenty components in one region: web and mobile checkouts go through an authorized API that takes the payment and queues the order, a worker reserves the stock and writes the order to a provisioned DynamoDB table, and the table's stream turns every order into an event for the confirmation email, fulfilment and analytics. Its Flash sale scenario brings five times the traffic for a minute, which outruns the orders table's write capacity: watch throttling, whole batches redelivered, orders dead-lettered, and auto scaling arriving after the rush. Downstream, the sale's shipments wait a few minutes behind the shipping partner's rate limit.
+
+  How it is wired: an HTTP API with a Lambda authorizer (session tokens, results cached for five minutes) invokes Place order, which authorizes the card with the payment provider, sends the order to the orders queue and answers the shopper. The order worker takes batches of ten, reserves the stock in the on-demand inventory table and writes the order to the orders table: 400 write units a second for the 240 that normal traffic needs (an order is 2 KB, two units), a burst bank of a minute's unused capacity, and DynamoDB auto scaling tracking 70% use, deciding once a minute. One throttled write fails its whole batch, which comes back after the 30-second visibility timeout; an order received three times goes to the dead-letter queue. Every write appears on the table's stream, which Order status events publishes to the order-events topic. The topic fans out to the confirmation email (a function sending through SES, the account's sending rate raised to 1,000 a second), to a fulfilment queue for the 85% of orders with something to ship, whose consumer is capped at sixteen concurrent batches to stay under the shipping partner's limit of 250 calls a second, and to an analytics queue that a batch writer lands in S3.
+
+  What the simulator cannot show: what an order contains (a filter policy is a share of messages, not a match on attributes); idempotency (a redelivered batch reserves its stock and writes its orders again, and every write is a new stream record here, even one that changes nothing, which DynamoDB would skip, so some shoppers get two emails); a stock-out or a declined card (either would be an error here, so neither happens); capturing the payment when the order ships; and the CloudWatch alarms behind DynamoDB auto scaling, which is target tracking on consumed write units here.
+seed: 7
+accounts:
+  aws:us-east-1:
+    sesSendingRate: 1000
+    sesDailyQuota: 20000000
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 352, y: -36 }
+    size: { w: 3172, h: 1020 }
+  web:
+    type: common.client
+    name: Web shoppers
+    region: us-east
+    settings:
+      rps: 80
+      payload: 2
+    position: { x: 0, y: 230 }
+  mobile:
+    type: common.client
+    name: Mobile app
+    region: us-east
+    settings:
+      rps: 40
+      payload: 2
+    position: { x: 0, y: 400 }
+  api:
+    type: aws.apigateway
+    name: Orders API
+    parent: aws-us-east-1
+    settings:
+      apiType: http
+      stageThrottle: { rate: 2000, burst: 1000 }
+      authorizer: { type: lambda, ttl: 300 seconds, identities: 20000 }
+    position: { x: 380, y: 300 }
+  session-authorizer:
+    type: aws.lambda
+    name: Session authorizer
+    parent: aws-us-east-1
+    settings:
+      memory: 256
+      duration: { mean: 15 }
+    position: { x: 700, y: 520 }
+  ingest:
+    type: aws.lambda
+    name: Place order
+    parent: aws-us-east-1
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 40 }
+      coldStart:
+        init:
+          mean: 250
+    position: { x: 700, y: 290 }
+  payments:
+    type: common.http-endpoint
+    name: Payment provider
+    region: us-east
+    settings:
+      latency: { mean: 250, cv: 0.5 }
+      rateLimit: 1000
+      burst: 1000
+    position: { x: 1020, y: -200 }
+  orders-queue:
+    type: aws.sqs
+    name: Orders queue
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 30 seconds
+      maxReceives: 3
+    position: { x: 1020, y: 290 }
+  dead-letters:
+    type: aws.sqs
+    name: Orders DLQ
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 1340, y: 520 }
+  worker:
+    type: aws.lambda
+    name: Order worker
+    parent: aws-us-east-1
+    settings:
+      memory: 1024
+      timeout: 10 seconds
+      duration: { mean: 150, cv: 0.4 }
+      reserved:
+        enabled: true
+        concurrency: 40
+    position: { x: 1340, y: 290 }
+  inventory:
+    type: aws.dynamodb
+    name: Inventory table
+    parent: aws-us-east-1
+    settings:
+      mode: on-demand
+    position: { x: 1660, y: 30 }
+  orders-table:
+    type: aws.dynamodb
+    name: Orders table
+    parent: aws-us-east-1
+    settings:
+      mode: provisioned
+      readCapacity: 200
+      writeCapacity: 400
+      burstSeconds: 60
+      stream:
+        view: new
+    position: { x: 1660, y: 278 }
+  order-status:
+    type: aws.lambda
+    name: Order status events
+    parent: aws-us-east-1
+    settings:
+      memory: 512
+      duration: { mean: 30 }
+    position: { x: 1980, y: 290 }
+  order-events:
+    type: aws.sns
+    name: Order events
+    parent: aws-us-east-1
+    position: { x: 2300, y: 302 }
+  send-confirmation:
+    type: aws.lambda
+    name: Send confirmation
+    parent: aws-us-east-1
+    settings:
+      memory: 256
+      duration: { mean: 40 }
+    position: { x: 2620, y: 30 }
+  email:
+    type: aws.ses
+    name: Order emails
+    parent: aws-us-east-1
+    position: { x: 2940, y: 70 }
+  fulfilment-queue:
+    type: aws.sqs
+    name: Fulfilment queue
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 60 seconds
+      maxReceives: 10
+    position: { x: 2620, y: 550 }
+  fulfilment-dlq:
+    type: aws.sqs
+    name: Fulfilment DLQ
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 2940, y: 780 }
+  fulfilment:
+    type: aws.lambda
+    name: Book shipment
+    parent: aws-us-east-1
+    settings:
+      memory: 512
+      timeout: 30 seconds
+      duration: { mean: 50 }
+    position: { x: 2940, y: 550 }
+  shipping:
+    type: common.http-endpoint
+    name: Shipping partner API
+    region: us-east
+    settings:
+      latency: { mean: 300, cv: 0.5 }
+      rateLimit: 250
+      burst: 250
+    position: { x: 3600, y: 590 }
+  analytics-queue:
+    type: aws.sqs
+    name: Analytics queue
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 2 minutes
+      maxReceives: 5
+    position: { x: 2620, y: 290 }
+  analytics-writer:
+    type: aws.lambda
+    name: Analytics batch writer
+    parent: aws-us-east-1
+    settings:
+      memory: 1024
+      timeout: 30 seconds
+      duration: { mean: 300 }
+      batchCalls: once
+    position: { x: 2940, y: 290 }
+  lake:
+    type: aws.s3
+    name: Order analytics bucket
+    parent: aws-us-east-1
+    position: { x: 3260, y: 302 }
+edges:
+  web.out->api:
+    from: { node: web }
+    to: api
+    settings:
+      timeout: 10 seconds
+      retry: { maxAttempts: 2, backoff: 100 millis }
+  mobile.out->api:
+    from: { node: mobile }
+    to: api
+    settings:
+      timeout: 10 seconds
+      retry: { maxAttempts: 3, backoff: 500 millis }
+  api.authorizer->session-authorizer:
+    from: { node: api, port: authorizer }
+    to: session-authorizer
+  api.out->ingest:
+    from: { node: api }
+    to: ingest
+  ingest.out->payments:
+    from: { node: ingest }
+    to: payments
+    settings:
+      timeout: 5 seconds
+  ingest.out->orders-queue:
+    from: { node: ingest }
+    to: orders-queue
+  orders-queue.deliver->worker:
+    from: { node: orders-queue, port: deliver }
+    to: worker
+    settings:
+      batchSize: 10
+      batchWindow: 0
+  orders-queue.dlq->dead-letters:
+    from: { node: orders-queue, port: dlq }
+    to: dead-letters
+  worker.out->inventory:
+    from: { node: worker }
+    to: inventory
+  worker.out->orders-table:
+    from: { node: worker }
+    to: orders-table
+  orders-table.stream->order-status:
+    from: { node: orders-table, port: stream }
+    to: order-status
+    settings:
+      batchSize: 100
+      batchWindow: 1 second
+  order-status.out->order-events:
+    from: { node: order-status }
+    to: order-events
+  order-events.out->send-confirmation:
+    from: { node: order-events }
+    to: send-confirmation
+  send-confirmation.out->email:
+    from: { node: send-confirmation }
+    to: email
+  order-events.out->fulfilment-queue:
+    from: { node: order-events }
+    to: fulfilment-queue
+    settings:
+      filterMatch: 0.85
+  fulfilment-queue.deliver->fulfilment:
+    from: { node: fulfilment-queue, port: deliver }
+    to: fulfilment
+    settings:
+      batchSize: 10
+      maxConcurrency: 16
+  fulfilment-queue.dlq->fulfilment-dlq:
+    from: { node: fulfilment-queue, port: dlq }
+    to: fulfilment-dlq
+  fulfilment.out->shipping:
+    from: { node: fulfilment }
+    to: shipping
+    settings:
+      timeout: 10 seconds
+  order-events.out->analytics-queue:
+    from: { node: order-events }
+    to: analytics-queue
+  analytics-queue.deliver->analytics-writer:
+    from: { node: analytics-queue, port: deliver }
+    to: analytics-writer
+    settings:
+      batchSize: 1000
+      batchWindow: 30 seconds
+      maxConcurrency: 5
+  analytics-writer.out->lake:
+    from: { node: analytics-writer }
+    to: lake
+controllers:
+  orders-write-scaling:
+    type: core.target-tracking
+    target: orders-table
+    name: DynamoDB write auto scaling
+    settings:
+      metric: consumedWrite
+      per: unit
+      targetValue: 0.7
+      setting: writeCapacity
+      min: 400
+      max: 4000
+      window: 2 minutes
+      period: 1 minute
+scenarios:
+  flash-sale:
+    name: Flash sale
+    description: A minute in, a flash sale brings five times the shoppers for a minute. They see nothing wrong, since their orders are queued, but behind the queue the orders table runs out of write capacity and banked burst. Throttled batches come back whole, orders received three times are dead-lettered, and auto scaling only raises the capacity after the rush is over. Shipments then queue up behind the shipping partner's rate limit.
+    duration: 5m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the flash sale starts, with five times the shoppers
+        set:
+          node: web
+          settings:
+            rps: 400
+      - at: 1m
+        set:
+          node: mobile
+          settings:
+            rps: 200
+      - at: 2m
+        note: the rush is over
+        set:
+          node: web
+          settings:
+            rps: 80
+      - at: 2m
+        set:
+          node: mobile
+          settings:
+            rps: 40
+    assert:
+      - check: system.errorRatio < 0.1%
+        name: Shoppers see nothing wrong
+      - check: orders-table.rate.fail.Throttled > 5/s
+        name: The table throttles the rush
+        from: 1m
+        to: 3m30s
+      - check: orders-queue.rate.redelivered > 80/s
+        name: Whole batches come back
+        from: 1m30s
+        to: 3m30s
+      - check: orders-queue.total.deadLettered > 300
+        name: Orders are dead-lettered
+      - check: orders-table.gauge.writeCapacity:max <= 400
+        name: Auto scaling doesn't react during the rush
+        from: 30s
+        to: 1m55s
+      - check: orders-table.gauge.writeCapacity:last > 800
+        name: It raises the capacity afterwards
+        from: 4m
+      - check: orders-queue.gauge.depth:mean < 50
+        name: The orders queue is clear again
+        from: 4m30s
+      - check: fulfilment-queue.gauge.depth:max > 8000
+        name: Shipments queue up behind the partner's rate limit
+  orders-peak:
+    name: Orders at peak
+    description: Three times the usual orders for a minute, with the orders table switched to on-demand capacity. On-demand takes the peak, so nobody sees an error and no order is dead-lettered. Downstream, the fulfilment queue holds the shipments the partner's rate limit can't take yet, and has caught up a minute after the peak.
+    duration: 4m
+    warmup: 30s
+    overrides:
+      nodes:
+        orders-table:
+          mode: on-demand
+    timeline:
+      - at: 1m
+        note: orders triple
+        set:
+          node: web
+          settings:
+            rps: 240
+      - at: 1m
+        set:
+          node: mobile
+          settings:
+            rps: 120
+      - at: 2m
+        note: back to normal
+        set:
+          node: web
+          settings:
+            rps: 80
+      - at: 2m
+        set:
+          node: mobile
+          settings:
+            rps: 40
+    assert:
+      - check: system.errorRatio < 0.1%
+        name: Nobody sees an error
+      - check: orders-table.rate.fail.Throttled == 0
+        name: On-demand takes the peak
+      - check: orders-queue.total.deadLettered == 0
+        name: No order is dead-lettered
+      - check: orders-queue.gauge.oldestAgeMs:max < 10s
+        name: Orders don't wait
+      - check: email.rate.fail == 0
+        name: Every confirmation is sent
+      - check: fulfilment-queue.gauge.depth:max > 2000
+        name: Shipments queue up behind the partner's rate limit
+        from: 1m
+        to: 2m30s
+      - check: shipping.rate.fail == 0
+        name: Bookings stay under the partner's rate limit
+      - check: fulfilment-queue.gauge.depth:mean < 100
+        name: The fulfilment queue has caught up
+        from: 3m30s
+  queue-the-rush:
+    name: Let the queue take the rush
+    description: The flash sale again, with the order worker's event source mapping capped at six concurrent batches, about 270 orders a second, which the table can write with its burst bank and a little help from auto scaling. The queue holds the rush instead of the table refusing it. Orders wait up to about eighty seconds, and none is throttled or dead-lettered.
+    duration: 6m
+    warmup: 30s
+    overrides:
+      edges:
+        orders-queue.deliver->worker:
+          maxConcurrency: 6
+    timeline:
+      - at: 1m
+        note: the flash sale starts, with five times the shoppers
+        set:
+          node: web
+          settings:
+            rps: 400
+      - at: 1m
+        set:
+          node: mobile
+          settings:
+            rps: 200
+      - at: 2m
+        note: the rush is over
+        set:
+          node: web
+          settings:
+            rps: 80
+      - at: 2m
+        set:
+          node: mobile
+          settings:
+            rps: 40
+    assert:
+      - check: orders-table.rate.fail.Throttled == 0
+        name: No write is throttled
+      - check: orders-queue.total.deadLettered == 0
+        name: No order is dead-lettered
+      - check: orders-queue.gauge.oldestAgeMs:max > 30s
+        name: Orders wait in the queue instead
+      - check: orders-queue.gauge.oldestAgeMs:max < 2m
+        name: But not for long
+      - check: orders-queue.gauge.depth:mean < 50
+        name: The queue has caught up
+        from: 5m30s
+      - check: system.errorRatio < 0.1%
+        name: Nobody sees an error
+  shipping-outage:
+    name: Shipping partner down
+    description: The shipping partner's API is down for five minutes. Shoppers don't notice and confirmations keep going out. Bookings pile up in the fulfilment queue, where ten receives a minute apart outlast the outage, so none is dead-lettered. When the partner is back the backlog drains at the consumer's cap, which keeps the catch-up under the partner's rate limit.
+    duration: 12m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: the shipping partner's API goes down
+        inject:
+          target: node:shipping
+          fault: Outage
+          for: 5m
+      - at: 6m
+        note: it is back
+    assert:
+      - check: system.errorRatio < 0.1%
+        name: Shoppers don't notice
+      - check: email.rate.send > 100/s
+        name: Confirmations keep going out
+        from: 1m
+        to: 6m
+      - check: fulfilment-queue.gauge.depth:max > 15000
+        name: Bookings pile up
+      - check: fulfilment-queue.total.deadLettered == 0
+        name: None is dead-lettered
+      - check: shipping.rate.in > 180/s
+        name: The backlog drains at the consumer's cap
+        from: 6m30s
+        to: 9m
+      - check: shipping.rate.fail == 0
+        name: The catch-up stays under the partner's rate limit
+        from: 6m30s
+      - check: fulfilment-queue.gauge.depth:mean < 100
+        name: The backlog is cleared
+        from: 11m30s
+  ses-starting-quota:
+    name: SES at its starting quota
+    description: Nobody asked AWS to raise the account's SES sending rate, so it is at 14 emails a second for 120 orders a second. Checkout doesn't notice. The confirmation function is throttled, Lambda retries each event twice, a minute and then two minutes later, and then gives up, and with no failure destination wired those confirmations are lost.
+    duration: 6m
+    warmup: 30s
+    overrides:
+      accounts:
+        aws:us-east-1:
+          sesSendingRate: 14
+    assert:
+      - check: system.errorRatio < 0.1%
+        name: Checkout doesn't notice
+      - check: email.rate.send < 15/s
+        name: SES sends 14 emails a second
+      - check: email.rate.fail.Throttled > 100/s
+        name: The rest are throttled
+        from: 1m
+      - check: send-confirmation.rate.asyncRetries > 100/s
+        name: Lambda retries them
+        from: 3m
+      - check: send-confirmation.rate.asyncFailed > 70/s
+        name: Then gives up on most
+        from: 3m30s

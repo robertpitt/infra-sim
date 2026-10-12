@@ -139,12 +139,12 @@ is the guide to writing one. The READMEs are the reference; this is the overview
 
 **Common** (`common/`): nothing in these belongs to a provider, so they model systems with no cloud in them too.
 
-- `common.client`: a traffic source. Poisson or constant arrivals, a spike, payload size, hot keys, message groups, sync or async. A chain of timers, no fiber per request.
+- `common.client`: a traffic source. Poisson or constant arrivals, payload size, hot keys, message groups, sync or async. A chain of timers, no fiber per request. Its rate is steady: a surge, a lull or a spike is a scenario's timeline setting the rate and setting it back.
 - `common.http-endpoint`: something outside your system. Latency, error rate, rate limit (429), concurrency limit (503), payload limit.
 - `common.service`: identical replicas behind a load balancer (a Kubernetes Deployment, an ECS service, a team taking tickets): `replicas × concurrency` workers, a queue with a limit (503 past it), a service time, downstream calls, and a start-up time for added replicas. Gauges `ready`, `starting`, `busy`, `queued`, `utilization`; an autoscaler tracks `busy` per replica.
 - `common.actor`: a family of single-threaded objects addressed by key (Durable Objects, actors, per-user sessions), made on first use (a cold start) and evicted when idle. Different keys run side by side; one key runs one request at a time, so a hot key is capped at one object's pace and only its queue grows (503 past a per-object limit). It can be held busy while it calls its store downstream, as a Durable Object's input gate holds it.
 
-The **Autoscaled cluster** example is built from these alone, with an autoscaling controller.
+The **Autoscaled cluster** example is built from these alone, with two autoscaling controllers tracking different metrics.
 
 **AWS** (`aws/`)
 
@@ -249,7 +249,7 @@ An edge's settings are flat: the source port's own fields (an SNS subscription's
 then the connector's, then transport's (`Connector.edgeSchema`). `Simulation.probeEdge(id)` returns the connector's state, and
 `inspect` lists each edge's connector. In the editor a connector that isn't a plain link is drawn as a badge on the line.
 
-Retries and orphaned work are what make retry storms and metastable failures emerge. The **Retry storm** example shows a dependency that never recovers after its trigger has gone.
+Retries and orphaned work are what make retry storms and metastable failures emerge. The **Retry storm** example shows retries at every layer multiplying a slow provider's load many times over, and nested timeouts with fewer, jittered retries keeping it to a few times.
 
 ## Controllers
 
@@ -342,7 +342,7 @@ const program = Effect.gen(function*() {
 
 ## Performance
 
-A busy design makes hundreds of thousands of calls per simulated minute, so the cost of one call is the whole story. Measured on the POS Hub example (130 nodes) at ten times its traffic, a run went from about 3.8× real time to about 26×, and the minimal client → endpoint path from roughly 20 µs a request to under 3. What changed, and the rules that keep it that way:
+A busy design makes hundreds of thousands of calls per simulated minute, so the cost of one call is the whole story. Measured on a large design (some eighty components) at ten times its traffic, a run went from about 3.8× real time to about 26×, and the minimal client → endpoint path from roughly 20 µs a request to under 3. What changed, and the rules that keep it that way:
 
 - **An edge call is a state machine, not a pipeline of effects.** `Edge.Link.send(message, done)` runs latency, timeout, retries with backoff and faults as a handful of world timers in plain JS, and forks one fiber only for the callee. `invoke` is a thin `Effect.callback` over it. (The previous `raceFirst` + `forkDetach` + `Effect.retry` cost dozens of effects and several fibers per call.)
 - **The node guard watches from outside.** Each call to a node starts its handler in a fiber with a ready-made context (`world.spawn(effect, context)`), and counts the outcome from the fiber's exit observer. Nothing wraps the handler's effect.

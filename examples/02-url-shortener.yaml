@@ -1,0 +1,401 @@
+# yaml-language-server: $schema=../schema/design.schema.json
+version: 1
+name: URL shortener
+description: |-
+  A link shortener: people and API customers create short links, and a far larger crowd follows them. Redirects are served from CloudFront's cache wherever it can, clicks are counted from the edge's logs, a dashboard shows each link's counts, and expired links are archived. About twenty-five components in us-east-1.
+
+  How it is wired: creating a link, by hand or from an import script, goes through an HTTP API with a JWT authorizer to a shorten function, which checks the target against a safe-browsing service (an outside API with a quota), stores the link in DynamoDB and draws its QR code into S3. Following a link hits a CloudFront distribution that caches redirects for an hour; a miss goes to a redirect API and a resolve function that reads the links table. The edge's real-time logs feed a clicks queue, and a counter function adds each click to the link's total in a click-counts table, which the stats API (a REST API with a sixty-second cache) reads for the dashboard. The links table expires old links with a TTL, and its stream carries every change, expiries included, to an archiver that keeps them in S3. The web app itself is static files behind a second distribution.
+
+  What the simulator cannot show: CloudFront's real-time logs and the Kinesis stream they go to (the logs are a client sending one record per click, and the stream is an SQS queue), a 404 for an expired link, and summing a batch's clicks per link before writing (each click is its own write here, which is what makes a hot link's counter hot).
+seed: 7
+nodes:
+  aws-us-east-1:
+    type: aws.region
+    name: us-east-1 (N. Virginia)
+    settings:
+      region: us-east-1
+    position: { x: 352, y: -46 }
+    size: { w: 1892, h: 1446 }
+  creators:
+    type: common.client
+    name: App and API users (create links)
+    region: us-east
+    settings:
+      rps: 8
+      payload: 1
+    position: { x: 0, y: 40 }
+  importer:
+    type: common.client
+    name: Bulk import scripts (API keys)
+    region: us-east
+    settings:
+      rps: 2
+      payload: 1
+    position: { x: 0, y: 170 }
+  visitors:
+    type: common.client
+    name: People following links
+    region: us-east
+    settings:
+      rps: 400
+      payload: 0.5
+    position: { x: 0, y: 330 }
+  click-log:
+    type: common.client
+    name: Edge click logs (real-time logs stand-in)
+    region: us-east
+    settings:
+      rps: 400
+      payload: 0.5
+    position: { x: 0, y: 600 }
+  dashboards:
+    type: common.client
+    name: Link owners' dashboards
+    region: us-east
+    settings:
+      rps: 6
+      payload: 1
+    position: { x: 0, y: 1010 }
+  web-visitors:
+    type: common.client
+    name: Web app visits
+    region: us-east
+    settings:
+      rps: 30
+      payload: 1
+    position: { x: 0, y: 1240 }
+  safe-browsing:
+    type: common.http-endpoint
+    name: Safe-browsing API
+    region: us-west
+    settings:
+      latency: { mean: 60, cv: 0.5 }
+      rateLimit: 40
+      burst: 40
+    position: { x: 1020, y: -200 }
+  links-api:
+    type: aws.apigateway
+    name: Links API
+    parent: aws-us-east-1
+    settings:
+      apiType: http
+      authorizer: { type: jwt }
+    position: { x: 380, y: 52 }
+  shorten:
+    type: aws.lambda
+    name: Shorten
+    parent: aws-us-east-1
+    settings:
+      memory: 512
+      timeout: 10 seconds
+      duration: { mean: 25 }
+    position: { x: 700, y: 40 }
+  qr-codes:
+    type: aws.s3
+    name: QR codes bucket
+    parent: aws-us-east-1
+    position: { x: 1340, y: 20 }
+  links:
+    type: aws.dynamodb
+    name: Links table
+    parent: aws-us-east-1
+    settings:
+      mode: on-demand
+      stream:
+        view: old
+      ttl:
+        expiresPerSecond: 3
+    position: { x: 1340, y: 290 }
+  redirect-cdn:
+    type: aws.cloudfront
+    name: Redirect CDN
+    parent: aws-us-east-1
+    settings:
+      objects: 500000
+      popularitySkew: 10
+      objectSize: 0.5
+      cache: { defaultTtl: 1 hour }
+    position: { x: 380, y: 330 }
+  redirect-api:
+    type: aws.apigateway
+    name: Redirect API
+    parent: aws-us-east-1
+    settings:
+      apiType: http
+    position: { x: 700, y: 300 }
+  resolve:
+    type: aws.lambda
+    name: Resolve
+    parent: aws-us-east-1
+    settings:
+      memory: 256
+      timeout: 3 seconds
+      duration: { mean: 6 }
+    position: { x: 1020, y: 290 }
+  archiver:
+    type: aws.lambda
+    name: Expiry archiver
+    parent: aws-us-east-1
+    settings:
+      memory: 256
+      duration: { mean: 40 }
+    position: { x: 1660, y: 300 }
+  archive:
+    type: aws.s3
+    name: Expired links archive
+    parent: aws-us-east-1
+    position: { x: 1980, y: 310 }
+  clicks-queue:
+    type: aws.sqs
+    name: Clicks stream (Kinesis stand-in)
+    parent: aws-us-east-1
+    settings:
+      visibilityTimeout: 30 seconds
+      maxReceives: 10
+    position: { x: 380, y: 560 }
+  clicks-dlq:
+    type: aws.sqs
+    name: Clicks DLQ
+    parent: aws-us-east-1
+    settings:
+      retention: 14 days
+    position: { x: 700, y: 770 }
+  counter:
+    type: aws.lambda
+    name: Click counter
+    parent: aws-us-east-1
+    settings:
+      memory: 512
+      timeout: 20 seconds
+      duration: { mean: 30 }
+    position: { x: 700, y: 560 }
+  click-counts:
+    type: aws.dynamodb
+    name: Click counts
+    parent: aws-us-east-1
+    settings:
+      mode: on-demand
+    position: { x: 1020, y: 760 }
+  stats-api:
+    type: aws.apigateway
+    name: Stats API
+    parent: aws-us-east-1
+    settings:
+      apiType: rest
+      authorizer: { type: cognito }
+      cache: { enabled: true, ttl: 60 seconds, keys: 2000 }
+    position: { x: 380, y: 990 }
+  stats:
+    type: aws.lambda
+    name: Stats
+    parent: aws-us-east-1
+    settings:
+      memory: 512
+      duration: { mean: 20 }
+    position: { x: 700, y: 980 }
+  app-cdn:
+    type: aws.cloudfront
+    name: Web app CDN
+    parent: aws-us-east-1
+    settings:
+      objects: 60
+      objectSize: 120
+    position: { x: 380, y: 1240 }
+  app-assets:
+    type: aws.s3
+    name: Web app bucket
+    parent: aws-us-east-1
+    position: { x: 700, y: 1220 }
+edges:
+  creators.out->links-api:
+    from: { node: creators }
+    to: links-api
+    settings:
+      timeout: 10 seconds
+      retry: { maxAttempts: 2, backoff: 500 millis }
+  importer.out->links-api:
+    from: { node: importer }
+    to: links-api
+    settings:
+      timeout: 10 seconds
+      retry: { maxAttempts: 2, backoff: 500 millis }
+  links-api.out->shorten:
+    from: { node: links-api }
+    to: shorten
+  shorten.out->safe-browsing:
+    from: { node: shorten }
+    to: safe-browsing
+    settings:
+      timeout: 2 seconds
+      request: { operation: read }
+  shorten.out->links:
+    from: { node: shorten }
+    to: links
+  shorten.out->qr-codes:
+    from: { node: shorten }
+    to: qr-codes
+    settings:
+      request: { operation: write, payload: 4 }
+  visitors.out->redirect-cdn:
+    from: { node: visitors }
+    to: redirect-cdn
+    settings:
+      timeout: 5 seconds
+      request: { operation: read }
+  redirect-cdn.out->redirect-api:
+    from: { node: redirect-cdn }
+    to: redirect-api
+    settings:
+      originType: custom
+      request: { operation: read }
+  redirect-api.out->resolve:
+    from: { node: redirect-api }
+    to: resolve
+  resolve.out->links:
+    from: { node: resolve }
+    to: links
+    settings:
+      request: { operation: read }
+  links.stream->archiver:
+    from: { node: links, port: stream }
+    to: archiver
+    settings:
+      batchSize: 100
+      batchWindow: 5 seconds
+  archiver.out->archive:
+    from: { node: archiver }
+    to: archive
+  click-log.out->clicks-queue:
+    from: { node: click-log }
+    to: clicks-queue
+  clicks-queue.deliver->counter:
+    from: { node: clicks-queue, port: deliver }
+    to: counter
+    settings:
+      batchSize: 100
+      batchWindow: 1 second
+      maxConcurrency: 10
+  clicks-queue.dlq->clicks-dlq:
+    from: { node: clicks-queue, port: dlq }
+    to: clicks-dlq
+  counter.out->click-counts:
+    from: { node: counter }
+    to: click-counts
+  dashboards.out->stats-api:
+    from: { node: dashboards }
+    to: stats-api
+    settings:
+      timeout: 10 seconds
+      request: { operation: read }
+  stats-api.out->stats:
+    from: { node: stats-api }
+    to: stats
+  stats.out->click-counts:
+    from: { node: stats }
+    to: click-counts
+    settings:
+      request: { operation: read }
+  web-visitors.out->app-cdn:
+    from: { node: web-visitors }
+    to: app-cdn
+    settings:
+      request: { operation: read }
+  app-cdn.out->app-assets:
+    from: { node: app-cdn }
+    to: app-assets
+    settings:
+      originType: s3
+      request: { operation: read }
+scenarios:
+  viral:
+    name: A link goes viral
+    description: One link is shared everywhere, and for two and a half minutes there are seven times the clicks, half of them on that link. CloudFront serves it from the edge, so the redirect path barely notices. The click counter does. One link's count is one item, an item lives on one partition, and a partition takes 1,000 writes a second. A batch that touches the throttle fails as a whole and comes back thirty seconds later, so counts fall a minute behind, then catch up. Summing a batch's clicks per link before writing (or spreading the counter over several items) would keep them current.
+    duration: 7m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: one link takes off
+        set:
+          node: visitors
+          settings:
+            rps: 3000
+            hotKeys: 0.5
+      - at: 1m
+        set:
+          node: click-log
+          settings:
+            rps: 3000
+            hotKeys: 0.5
+      - at: 3m30s
+        note: the crowd moves on
+        set:
+          node: visitors
+          settings:
+            rps: 400
+            hotKeys: 0
+      - at: 3m30s
+        set:
+          node: click-log
+          settings:
+            rps: 400
+            hotKeys: 0
+    assert:
+      - check: visitors.errorRatio < 0.1%
+        name: Nobody following a link notices
+        from: 1m
+        to: 3m30s
+      - check: redirect-api.rate.in < 600/s
+        name: The CDN takes the crowd; the origin sees a fraction
+        from: 1m
+        to: 3m30s
+      - check: click-counts.rate.fail.Throttled > 10/s
+        name: The viral link's counter is throttled
+        from: 1m
+        to: 3m30s
+      - check: clicks-queue.gauge.oldestAgeMs:max > 30s
+        name: Counts fall behind
+      - check: clicks-queue.total.deadLettered < 1
+        name: No click is lost
+      - check: clicks-queue.gauge.depth:last < 100
+        name: They catch up afterwards
+        from: 6m30s
+  bulk-import:
+    name: A customer bulk-imports links
+    description: A customer's script creates 120 links a second for three minutes. Every new link is checked with the safe-browsing API, whose quota is 40 calls a second. The script uses it up, its refused calls are retried (asking for more), and people creating links by hand are refused as often as the script. Redirects don't notice. A usage plan per API key on the links API would refuse the script alone, and caching verdicts per domain would spare the quota.
+    duration: 6m
+    warmup: 30s
+    timeline:
+      - at: 1m
+        note: an import script starts
+        set:
+          node: importer
+          settings:
+            rps: 120
+      - at: 4m
+        note: the import is done
+        set:
+          node: importer
+          settings:
+            rps: 2
+    assert:
+      - check: creators.errorRatio < 0.1%
+        name: Before, creating a link works
+        from: 30s
+        to: 1m
+      - check: safe-browsing.rate.fail.Throttled > 100/s
+        name: The import uses up the safe-browsing quota
+        from: 1m
+        to: 4m
+      - check: safe-browsing.rate.in > 180/s
+        name: Retries ask for more
+        from: 1m
+        to: 4m
+      - check: creators.errorRatio > 40%
+        name: People creating links by hand are refused too
+        from: 1m
+        to: 4m
+      - check: visitors.errorRatio < 0.1%
+        name: Redirects don't notice
+      - check: creators.errorRatio < 0.1%
+        name: Afterwards it works again
+        from: 4m30s

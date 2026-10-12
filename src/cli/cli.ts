@@ -244,7 +244,7 @@ const run = Command.make(
     { command: `infra-sim run @orders -d 5m --scale 3 --fault "node:ingest Outage at=2m for=1m" --assert "system.errorRatio < 5%"`, description: "Triple the traffic, lose a node for a minute, assert on the outcome" },
     { command: "infra-sim run @multi-region --scenario lose-us-east-1", description: "Play one of the design's own scenarios" },
     { command: "infra-sim run scenario.yaml --json", description: "Run a scenario file and print the whole result as data" },
-    { command: "infra-sim run @poshub -d 10m --frames frames.csv --json -o result.json", description: "Write the result and every metrics frame to files" }
+    { command: "infra-sim run @ingestion -d 10m --frames frames.csv --json -o result.json", description: "Write the result and every metrics frame to files" }
   ])
 )
 
@@ -297,7 +297,7 @@ const check = Command.make(
   Command.withExamples([
     { command: "infra-sim check design.yaml", description: "Validate a design" },
     { command: "infra-sim check scenario.yaml --json", description: "Validate a scenario, problems as data" },
-    { command: "infra-sim check @poshub --strict", description: "Treat warnings as failures too" }
+    { command: "infra-sim check @ingestion --strict", description: "Treat warnings as failures too" }
   ])
 )
 
@@ -593,7 +593,7 @@ export const root = Command.make("infra-sim").pipe(
   Command.withDescription(block(
     "Simulate cloud infrastructure under traffic and faults, from the command line.",
     "",
-    "<file> is a path, or @<example-id> for an example that ships with the tool (infra-sim run @poshub). It can be a design",
+    "<file> is a path, or @<example-id> for an example that ships with the tool (infra-sim run @ingestion). It can be a design",
     "(YAML/JSON), a scenario (YAML/JSON that names a design), or a template an importer reads.",
     "",
     "Output is text by default; --json (or --format json|yaml) prints the whole result as data for scripts and agents. Results",

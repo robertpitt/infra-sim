@@ -169,10 +169,13 @@ describe("aws.lambda: concurrency and rate limits", () => {
 
 describe("aws.lambda: giving back what an invocation held", () => {
   it("timeouts leave nothing running: concurrency and environments return to zero once traffic stops", async () => {
-    const { state } = await stateAt(
-      single({ load: { rps: 50, spike: { multiplier: 0, start: 10_000, duration: "1 day" } }, fn: { duration: { mean: 3_000, cv: 0 }, timeout: "1 second" } }),
-      30_000
-    )
+    const state = await sim(single({ load: { rps: 50 }, fn: { duration: { mean: 3_000, cv: 0 }, timeout: "1 second" } }), (s) =>
+      Effect.gen(function*() {
+        yield* s.advanceTo(10_000)
+        yield* s.configureNode("web", { arrival: "constant", rps: 0 })
+        yield* s.advanceTo(30_000)
+        return (yield* s.probe("fn")).state as Probe
+      }))
     expect(state.timeouts).toBeGreaterThan(100)
     expect(state.concurrent).toBe(0)
     expect(state.environments).toBe(0)
@@ -180,13 +183,15 @@ describe("aws.lambda: giving back what an invocation held", () => {
 
   it("a pool starved by a function that stopped is free again for another", () => {
     const b = Builder.make("pool", { seed: 4 })
-    const a = b.add("common.client", { id: "a", settings: { arrival: "constant", rps: 100, spike: { multiplier: 0, start: 10_000, duration: "1 day" } } })
+    const a = b.add("common.client", { id: "a", settings: { arrival: "constant", rps: 100 } })
     const d = b.add("common.client", { id: "d", settings: { arrival: "constant", rps: 0 } })
     b.connect(a, b.add("aws.lambda", { id: "fnA", settings: { duration: { mean: 2_000, cv: 0 }, timeout: "1 second" } }))
     b.connect(d, b.add("aws.lambda", { id: "fnD", settings: { duration: { mean: 50, cv: 0 } } }))
     b.account("aws:us-east-1", { lambdaConcurrency: 10 })
     return sim(b.build(), (s) =>
       Effect.gen(function*() {
+        yield* s.advanceTo(10_000)
+        yield* s.configureNode("a", { arrival: "constant", rps: 0 })
         yield* s.advanceTo(20_000)
         yield* s.configureNode("d", { rps: 5 })
         const all = yield* s.advanceTo(40_000)

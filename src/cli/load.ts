@@ -25,7 +25,7 @@ export interface LoadOptions {
   readonly rps?: number
 }
 
-/** `@poshub` and `example:poshub` name an example that ships with the tool. */
+/** `@ingestion` and `example:ingestion` name an example that ships with the tool. */
 export const resolveReference = (io: IO, reference: string): string => {
   const id = reference.startsWith("@") ? reference.slice(1) : reference.startsWith("example:") ? reference.slice(8) : undefined
   if (id === undefined) return path.resolve(io.cwd(), reference)

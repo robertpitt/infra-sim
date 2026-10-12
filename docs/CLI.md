@@ -37,7 +37,7 @@ infra-sim --completions zsh         # a shell completion script: bash, zsh, fish
 | `schema [design\|scenario]` | The JSON Schema of a design file (or a scenario file), for editors and agents. |
 | `docs [topic]` | This guide (`cli`), the assertion syntax (`assertions`), the faults (`faults`). |
 
-`<file>` is a path, or `@<id>` for a bundled example (`infra-sim run @poshub`). It may be a **design**, a **scenario**, or a
+`<file>` is a path, or `@<id>` for a bundled example (`infra-sim run @ingestion`). It may be a **design**, a **scenario**, or a
 **template** an importer understands; the tool tells which by what is in it.
 
 ## Exit codes
@@ -111,7 +111,7 @@ infra-sim run @orders -d 5m --scale 3 --seed 11
 infra-sim run @orders -d 5m --set "orders-table:mode=on-demand" --set "account:aws:us-east-1:lambdaConcurrency=200"
 infra-sim run @multi-region -d 6m --fault "region:aws:us-east-1 Outage at=2m for=2m" --assert "users-us.errorRatio < 5%"
 infra-sim run scenario.yaml --json > result.json
-infra-sim run @poshub -d 10m --frames frames.csv --json -o result.json
+infra-sim run @ingestion -d 10m --frames frames.csv --json -o result.json
 ```
 
 | Flag | |
@@ -137,7 +137,7 @@ Scenarios are usually written **in the design**, under `scenarios`, because they
 or more (`infra-sim examples` lists them). Play one with `--scenario <id>`:
 
 ```yaml
-# in the design (examples/03-multi-region.yaml)
+# in the design (examples/05-multi-region.yaml)
 scenarios:
   lose-us-east-1:
     name: Lose us-east-1
@@ -159,7 +159,7 @@ template an importer reads). Its fields are the same, plus `version` and `design
 ```yaml
 version: 1
 name: Lose us-east-1
-design: ../examples/03-multi-region.yaml   # path (relative to this file) to a design, or a template an importer reads; or an inline design
+design: ../examples/05-multi-region.yaml   # path (relative to this file) to a design, or a template an importer reads; or an inline design
 seed: 5
 duration: 6m
 warmup: 30s

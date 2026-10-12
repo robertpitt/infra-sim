@@ -360,6 +360,6 @@ export const Discard = Schema.Struct({
 export const ports = {
   out: Component.port.many("Next"),
   stream: Component.port.many("DynamoDB Stream", StreamConsumer),
-  replicas: Component.port.many("Global table replicas", Replica),
+  replicas: Component.port.replication("Global table replicas", Replica),
   discarded: Component.port.many("Discarded stream records", Discard)
 }

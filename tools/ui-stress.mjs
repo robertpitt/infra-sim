@@ -1,4 +1,4 @@
-// Is the page still smooth while the engine runs flat out? Opens POS Hub at a high speed and measures frame gaps and long tasks.
+// Is the page still smooth while the engine runs flat out? Opens the event ingestion platform at a high speed and measures frame gaps and long tasks.
 //   npm run dev   then   node tools/ui-stress.mjs [speed]
 import { chromium } from "playwright"
 import fs from "node:fs"
@@ -15,7 +15,7 @@ await page.evaluate(() => localStorage.clear())
 await page.reload()
 await page.waitForSelector(".node")
 await page.locator(".section-toggle", { hasText: "Examples" }).click()
-await page.getByRole("button", { name: /POS Hub/ }).click()
+await page.getByRole("button", { name: /Event ingestion/ }).click()
 await page.waitForTimeout(1500)
 // The speed bar steps between round speeds with the arrow keys: go up to the first at or above the one asked for.
 const speed = Number(process.argv[2] ?? "50")

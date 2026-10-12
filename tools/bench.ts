@@ -1,5 +1,5 @@
 // Benchmark an example design: how much CPU a simulated stretch costs, at a multiple of its traffic.
-//   npx tsx tools/bench.ts [example-id] [virtual-ms] [traffic-scale]      e.g.  poshub 60000 10
+//   npx tsx tools/bench.ts [example-id] [virtual-ms] [traffic-scale]      e.g.  ingestion 60000 10
 // Reports CPU time, not wall time: this machine is rarely idle, and wall time moves with whatever else is running.
 import fs from "node:fs"
 import { Effect } from "effect"
@@ -14,7 +14,7 @@ const example = (id: string): Design.Doc => {
   return YAML.parse(fs.readFileSync(`examples/${file}`, "utf8")) as Design.Doc
 }
 
-const which = process.argv[2] ?? "poshub"
+const which = process.argv[2] ?? "ingestion"
 const virtualMs = Number(process.argv[3] ?? 60_000)
 const scale = Number(process.argv[4] ?? 1)
 const base = example(which)

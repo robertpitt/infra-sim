@@ -368,6 +368,11 @@ const issuesOf = (error: unknown): ReadonlyArray<string> => {
   })
 }
 
+const unknownSetting = (node: string, type: string, key: string): string =>
+  type === "common.client" && key === "spike"
+    ? `${node}: "spike" is no longer a setting, and is ignored. A traffic spike is a scenario now: a timeline that sets the rate, then sets it back.`
+    : `${node}: "${key}" isn't one of its settings, and is ignored`
+
 const decodeSettings = (schema: Schema.Top, settings: Readonly<Record<string, unknown>> | undefined) =>
   Schema.decodeUnknownResult(schema as Schema.Decoder<unknown>)(settings ?? {})
 
@@ -402,6 +407,11 @@ export const resolve = (doc: Doc, registry: Components): Resolution => {
       continue
     }
     decodedNodes.set(id, { spec, component, config: decoded.success })
+    // A setting the component doesn't have (a typo, or a file older than the component) is ignored, so say so.
+    const fields = (component.config as { readonly fields?: Readonly<Record<string, unknown>> }).fields
+    for (const key of fields === undefined ? [] : Object.keys(spec.settings ?? {}).filter((k) => !(k in fields))) {
+      diagnostics.push({ level: "warning", code: "unknown-setting", node: id, message: unknownSetting(label(id), spec.type, key) })
+    }
   }
 
   // Pass 2: containers decide where their contents run.
