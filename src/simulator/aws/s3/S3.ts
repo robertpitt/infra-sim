@@ -1,35 +1,20 @@
-import { Duration, Effect, SubscriptionRef } from "effect"
+import { Duration, Effect } from "effect"
 import * as Distribution from "../../Distribution.ts"
 import * as Flow from "../../Flow.ts"
-import type { Message } from "../../Message.ts"
 import { Outbox } from "../../kit/Outbox.ts"
 import * as Refuse from "../../kit/Refuse.ts"
-import { chance, mix, passes, records } from "../../kit/Shape.ts"
+import { mix, records } from "../../kit/Shape.ts"
 import { counters, tallies, totals } from "../../kit/Tally.ts"
-import * as Aws from "../provider.ts"
-import { ARCHIVE_CLASSES, config, ports, state } from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { carriesBody, isUpload, type Kind, newPlan, plan as planTransfer, tooLarge } from "./transfer.ts"
-import { D, DIRECTORY_RATE, EVENT_BYTES, MAX_OBJECT_BYTES, MiB, PREFIX_RATE, QUOTAS } from "./limits.ts"
-import { PrefixTable, prefixIndex } from "./prefixes.ts"
-
-/**
- * The most separate notification messages one call fans out into. S3 sends one event per object; a message that
- * stands for thousands of requests (a batch) is sent as this many messages carrying the events between them, so one
- * call can never arm an unbounded number of timers.
- */
-const MAX_EVENT_MESSAGES = 100
-
-/**
- * Replicas carry this message group so the destination can tell them from a client's writes: S3 does not replicate a
- * replica again (that needs Batch Replication), which keeps two buckets replicating to each other from looping.
- */
-const REPLICA_GROUP = "s3:replica"
+import * as Aws from "../internal/provider.ts"
+import { ARCHIVE_CLASSES, config, ports, state } from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { type Fanout, notify, replicate } from "./internal/events.ts"
+import { carriesBody, isUpload, type Kind, newPlan, plan as planTransfer, tooLarge } from "./internal/transfer.ts"
+import { D, DIRECTORY_RATE, MAX_OBJECT_BYTES, PREFIX_RATE, QUOTAS } from "./internal/limits.ts"
+import { MiB } from "../internal/units.ts"
+import { PrefixTable, prefixIndex } from "./internal/prefixes.ts"
 
 const ARCHIVED = new Set<string>(ARCHIVE_CLASSES)
-
-/** Bytes a second at `gbps` gigabits a second, per millisecond. */
-const bytesPerMsAt = (gbps: number): number => (gbps * 1e9) / 8 / 1000
 
 export const S3 = Aws.component({
   type: "aws.s3",
@@ -100,57 +85,16 @@ export const S3 = Aws.component({
         const rate = fast.settings().bucketType === "directory" ? DIRECTORY_RATE : PREFIX_RATE
         return read ? rate.read : rate.write
       }
-      node.meter.gaugeUnsafe("readCeiling", () => Math.max(floorOf(true), table.highest(true)))
-      node.meter.gaugeUnsafe("writeCeiling", () => Math.max(floorOf(false), table.highest(false)))
+      const ceilingOf = (read: boolean): number => Math.max(floorOf(read), table.highest(read))
+      node.meter.gaugeUnsafe("readCeiling", () => ceilingOf(true))
+      node.meter.gaugeUnsafe("writeCeiling", () => ceilingOf(false))
 
       // Failures are values with no per-call content: build each once.
       const slowDown = Refuse.throttled(node.id, "503 Slow Down: reduce your request rate")
       const archivedObject = Refuse.rejected(node.id, "403 InvalidObjectState: the object is archived; restore it before reading")
       const entityTooLarge = Refuse.rejected(node.id, "400 EntityTooLarge: a single PUT is limited to 5 GB; use multipart upload (and an object is at most 48.8 TiB)")
 
-      /** One event per object created (`created`) or removed, to every destination subscribed to that kind. */
-      const notify = (message: Message, objects: number, created: boolean): void => {
-        const c = fast.settings()
-        // An S3 notification has no message group, whatever the client's request had.
-        const { group: _group, firstEnqueuedAt: _enqueued, ...base } = message
-        const messages = Math.min(objects, MAX_EVENT_MESSAGES)
-        const each = Math.floor(objects / messages)
-        const extra = objects - each * messages
-        for (const link of events) {
-          const subscription = SubscriptionRef.getUnsafe(link.config)
-          if (subscription.eventTypes !== "all" && (subscription.eventTypes === "created") !== created) continue
-          for (let i = 0; i < messages; i++) {
-            if (!passes(fast.random, subscription.filter)) continue
-            const event: Message = { ...base, bytes: EVENT_BYTES, count: each + (i < extra ? 1 : 0), operation: "write", invocation: "async" }
-            // S3 calls Lambda asynchronously. The delay is S3's own, before any network hop.
-            notifications.send(link, event, Distribution.latencyMs(c.notificationDelay, fast.random))
-            // At-least-once: some are delivered twice, each copy on its own delay.
-            if (chance(fast.random, c.duplicateRate)) notifications.send(link, event, Distribution.latencyMs(c.notificationDelay, fast.random))
-          }
-        }
-      }
-
-      /**
-       * Copy a new object to every replication destination, after the replication delay. With Replication Time Control
-       * the bytes also queue through the account's RTC pipe, so a region replicating more than its quota falls behind.
-       */
-      const replicate = (message: Message, bytes: number): void => {
-        if (replicas.length === 0 || message.group === REPLICA_GROUP) return
-        const c = fast.settings()
-        for (const link of replicas) {
-          if (!passes(fast.random, SubscriptionRef.getUnsafe(link.config).filter)) continue
-          const now = fast.now()
-          let lag = Distribution.latencyMs(c.replicationDelay, fast.random)
-          if (c.replicationTimeControl) {
-            const rate = bytesPerMsAt((fast.account() as Aws.Account).s3ReplicationTransferRate)
-            const start = pipe.busyUntil > now ? pipe.busyUntil : now
-            pipe.busyUntil = start + bytes / rate
-            lag = Math.max(lag, pipe.busyUntil - now)
-          }
-          const replica: Message = { ...message, bytes, operation: "write", invocation: "async", group: REPLICA_GROUP }
-          replication.send(link, replica, lag, 1, (failure) => failure === undefined && replicationLag.add(fast.now() - now))
-        }
-      }
+      const fanout: Fanout = { fast, events, replicas, notifications, replication, pipe, replicationLag }
 
       return {
         call: (message) => {
@@ -180,8 +124,7 @@ export const S3 = Aws.component({
           planTransfer(scratch, kind, count, body, c.multipart, perConnection, c.multipart.enabled ? Duration.toMillis(latency.mean) / speedUp : 0)
 
           // Requests land on a prefix by their key. Each prefix has its own allowance, and reads and writes are counted apart.
-          const floor = reading ? (directory ? DIRECTORY_RATE.read : PREFIX_RATE.read) : (directory ? DIRECTORY_RATE.write : PREFIX_RATE.write)
-          const allowance = table.get(directory ? 0 : prefixIndex(message.key, c.prefixes), reading, floor, c.prefixScaling)
+          const allowance = table.get(directory ? 0 : prefixIndex(message.key, c.prefixes), reading, floorOf(reading), c.prefixScaling)
           if (!node.limiter.takeUnsafe(allowance.key, allowance.bucket, scratch.tokens)) {
             throttled[reading ? "reads" : "writes"].add(count)
             m["5xxErrors"].n += count
@@ -256,8 +199,8 @@ export const S3 = Aws.component({
               // Strongly consistent: the object is visible the moment the call returns. Notifications and replicas
               // follow later, off the request path.
               if (!reading) {
-                if (events.length > 0) notify(message, count, kind !== "delete")
-                if (isUpload(kind)) replicate(message, body)
+                if (events.length > 0) notify(fanout, message, count, kind !== "delete")
+                if (isUpload(kind)) replicate(fanout, message, body)
               }
               return undefined
             },
@@ -273,7 +216,7 @@ export const S3 = Aws.component({
             throttled: totals(throttled),
             refused: totals(refused),
             transferring,
-            scaled: { prefixes: table.scaled.size, readCeiling: Math.max(floorOf(true), table.highest(true)), writeCeiling: Math.max(floorOf(false), table.highest(false)) },
+            scaled: { prefixes: table.scaled.size, readCeiling: ceilingOf(true), writeCeiling: ceilingOf(false) },
             notifications: { destinations: events.length, pending: notifications.pending, delivered: notifications.delivered.total, undelivered: notifications.undelivered.total },
             replication: { destinations: replicas.length, pending: replication.pending, delivered: replication.delivered.total, undelivered: replication.undelivered.total }
           }

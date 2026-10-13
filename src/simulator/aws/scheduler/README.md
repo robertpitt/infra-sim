@@ -107,7 +107,7 @@ A source: nothing calls it. Ports:
   at 1 attempt, as the retry policy is the schedule's.
 - `dlq` (Dead-letter queue, one): an SQS queue; wiring it is what gives the schedule a dead-letter queue.
 
-CloudFormation import: not mapped yet. `importers/cloudformation/events.ts` turns an `AWS::Scheduler::Schedule` into a
+CloudFormation import: not mapped yet. `importers/internal/cloudformation/events.ts` turns an `AWS::Scheduler::Schedule` into a
 constant-rate client at the expression's average rate; it could become this component, with `ScheduleExpression`,
 `FlexibleTimeWindow`, `Target.RetryPolicy` and `Target.DeadLetterConfig` mapped across.
 
@@ -137,7 +137,7 @@ Distributions: `latency` (creation to success, as a client's), `startLatency` (c
 Probe state: `next` (virtual ms of the next occurrence, −1 for none), `occurrences`, `windows` (occurrences still
 invoking), `noTarget`, `pending`, the outcome totals above (not `targetErrors`, `targetThrottled`) and `quotaWait`.
 
-The node's dashboard (`dashboard.ts`) charts these under CloudWatch's names. `InvocationsSentToDeadLetterCount_Truncated_*`
+The node's dashboard (`internal/dashboard.ts`) charts these under CloudWatch's names. `InvocationsSentToDeadLetterCount_Truncated_*`
 and the per-error-code `InvocationsFailedToBeSentToDeadLetterCount_<code>` aren't modelled.
 
 ## Not yet simulated

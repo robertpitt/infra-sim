@@ -1,8 +1,7 @@
 import { Duration, Effect, Schema, Stream, SubscriptionRef } from "effect"
-import type { Call, CallFailure } from "../../Message.ts"
 import { tallies, totals } from "../../kit/Tally.ts"
-import * as Aws from "../provider.ts"
-import { Cluster, ZoneMap } from "./cluster.ts"
+import * as Aws from "../internal/provider.ts"
+import { Cluster, ZoneMap } from "./internal/cluster.ts"
 import {
   Config,
   heapBytes,
@@ -15,27 +14,11 @@ import {
   SOURCES,
   WRITE_QUEUE,
   writeThreads
-} from "./config.ts"
-import type { DataNode } from "./node.ts"
-import { Refresh } from "./refresh.ts"
-import { dashboard } from "./dashboard.ts"
-import { type Answer, type Context, type Counter, makeMetrics, search, write } from "./requests.ts"
-
-const COUNTERS: ReadonlyArray<Counter> = [
-  "writeRequests",
-  "searchRequests",
-  "indexed",
-  "replicated",
-  "searchShards",
-  "partialSearches",
-  "writeRejected",
-  "searchRejected",
-  "pressureRejected",
-  "replicaRejected",
-  "unavailableDocs",
-  "unavailableShards",
-  "lostTasks"
-]
+} from "./internal/config.ts"
+import { Refresh } from "./internal/refresh.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { call, type Context, COUNTERS, type Counter, makeMetrics } from "./internal/requests.ts"
+import { Usage } from "./internal/usage.ts"
 
 const STATUS = ["green", "yellow", "red"] as const
 
@@ -117,21 +100,7 @@ export const OpenSearch = Aws.component({
       indexingBytes: Schema.Number,
       replicaBytes: Schema.Number
     })),
-    totals: Schema.Struct({
-      writeRequests: Schema.Number,
-      searchRequests: Schema.Number,
-      indexed: Schema.Number,
-      replicated: Schema.Number,
-      searchShards: Schema.Number,
-      partialSearches: Schema.Number,
-      writeRejected: Schema.Number,
-      searchRejected: Schema.Number,
-      pressureRejected: Schema.Number,
-      replicaRejected: Schema.Number,
-      unavailableDocs: Schema.Number,
-      unavailableShards: Schema.Number,
-      lostTasks: Schema.Number
-    }),
+    totals: Schema.Struct(Object.fromEntries(COUNTERS.map((name) => [name, Schema.Number])) as Record<Counter, typeof Schema.Number>),
     refresh: Schema.Struct({ intervalMs: Schema.Number, unrefreshed: Schema.Number, lagMs: Schema.Number })
   }),
   make: (node) =>
@@ -157,67 +126,25 @@ export const OpenSearch = Aws.component({
       // A zone's outage fails its data nodes, and its end brings them back, as `failover.failedNodes` does. The engine
       // leaves zone faults to the domain (`handlesZoneFaults`); an Outage on the node is still the endpoint down.
       const zonesChanged = (): void => {
-        let changed = false
-        for (let z = 0; z < zones.names.length; z++) {
-          const down = node.zones.down(zones.names[z]!) ? 1 : 0
-          if (zones.lost[z] === down) continue
-          zones.lost[z] = down
-          changed = true
-        }
-        if (!changed) return
-        zones.anyLost = zones.lost.includes(1)
+        if (!zones.refresh((zone) => node.zones.down(zone))) return
         cluster.reconcile(fast.settings())
         cluster.zonesChanged()
       }
       const unwatch = node.faults.watch(zonesChanged)
       yield* Effect.addFinalizer(() => Effect.sync(unwatch))
 
-      /** Nodes in the cluster right now (a scale-in leaves old ones behind, holding nothing). */
-      const members = () => cluster.nodes.slice(0, fast.settings().dataNodes)
-
-      // CPU utilisation is measured over each frame, once for every gauge and the probe that read it.
-      let sampledAt = -1
-      let cpuMean = 0
-      let cpuMax = 0
-      const perNodeCpu: Array<number> = []
-      const sampleCpu = (): void => {
-        const now = fast.now()
-        if (now === sampledAt) return
-        sampledAt = now
-        let sum = 0
-        let live = 0
-        cpuMax = 0
-        for (const n of members()) {
-          const u = n.cpu.sample()
-          perNodeCpu[n.index] = u
-          if (!n.up) continue
-          sum += u
-          live++
-          if (u > cpuMax) cpuMax = u
-        }
-        cpuMean = live > 0 ? sum / live : 0
-      }
-      const sum = (read: (n: DataNode) => number): number => {
-        let total = 0
-        for (const n of members()) if (n.up) total += read(n)
-        return total
-      }
-      const max = (read: (n: DataNode) => number): number => {
-        let most = 0
-        for (const n of members()) if (n.up) most = Math.max(most, read(n))
-        return most
-      }
+      const usage = new Usage(fast, cluster)
       const pressureLimit = (): number => heapBytes(INSTANCE_TYPES[fast.settings().instanceType]) * INDEXING_PRESSURE_SHARE
 
-      node.meter.gaugeUnsafe("cpu", () => (sampleCpu(), cpuMean))
-      node.meter.gaugeUnsafe("cpuMax", () => (sampleCpu(), cpuMax))
-      node.meter.gaugeUnsafe("writeActive", () => sum((n) => n.write.running))
-      node.meter.gaugeUnsafe("writeQueue", () => sum((n) => n.write.queued))
-      node.meter.gaugeUnsafe("writeQueueMax", () => max((n) => n.write.queued))
-      node.meter.gaugeUnsafe("searchActive", () => sum((n) => n.search.running))
-      node.meter.gaugeUnsafe("searchQueue", () => sum((n) => n.search.queued))
-      node.meter.gaugeUnsafe("searchQueueMax", () => max((n) => n.search.queued))
-      node.meter.gaugeUnsafe("indexingPressure", () => max((n) => n.indexingBytes) / pressureLimit())
+      node.meter.gaugeUnsafe("cpu", () => (usage.sampleCpu(), usage.cpuMean))
+      node.meter.gaugeUnsafe("cpuMax", () => (usage.sampleCpu(), usage.cpuMax))
+      node.meter.gaugeUnsafe("writeActive", () => usage.sum((n) => n.write.running))
+      node.meter.gaugeUnsafe("writeQueue", () => usage.sum((n) => n.write.queued))
+      node.meter.gaugeUnsafe("writeQueueMax", () => usage.max((n) => n.write.queued))
+      node.meter.gaugeUnsafe("searchActive", () => usage.sum((n) => n.search.running))
+      node.meter.gaugeUnsafe("searchQueue", () => usage.sum((n) => n.search.queued))
+      node.meter.gaugeUnsafe("searchQueueMax", () => usage.max((n) => n.search.queued))
+      node.meter.gaugeUnsafe("indexingPressure", () => usage.max((n) => n.indexingBytes) / pressureLimit())
       node.meter.gaugeUnsafe("unrefreshed", () => refresh.unrefreshed)
       node.meter.gaugeUnsafe("refreshLag", () => refresh.lag())
       node.meter.gaugeUnsafe("clusterStatus", () => cluster.status())
@@ -231,38 +158,13 @@ export const OpenSearch = Aws.component({
       node.meter.gaugeUnsafe("waitingWrites", () => cluster.waiting)
 
       return {
-        call: (message): Call => {
-          let early: Call | undefined
-          let resume: ((effect: Call) => void) | undefined
-          const reply: Answer = (failure) => {
-            const effect: Call = failure === undefined ? Effect.void : Effect.fail(failure)
-            if (resume !== undefined) resume(effect)
-            else early = effect
-          }
-          const started = message.operation === "read" ? search(ctx, message, reply) : write(ctx, message, reply)
-          if (typeof started !== "function") return Effect.fail(started)
-          // Answered before anything had to wait (every shard refused it at once, say).
-          if (early !== undefined) return early
-          return Effect.callback<void, CallFailure>((r) => {
-            if (early !== undefined) return r(early)
-            resume = r
-            return Effect.sync(started)
-          })
-        },
+        call: (message) => call(ctx, message),
         probe: Effect.sync(() => {
           const c = fast.settings()
           cluster.reconcile(c)
           const type = INSTANCE_TYPES[c.instanceType]
-          const nodes = members()
-          const held = nodes.map(() => ({ primaries: 0, replicas: 0 }))
-          for (const shard of cluster.shards) {
-            for (const copy of shard.copies) {
-              const h = held[copy]
-              if (h === undefined) continue
-              if (copy === shard.primary) h.primaries++
-              else h.replicas++
-            }
-          }
+          const nodes = usage.members()
+          const held = usage.held(nodes)
           const unassigned = cluster.unassigned()
           const domainZones = [...new Set(nodes.map((n) => cluster.zoneName(n.index)))].filter((z) => z !== "")
           return {
@@ -290,7 +192,7 @@ export const OpenSearch = Aws.component({
               up: n.up,
               primaries: held[i]!.primaries,
               replicas: held[i]!.replicas,
-              cpu: perNodeCpu[n.index] ?? 0,
+              cpu: usage.perNodeCpu[n.index] ?? 0,
               write: { active: n.write.running, queued: n.write.queued, rejected: n.write.rejected },
               search: { active: n.search.running, queued: n.search.queued, rejected: n.search.rejected },
               indexingBytes: n.indexingBytes,

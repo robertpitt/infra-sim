@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect"
 import * as Setting from "../../Setting.ts"
-import * as Aws from "../provider.ts"
-import { REGIONS_SOURCE } from "./catalog.ts"
+import * as Aws from "../internal/provider.ts"
+import { REGIONS_SOURCE } from "./Catalog.ts"
 
 const ids = Aws.provider.regions.map((r) => r.id) as [string, ...Array<string>]
 const labels = Object.fromEntries(Aws.provider.regions.map((r) => [r.id, `${r.name} (${r.id})`]))

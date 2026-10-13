@@ -28,7 +28,7 @@ second fleet, the nodes; rolling updates are the core's `Rollout`, replacing pod
 | Horizontal Pod Autoscaler | 🟡 | A `core.target-tracking` controller on `replicas` with metric `cpuPods`. See "The HPA as target tracking" for what differs. |
 | Cluster Autoscaler | ✅ | 10 s scans, scale-up for unschedulable pods counting nodes already launching, scale-down under 50% after 10 min, 10 min after a scale-up, empty nodes in bulk. |
 | Karpenter | ✅ | Batching (1 s idle, 10 s max), direct launches, consolidation (WhenEmpty, WhenEmptyOrUnderutilized), consolidateAfter, 10% budget. One instance type (no right-sizing). |
-| EC2 vCPU quota | ✅ | Nodes count against the region's Standard On-Demand vCPUs, shared with every instance (`../ec2/vcpus.ts`). |
+| EC2 vCPU quota | ✅ | Nodes count against the region's Standard On-Demand vCPUs, shared with every instance (`../ec2/Vcpus.ts`). |
 | **Failures** | | |
 | Node failure and eviction | ✅ | A dead node's pods die with it; Kubernetes replaces them after the node monitor grace period (50 s) plus the toleration (300 s), or when the node is replaced. |
 | Zone outage | ✅ | Its nodes and pods die; nodes added afterwards go to the other zones. |
@@ -155,7 +155,7 @@ Gauges: `replicas`, `ready`, `pending`, `starting`, `terminating`, `busy`, `queu
 the nodes' allocatable, 0-1: a busy worker is its share of its pod's request), `ready.<zone>`, `nodes.<zone>`. Rates and
 latency as every node.
 
-The dashboard (`dashboard.ts`) charts them as Container Insights does: pods by status (`pod_status_ready`,
+The dashboard (`internal/dashboard.ts`) charts them as Container Insights does: pods by status (`pod_status_ready`,
 `pod_status_pending`) against the replicas; `pod_cpu_utilization_over_pod_limit` (taking the limit to be the request)
 and `node_cpu_utilization`; requests and response time as the load balancer counts them; `cluster_node_count` with the
 node autoscaler's desired size; `node_cpu_reserved_capacity` and `node_memory_reserved_capacity`;

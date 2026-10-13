@@ -1,11 +1,12 @@
 import { Duration, Effect, Schema } from "effect"
 import * as Connector from "../../Connector.ts"
+import { shapeCall } from "../../connectors/Link.ts"
 import * as Edge from "../../Edge.ts"
-import type { Message } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
-import { docs } from "../docs.ts"
-import { taskDashboard } from "./dashboard.ts"
-import { DEFAULT_TASK_TIMEOUT_MS, RETRY_FIELD_MAX } from "./limits.ts"
+import { docs } from "../internal/docs.ts"
+import { taskDashboard } from "./internal/dashboard.ts"
+import { DEFAULT_TASK_TIMEOUT_MS, RETRY_FIELD_MAX } from "./internal/limits.ts"
+import { memoByIdentity } from "../../internal/memo.ts"
 
 /**
  * What a Task state's call is: one try, waited for up to `TimeoutSeconds`. Retries are not here, because Step Functions
@@ -26,21 +27,8 @@ export const Integration = Schema.Struct({
 })
 export type IntegrationSettings = typeof Integration.Type
 
-const policies = new WeakMap<IntegrationSettings, Edge.CallPolicy>()
 /** One try, abandoned (not cancelled) at the timeout. Memoised on the settings, which change only when edited. */
-const policyOf = (c: IntegrationSettings): Edge.CallPolicy => {
-  let p = policies.get(c)
-  if (p === undefined) policies.set(c, (p = Edge.within(Duration.toMillis(c.timeout))))
-  return p
-}
-
-/** The call does what the edge says to its resource (a DynamoDB GetItem reads), and carries what the edge says. */
-const shape = (m: Message, c: IntegrationSettings): Message => {
-  const operation = c.request.operation === "caller" ? m.operation : c.request.operation
-  return operation === m.operation && c.request.payload === 0
-    ? m
-    : { ...m, operation, ...(c.request.payload > 0 ? { bytes: c.request.payload * 1024 } : {}) }
-}
+const policyOf = memoByIdentity((c: IntegrationSettings): Edge.CallPolicy => Edge.within(Duration.toMillis(c.timeout)))
 
 /**
  * The connector on every edge a state machine calls through: its Task states' service integrations (Lambda `invoke`,
@@ -62,7 +50,7 @@ export const TaskIntegration = Connector.make({
     Effect.sync(() => ({
       send: (message, done) => {
         const c = ctx.fast.settings()
-        return ctx.sink.call(shape(message, c), policyOf(c), done)
+        return ctx.sink.call(shapeCall(message, c), policyOf(c), done)
       }
     }))
 })

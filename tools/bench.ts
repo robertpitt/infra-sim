@@ -5,7 +5,7 @@ import fs from "node:fs"
 import { Effect } from "effect"
 import YAML from "yaml"
 import type * as Design from "../src/simulator/Design.ts"
-import { sim } from "../src/simulator/components/testing.ts"
+import { sim } from "../src/simulator/testing.ts"
 
 const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000 }
 const example = (id: string): Design.Doc => {

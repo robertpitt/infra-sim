@@ -18,14 +18,14 @@ The code is split by mechanism:
 | File | What it holds |
 | --- | --- |
 | `StepFunctions.ts` | The component: ports, state schema, admission (StartExecution and StartSyncExecution) |
-| `config.ts` | The settings: the state machine's, a state's (the `out` port), a fallback state's (the `catch` port), error matching |
-| `execution.ts` | One execution: the plan from the edges, the steps, the fallback path, timeouts, the end |
-| `states.ts` | The states: state transitions (`Entry`), Task with its retrier, Wait, Parallel |
-| `map.ts` | The Map state, Inline and Distributed, and its child executions |
-| `region.ts` | What a Region's state machines share: the StateTransition token bucket's line, open Standard executions |
+| `internal/config.ts` | The settings: the state machine's, a state's (the `out` port), a fallback state's (the `catch` port), error matching |
+| `internal/execution.ts` | One execution: the plan from the edges, the steps, the fallback path, timeouts, the end |
+| `internal/states.ts` | The states: state transitions (`Entry`), what a running state holds (`Step`), Task with its retrier, Wait, Parallel |
+| `internal/map.ts` | The Map state, Inline and Distributed, and its child executions |
+| `internal/region.ts` | What a Region's state machines share: the StateTransition token bucket's line, open Standard executions |
 | `TaskIntegration.ts` | The connector on every edge a state machine calls through: one try per attempt, the task's `TimeoutSeconds` |
-| `limits.ts` | Named constants with their sources |
-| `quotas.ts`, `audit.ts` | The account-level quotas, and checks of a design |
+| `internal/limits.ts` | Named constants with their sources |
+| `Quotas.ts`, `Audit.ts` | The account-level quotas, and checks of a design |
 
 ## Standard versus Express
 
@@ -133,7 +133,7 @@ retries on every Lambda task, `Lambda.ServiceException`, `Lambda.AWSLambdaExcept
 error, `Failed` → the task's own error, `Rejected` → a client error (matched by `States.ALL` and `States.TaskFailed`
 only), `Timeout` (the edge's) → `States.Timeout`.
 
-The account quotas, per Region (`quotas.ts`): `sfnStartExecutionBurst`, `sfnStartExecutionRate`,
+The account quotas, per Region (`Quotas.ts`): `sfnStartExecutionBurst`, `sfnStartExecutionRate`,
 `sfnStateTransitionBurst`, `sfnStateTransitionRate`, `sfnExpressStartBurst`, `sfnExpressStartRate`, `sfnOpenExecutions`.
 
 ## Limits
@@ -232,7 +232,7 @@ Gauges: `running` (this state machine's open executions), `waitingForTransition`
 StateTransition bucket's ProvisionedRefillRate).
 Distribution: `executionTime` (`ExecutionTime`, ms, from start to end, for every outcome).
 
-The node's dashboard (`dashboard.ts`) charts these under CloudWatch's names; a Task edge's (`aws.stepfunctions.task`)
+The node's dashboard (`internal/dashboard.ts`) charts these under CloudWatch's names; a Task edge's (`aws.stepfunctions.task`)
 breaks its calls down by the error a retrier matches (`fail.Timeout` is ServiceIntegrationsTimedOut). Not charted, because
 not modelled: ExecutionsAborted and the redrive metrics, activities, Express billing metrics, the StateTransition bucket's
 level (ConsumedCapacity against ProvisionedBucketSize), and the API throttling metrics for anything but StartExecution.
@@ -265,7 +265,7 @@ every total above.
 - **StartExecution response time** (`startLatency`, 25 ms, cv 0.3): not published.
 - **Duplicate rate of asynchronous Express executions** (`duplicateRate`, 0): AWS says executions "could potentially run
   more than once", with no rate. A duplicate runs the whole execution again.
-- **History events per state** (`limits.ts`, `EVENTS`): read off the event types in the API reference (`HistoryEvent`):
+- **History events per state** (`internal/limits.ts`, `EVENTS`): read off the event types in the API reference (`HistoryEvent`):
   execution 1 + 1 at the end, Task 2 + 3 per attempt, Wait 2, Parallel 4, Map 4, Inline iteration 2, Distributed Map 6, Fail
   1, Succeed 2.
 - **One year** is 365 days.

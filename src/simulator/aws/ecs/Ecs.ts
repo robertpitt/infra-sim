@@ -1,14 +1,15 @@
 import { Duration, Effect, Schema, Stream, SubscriptionRef } from "effect"
 import * as Component from "../../Component.ts"
+import * as Work from "../../common/Work.ts"
 import { Fleet, type Phase } from "../../fleet/Fleet.ts"
 import type { Unit } from "../../Protocol.ts"
-import * as Aws from "../provider.ts"
-import * as Vcpus from "../ec2/vcpus.ts"
-import { Ec2Capacity } from "./capacity.ts"
-import { Config, type Settings } from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { Deployments } from "./deployment.ts"
-import * as Fargate from "./fargate.ts"
+import * as Aws from "../internal/provider.ts"
+import * as Vcpus from "../ec2/Vcpus.ts"
+import { Ec2Capacity } from "./internal/capacity.ts"
+import { Config, type Settings } from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { Deployments } from "./internal/deployment.ts"
+import * as Fargate from "./internal/fargate.ts"
 import {
   CACHED_PULL_MS,
   CRASH_AFTER_MS,
@@ -20,12 +21,10 @@ import {
   PAGES,
   PROVISIONING_PER_CLUSTER,
   SERVICE_LAUNCHES_PER_MINUTE,
+  SPOT_WARNING_MS,
   UNHEALTHY_AFTER_MS
-} from "./limits.ts"
-import { handler, type WorkHost } from "./work.ts"
+} from "./internal/limits.ts"
 
-/** How often the Spot interruption process looks again at the rate and the Spot tasks running. */
-const SPOT_RECHECK_MS = 10_000
 /** Units listed in a probe at most. */
 const PROBE_UNITS = 200
 
@@ -277,36 +276,23 @@ export const Ecs = Aws.component({
 
       // Fargate Spot interruptions: a Poisson process over the Spot tasks running, from a stream of its own.
       const spotRandom = fast.random.fork("fargate-spot")
-      const spotServing = (): Array<Unit> => fleet.units.filter((u) => u.alive && (u.state === "grace" || u.state === "inService") && held.get(u.id)?.purchase === "spot")
-      const nextInterruption = (): void => {
-        const rate = s().fargate.spotInterruptionsPerTaskHour
-        const n = held.size === 0 ? 0 : spotServing().length
-        if (rate <= 0 || n === 0) {
-          fast.after(SPOT_RECHECK_MS, interruptionDue, false)
-          return
-        }
-        // The process is memoryless, so a wait longer than the recheck can be drawn again then: a rate raised meanwhile
-        // (a scenario's interruption wave) takes effect within the recheck.
-        const wait = -Math.log(1 - spotRandom.nextDoubleUnsafe()) / ((rate * n) / 3_600_000)
-        if (wait > SPOT_RECHECK_MS) fast.after(SPOT_RECHECK_MS, interruptionDue, false)
-        else fast.after(wait, interruptionDue, true)
-      }
-      const interruptionDue = (due: boolean): void => {
-        if (due && s().fargate.spotInterruptionsPerTaskHour > 0) {
-          const spot = spotServing()
-          const victim = spot[Math.floor(spotRandom.nextDoubleUnsafe() * spot.length)]
-          if (victim !== undefined) {
+      if (onFargate) {
+        Fargate.interruptSpot({
+          after: fast.after,
+          random: spotRandom,
+          rate: () => s().fargate.spotInterruptionsPerTaskHour,
+          holding: () => held.size > 0,
+          serving: () => fleet.units.filter((u) => u.alive && (u.state === "grace" || u.state === "inService") && held.get(u.id)?.purchase === "spot"),
+          interrupt: (victim) => {
             counts.interrupted++
             spotInterruptions.n++
             // SIGTERM comes with the warning; the task stops after its stop timeout, and a replacement starts at once.
-            fleet.interrupt(victim, Math.min(120_000, ms(s().stopTimeout)))
+            fleet.interrupt(victim, Math.min(SPOT_WARNING_MS, ms(s().stopTimeout)))
           }
-        }
-        nextInterruption()
+        })
       }
-      if (onFargate) nextInterruption()
 
-      const host: WorkHost = {
+      const host: Work.WorkHost = {
         id: node.id,
         fast,
         out: node.out("out"),
@@ -315,17 +301,10 @@ export const Ecs = Aws.component({
         broken: (unit) => deployments.broken(unit),
         totals
       }
-      const serve = handler(fleet, host)
+      const serve = Work.handler(fleet, host)
 
       // Running tasks per zone, for each zone it spreads over (registered when it first does).
-      const zoneGauges = new Set<string>()
-      const gaugeZones = (): void => {
-        for (const zone of fleet.zonesList()) {
-          if (zoneGauges.has(zone)) continue
-          zoneGauges.add(zone)
-          node.meter.gaugeUnsafe(`running.${zone}`, () => fleet.servingIn(zone))
-        }
-      }
+      const gaugeZones = Work.zoneGauges(() => fleet, (zone) => node.meter.gaugeUnsafe(`running.${zone}`, () => fleet.servingIn(zone)))
       yield* node.spawn(
         SubscriptionRef.changes(node.config).pipe(
           Stream.runForEach(() =>

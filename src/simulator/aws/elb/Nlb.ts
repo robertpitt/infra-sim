@@ -1,16 +1,13 @@
-import { Duration, Effect, Schema } from "effect"
+import { Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
 import * as Distribution from "../../Distribution.ts"
-import type { Link } from "../../Edge.ts"
 import { isNoTarget } from "../../fleet/TargetGroup.ts"
-import { type Cancel, noCancel } from "../../Flow.ts"
-import { type Call, type CallFailure, type Message, Unavailable } from "../../Message.ts"
+import { type CallFailure, Unavailable } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
 import type { Counter } from "../../Telemetry.ts"
-import type { TimerHandle } from "../../VirtualTime.ts"
-import * as Aws from "../provider.ts"
-import { enabledZones, nodeHash, pickByWeight, rehash } from "./balancer.ts"
-import { Capacity, type Costs, nlbCosts } from "./capacity.ts"
+import * as Aws from "../internal/provider.ts"
+import { balancer, nodeHash, pickByWeight, rehash } from "./internal/balancer.ts"
+import { nlbCosts } from "./internal/capacity.ts"
 import {
   DNS_TTL_MS,
   NLB_IDLE_TIMEOUT_MAX_S,
@@ -19,13 +16,11 @@ import {
   NLB_LCU,
   NLB_MIN_ZONES,
   requestsPerConnection,
-  TICK_MS,
   URL
-} from "./config.ts"
-import { nlbDashboard } from "./dashboard.ts"
-import { ZonalDns } from "./dns.ts"
-import { hostsIn, type Listener, listenerOf } from "./listener.ts"
-import { type Count, count, NlbState, type TargetKind } from "./state.ts"
+} from "./internal/config.ts"
+import { nlbDashboard } from "./internal/dashboard.ts"
+import { Forwarded, type Node, start } from "./internal/request.ts"
+import { type Count, count, NlbState } from "./internal/state.ts"
 
 export const NlbConfig = Schema.Struct({
   zones: Setting.int({
@@ -54,12 +49,10 @@ export const NlbConfig = Schema.Struct({
 })
 type NlbSettings = typeof NlbConfig.Type
 
-interface Host {
+interface Host extends Node {
   readonly fast: Component.Fast<NlbSettings>
-  readonly listener: Listener
   readonly c: Counters
   readonly resets: { readonly noTarget: CallFailure; readonly idle: CallFailure }
-  active: number
 }
 
 interface Counters {
@@ -73,75 +66,29 @@ interface Counters {
 }
 
 /** One connection's request through the load balancer: the target group's answer raced against the idle timeout. */
-class Request {
-  open = true
-  timer: TimerHandle | undefined = undefined
-  private cancelDown: Cancel = noCancel
-
-  constructor(
-    private readonly host: Host,
-    private readonly message: Message,
-    private readonly link: Link,
-    private readonly zone: string | undefined,
-    private readonly idleMs: number,
-    private readonly resume: (effect: Call) => void
-  ) {}
-
-  forward(): void {
-    this.timer = this.host.fast.after(this.idleMs, onIdle, this)
-    const listener = this.host.listener
-    listener.zone = this.zone
-    const cancel = this.link.send(this.message, this.answered)
-    listener.zone = undefined
-    if (this.open) this.cancelDown = cancel
-  }
-
+class Request extends Forwarded<Host> {
   /** An NLB passes what the target did through, as it is: it is a layer 4 hop. Only finding no target is its own reset. */
-  private readonly answered = (failure: CallFailure | undefined): void => {
+  protected readonly answered = (failure: CallFailure | undefined): void => {
     if (!this.open) return
     this.close()
     if (failure === undefined) return this.resume(Effect.void)
     if (isNoTarget(failure)) {
-      this.host.c.elbResets.add()
-      return this.resume(Effect.fail(this.host.resets.noTarget))
+      this.node.c.elbResets.add()
+      return this.resume(Effect.fail(this.node.resets.noTarget))
     }
-    if (failure._tag === "Unavailable") this.host.c.targetResets.add()
+    if (failure._tag === "Unavailable") this.node.c.targetResets.add()
     this.resume(Effect.fail(failure))
   }
 
-  processed(): void {
-    this.timer = undefined
-    if (this.open) this.forward()
+  protected timedOut(): void {
+    this.node.c.elbResets.add()
+    this.resume(Effect.fail(this.node.resets.idle))
   }
 
-  idle(): void {
-    this.timer = undefined
-    if (!this.open) return
-    this.close()
-    this.cancelDown()
-    this.cancelDown = noCancel
-    this.host.c.elbResets.add()
-    this.resume(Effect.fail(this.host.resets.idle))
-  }
-
-  abandon(): void {
-    if (!this.open) return
-    this.close()
-    this.cancelDown()
-    this.cancelDown = noCancel
-    this.host.c.clientResets.add()
-  }
-
-  private close(): void {
-    this.open = false
-    this.timer?.cancel()
-    this.timer = undefined
-    this.host.active--
+  protected abandoned(): void {
+    this.node.c.clientResets.add()
   }
 }
-
-const onIdle = (r: Request): void => r.idle()
-const onProcessed = (r: Request): void => r.processed()
 
 /**
  * A Network Load Balancer: layer 4, a node in each of its zones, and connections kept on one target for their life (a
@@ -179,8 +126,16 @@ export const Nlb = Aws.component({
     Effect.gen(function*() {
       const { fast, meter } = node
       const out = node.out("out")
-      const listener = yield* listenerOf(node.shared, node.id)
-      listener.attached = true
+      const lb = yield* balancer(node, out, {
+        activePerLcu: NLB_LCU.active,
+        minZones: NLB_MIN_ZONES,
+        // "An empty Availability Zone is considered unhealthy" (NLB target group attributes): it leaves DNS.
+        emptyZonesStay: false,
+        costs: (s) => nlbCosts(s.requestsPerConnection),
+        scaling: () => undefined,
+        active: () => host.active
+      })
+      const { listener, capacity, dns } = lb
       const c: Counters = {
         requests: count(meter, "requests"),
         elbResets: count(meter, "elb.resets"),
@@ -201,42 +156,11 @@ export const Nlb = Aws.component({
       }
       const noGroup = Unavailable({ node: node.id, reason: "connection reset by the load balancer: no target group" })
       const nodeDown = Unavailable({ node: node.id, reason: "connection failed: the load balancer node in its zone is down" })
-      const capacity = new Capacity(NLB_LCU.active)
-      // "An empty Availability Zone is considered unhealthy" (NLB target group attributes): it leaves DNS.
-      const dns = new ZonalDns(node.zones, listener, fast.now, false)
-      const zonesNow = () => enabledZones(node.zones.all, fast.settings().zones, NLB_MIN_ZONES)
-
-      let kinds: Array<TargetKind> | undefined
-      const kindsOf = (): Array<TargetKind> => (kinds ??= out.map((l) => (listener.groups.has(l.id) ? "fleet" : "address")))
-
-      let costsFor: NlbSettings | undefined
-      let costs: Costs
-      let idleMs = 0
-      const costsOf = (s: NlbSettings): Costs => {
-        if (s !== costsFor) {
-          costsFor = s
-          costs = nlbCosts(s.requestsPerConnection)
-          idleMs = Duration.toMillis(s.idleTimeout)
-        }
-        return costs
-      }
-
-      const tick = (): void => {
-        dns.refresh(zonesNow())
-        capacity.tick(fast.now(), host.active, undefined)
-        fast.after(TICK_MS, tick, undefined)
-      }
-      // DNS as it has been since before the run, read once the target groups exist (their connectors are made after this).
-      fast.after(0, () => dns.refresh(zonesNow()), undefined)
-      fast.after(TICK_MS, tick, undefined)
-      node.zones.watch(() => dns.refresh(zonesNow()))
 
       meter.gaugeUnsafe("activeFlows", () => host.active)
       meter.gaugeUnsafe("consumed.lcu", () => capacity.consumed)
       meter.gaugeUnsafe("peak.lcu", () => capacity.peak)
-      meter.gaugeUnsafe("zones.inDns", () => dns.healthyZones)
-      meter.gaugeUnsafe("healthyHosts", () => hostsIn(listener, "healthy"))
-      meter.gaugeUnsafe("unhealthyHosts", () => hostsIn(listener, "unhealthy"))
+      lb.gaugeHealth(meter)
 
       return {
         call: (message) => {
@@ -253,18 +177,13 @@ export const Nlb = Aws.component({
             c.deadNode.add()
             return Effect.fail(nodeDown)
           }
-          const k = costsOf(s)
+          const { costs: k, idleMs } = lb.derived(s)
           capacity.admit(Math.max(k.perRequest, message.bytes * k.perByte), fast.now(), false)
           c.requests.add()
           c.processedBytes.n += message.bytes
           host.active++
           const delay = Distribution.latencyMs(s.overhead, fast.random)
-          return Effect.callback<void, CallFailure>((resume) => {
-            const r = new Request(host, message, out[i]!, zone, idleMs, resume)
-            if (delay > 0) r.timer = fast.after(delay, onProcessed, r)
-            else r.forward()
-            return Effect.sync(() => r.abandon())
-          })
+          return Effect.callback<void, CallFailure>((resume) => start(new Request(host, message, out[i]!, zone, idleMs, resume), delay))
         },
         probe: Effect.sync(() => ({
           zones: dns.report(),
@@ -273,7 +192,7 @@ export const Nlb = Aws.component({
           active: host.active,
           requests: c.requests.total,
           elbResets: c.elbResets.total + c.deadNode.total,
-          targetGroups: out.map((l, i) => ({ edge: l.id, to: l.to, kind: kindsOf()[i]! }))
+          targetGroups: lb.targetGroups()
         }))
       }
     })

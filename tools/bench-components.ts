@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000 }
 import * as Builder from "../src/simulator/Builder.ts"
-import { sim } from "../src/simulator/components/testing.ts"
+import { sim } from "../src/simulator/testing.ts"
 
 const RPS = Number(process.env.RPS ?? 4000)
 const VIRTUAL = Number(process.env.VIRTUAL ?? 10_000)

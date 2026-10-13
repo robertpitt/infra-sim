@@ -10,7 +10,7 @@ how long retries go on and where events end up, and what an API destination's ra
 
 This is the *Custom Event Bus - Classic* (rules and targets). AWS's newer Custom Event Bus (subscribers, `[EventsV2]`
 quotas, a default retry policy of 5 attempts and 300 s) is not modelled. The Scheduler is its own component, in
-[`../scheduler`](../scheduler/README.md); it shares this folder's delivery machinery (`delivery.ts`).
+[`../scheduler`](../scheduler/README.md); it shares this folder's delivery machinery (`Delivery.ts`).
 
 ## Coverage
 
@@ -144,7 +144,7 @@ another bus. Calls its targets through ports:
   target: an SQS queue, a Lambda function, an SNS topic, a Step Functions state machine, another bus, an HTTP endpoint.
 - `dlq` (Dead-letter queue, one): an SQS queue for targets with `deadLetterQueue` on.
 
-CloudFormation import: not mapped yet. `importers/cloudformation/events.ts` turns a scheduled `AWS::Events::Rule` into a
+CloudFormation import: not mapped yet. `importers/internal/cloudformation/events.ts` turns a scheduled `AWS::Events::Rule` into a
 client; event-pattern rules are reported as skipped.
 
 ## Metrics and state
@@ -177,7 +177,7 @@ Gauges: `pending` (invocations not finished), `quotaWait` (ms a new invocation w
 Probe state: the counters above as totals (not `targetErrors`, `targetThrottled`), `pending`, `quotaWait`, `rules` (each
 rule's name, whether it is active, its targets and the targets left out) and `backlog` (pending per target).
 
-The node's dashboard (`dashboard.ts`) charts these under CloudWatch's names; `Invocations` is drawn as invocations that
+The node's dashboard (`internal/dashboard.ts`) charts these under CloudWatch's names; `Invocations` is drawn as invocations that
 ended (`delivered` + `failed`). Not charted, because not modelled: DeadLetterInvocations (targets not invoked, such as
 loop protection), TriggeredRules and per-rule dimensions (the counters are per bus), IngestiontoInvocationCompleteLatency.
 

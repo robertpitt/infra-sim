@@ -78,11 +78,13 @@ npm run dev        # http://localhost:5173
 | `npm run build` | Cleans and builds the app to `dist/`: static files with relative paths, so they work from any URL. |
 | `npm run preview` | Serves `dist/` locally. |
 | `npm test` | The test suite (vitest). |
-| `npm run typecheck` | Type-checks the engine (with no DOM types) and the app. |
+| `npm run typecheck` | Type-checks the engine (with no DOM types), the command line and the app, with the Effect diagnostics. |
 | `npm run cli -- <command>` | The command line: run, check, import, describe. See below. |
 | `npm run build:cli` | Bundles the command line to `dist-cli/infra-sim.mjs`. |
 | `npm run bench -- ingestion 60000 10` | CPU cost of simulating an example, at a multiple of its traffic. See `tools/`. |
 | `node tools/screenshots.mjs` | Retakes the README's screenshots from the running app (`npm run dev` first; or `URL=<site>` to use the live demo). |
+
+`tsc` is TypeScript 7 (the native compiler), patched by [`@effect/tsgo`](https://github.com/Effect-TS/tsgo) on `npm install` to include the Effect language service. Effect warnings and errors (floating effects, unhandled requirements, chained `Effect.provide`, …) fail `npm run typecheck`. Suggestions only appear in the editor. The plugin is configured in `tsconfig.json`. To see the same diagnostics in VS Code or Cursor, install the recommended extensions (TypeScript Native Preview and Effect) from `.vscode/extensions.json`. `.vscode/settings.json` already points the editor at the workspace compiler. How to write code here: [AGENTS.md](AGENTS.md).
 
 ## Deployment
 

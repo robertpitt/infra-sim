@@ -1,10 +1,11 @@
 import { Duration, Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
 import { tallies, totals } from "../../kit/Tally.ts"
-import * as Aws from "../provider.ts"
-import { DeliveryStream, MiB, Out, SOURCES, TransformEdge } from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { Engine } from "./delivery.ts"
+import * as Aws from "../internal/provider.ts"
+import { DeliveryStream, Out, SOURCES, TransformEdge } from "./internal/config.ts"
+import { MiB } from "../internal/units.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { Engine } from "./internal/delivery.ts"
 
 export const Firehose = Aws.component({
   type: "aws.firehose",

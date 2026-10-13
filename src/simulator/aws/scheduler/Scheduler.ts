@@ -1,12 +1,14 @@
 import { Duration, Effect, Schema } from "effect"
 import { type Tally, tallies, totals } from "../../kit/Tally.ts"
 import * as Component from "../../Component.ts"
-import * as Aws from "../provider.ts"
-import { Dispatcher, limitsOf, Pacer, type Policy, Target } from "../eventbridge/delivery.ts"
-import { MAX_INPUT_KB, PRECISION_MS, Schedule, type ScheduleConfig } from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { type Expression, MINUTE_MS, nextCron, parse, parseDateTime } from "./expression.ts"
-import { QUOTAS_PAGE } from "./quotas.ts"
+import * as Aws from "../internal/provider.ts"
+import { DeliveryState, Dispatcher, limitsOf, Pacer, type Policy, Target } from "../eventbridge/Delivery.ts"
+import { MAX_INPUT_KB, PRECISION_MS, Schedule, type ScheduleConfig } from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { type Expression, nextCron, parse, parseDateTime } from "./internal/expression.ts"
+import { MINUTE_MS } from "../internal/units.ts"
+import { QUOTAS_PAGE } from "./Quotas.ts"
+import { memoByIdentity } from "../../internal/memo.ts"
 
 const D = Aws.docs.scheduler
 
@@ -26,15 +28,13 @@ const parsedOnce = () => {
   }
 }
 
-const policies = new WeakMap<ScheduleConfig, Policy>()
-const policyOf = (c: ScheduleConfig, deadLetter: boolean): Policy => {
-  let p = policies.get(c)
-  if (p === undefined) {
-    p = { maxRetries: c.retryPolicy.maxRetries, maxEventAgeMs: Duration.toMillis(c.retryPolicy.maxEventAge), deadLetter, targetRate: 0, attemptTimeoutMs: Infinity }
-    policies.set(c, p)
-  }
-  return p
-}
+const policyOf = memoByIdentity((c: ScheduleConfig, deadLetter: boolean): Policy => ({
+  maxRetries: c.retryPolicy.maxRetries,
+  maxEventAgeMs: Duration.toMillis(c.retryPolicy.maxEventAge),
+  deadLetter,
+  targetRate: 0,
+  attemptTimeoutMs: Infinity
+}))
 
 export const Scheduler = Aws.component({
   type: "aws.scheduler",
@@ -77,20 +77,7 @@ export const Scheduler = Aws.component({
     /** Occurrences whose invocations are still being spread over their window. */
     windows: Schema.Number,
     noTarget: Schema.Number,
-    pending: Schema.Number,
-    invocations: Schema.Number,
-    attempts: Schema.Number,
-    delivered: Schema.Number,
-    retries: Schema.Number,
-    failed: Schema.Number,
-    dropped: Schema.Number,
-    deadLettered: Schema.Number,
-    deadLetterFailed: Schema.Number,
-    expired: Schema.Number,
-    delayed: Schema.Number,
-    overflow: Schema.Number,
-    /** How long a new invocation would wait for the region's invocation quota, in ms. */
-    quotaWait: Schema.Number
+    ...DeliveryState
   }),
   make: (node) =>
     Effect.gen(function*() {
@@ -216,9 +203,7 @@ export const Scheduler = Aws.component({
           next,
           windows,
           ...totals(counts),
-          ...dispatcher.totals,
-          pending: dispatcher.pending,
-          quotaWait: dispatcher.quotaWait()
+          ...dispatcher.probe()
         }))
       }
     })

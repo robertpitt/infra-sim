@@ -4,7 +4,7 @@ import * as Distribution from "../Distribution.ts"
 import * as Flow from "../Flow.ts"
 import { Failed, Rejected, Throttled, Unavailable } from "../Message.ts"
 import * as Setting from "../Setting.ts"
-import * as dashboards from "./dashboards.ts"
+import * as dashboards from "./internal/dashboards.ts"
 
 /**
  * Something outside your system that you call over HTTP: a payment provider, a partner's webhook, any third-party

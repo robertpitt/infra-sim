@@ -1,16 +1,11 @@
-import { Duration, Effect, Schema, type Scope, Stream, SubscriptionRef } from "effect"
+import { Duration, Effect, Schema, Stream, SubscriptionRef } from "effect"
 import * as Component from "../Component.ts"
-import { builtins, providers } from "../components/registry.ts"
-import type * as Design from "../Design.ts"
-import { codec } from "../Design.ts"
 import * as Distribution from "../Distribution.ts"
 import { type Call, type CallFailure, Failed, type Message, type Reply, Unavailable } from "../Message.ts"
 import type { Unit } from "../Protocol.ts"
-import * as Registry from "../Registry.ts"
 import * as Setting from "../Setting.ts"
-import * as Simulation from "../Simulation.ts"
-import type { Counter } from "../Telemetry.ts"
-import { VirtualTime } from "../VirtualTime.ts"
+import type { Counter, Meter } from "../Telemetry.ts"
+import { simulator } from "../testing.ts"
 import { Fleet, type Job } from "./Fleet.ts"
 import { isNoTarget } from "./TargetGroup.ts"
 
@@ -77,45 +72,13 @@ export const Workers = Component.make({
         name: (id) => `w${id}`,
         interruptions: () => ({ perUnitHour: fast.settings().interruptionsPerUnitHour, noticeMs: ms(fast.settings().notice) })
       })
-      const perUnit = new Map<number, Counter>()
-      const counted = (unit: Unit): Counter => {
-        let c = perUnit.get(unit.id)
-        if (c === undefined) perUnit.set(unit.id, (c = node.meter.counter(`unit.${unit.name}`)))
-        return c
-      }
-      let lost = 0
-
-      const handle = (_message: Message, unit: Unit | undefined): Call =>
-        Effect.callback<Reply, CallFailure>((resume) => {
-          let timer: { readonly cancel: () => void } | undefined
-          const job: Job = {
-            start: (ticket) => {
-              const u = ticket.unit!
-              counted(u).n++
-              const c = fast.settings()
-              const slower = u.id === 1 ? c.slowFirst : 1
-              timer = fast.after(Distribution.latencyMs(c.serviceTime, fast.random) * slower, () => {
-                ticket.finish()
-                resume(Effect.void)
-              }, undefined)
-            },
-            // The unit was lost with the call on it: the ticket is already finished.
-            fail: (failure) => {
-              timer?.cancel()
-              lost++
-              resume(Effect.fail(failure))
-            }
-          }
-          const admitted = fleet.admit(job, unit)
-          if (typeof admitted === "string") {
-            resume(Effect.fail(Unavailable({ node: node.id, reason: admitted })))
-            return Effect.void
-          }
-          return Effect.sync(() => {
-            timer?.cancel()
-            admitted.finish()
-          })
-        })
+      const counted = unitCounters(node.meter)
+      const { handle, lost } = served(node, fleet, (_message, u) => {
+        counted(u).n++
+        const c = fast.settings()
+        const slower = u.id === 1 ? c.slowFirst : 1
+        return Distribution.latencyMs(c.serviceTime, fast.random) * slower
+      })
 
       yield* node.spawn(SubscriptionRef.changes(node.config).pipe(Stream.runForEach(() => Effect.sync(() => fleet.refresh()))))
       node.meter.gaugeUnsafe("serving", () => fleet.serving)
@@ -127,10 +90,66 @@ export const Workers = Component.make({
       return {
         call: (message) => handle(message, undefined),
         fleet: fleet.offer((unit, message) => handle(message, unit)),
-        probe: Effect.sync(() => ({ serving: fleet.serving, requested: fleet.count.requested, launched: fleet.totals.launched, interrupted: fleet.totals.interrupted, lost }))
+        probe: Effect.sync(() => ({ serving: fleet.serving, requested: fleet.count.requested, launched: fleet.totals.launched, interrupted: fleet.totals.interrupted, lost: lost() }))
       }
     })
 })
+
+/**
+ * What a test fleet's call does once a worker takes it, on `unit`: how long it works (virtual ms), and optionally how it
+ * then ends (a failure, or `undefined` for a good answer), decided as it ends.
+ */
+export type Work = (message: Message, unit: Unit) => number | readonly [ms: number, end: () => CallFailure | undefined]
+
+/**
+ * A test component's handler for calls served on `fleet`: each is admitted (a plain call, or one addressed to `unit`), works
+ * for what `work` says once it has a worker, and answers. A call the fleet refuses fails `Unavailable` with the fleet's
+ * reason; one whose unit is lost fails as the fleet says, and counts in `lost()`.
+ */
+export const served = (node: { readonly id: string; readonly fast: Pick<Component.Fast<unknown>, "after"> }, fleet: Fleet, work: Work) => {
+  let lost = 0
+  const handle = (message: Message, unit: Unit | undefined): Call =>
+    Effect.callback<Reply, CallFailure>((resume) => {
+      let timer: { readonly cancel: () => void } | undefined
+      const job: Job = {
+        start: (ticket) => {
+          const w = work(message, ticket.unit!)
+          const [ms, end] = typeof w === "number" ? [w, undefined] : w
+          timer = node.fast.after(ms, () => {
+            ticket.finish()
+            const failure = end?.()
+            resume(failure === undefined ? Effect.void : Effect.fail(failure))
+          }, undefined)
+        },
+        // The unit was lost with the call on it: the ticket is already finished.
+        fail: (failure) => {
+          timer?.cancel()
+          lost++
+          resume(Effect.fail(failure))
+        }
+      }
+      const admitted = fleet.admit(job, unit)
+      if (typeof admitted === "string") {
+        resume(Effect.fail(Unavailable({ node: node.id, reason: admitted })))
+        return Effect.void
+      }
+      return Effect.sync(() => {
+        timer?.cancel()
+        admitted.finish()
+      })
+    })
+  return { handle, lost: () => lost }
+}
+
+/** A counter per unit (`unit.<name>`), made the first time a unit is counted: so a test can see how calls spread. */
+export const unitCounters = (meter: Meter): (unit: Unit) => Counter => {
+  const perUnit = new Map<number, Counter>()
+  return (unit) => {
+    let c = perUnit.get(unit.id)
+    if (c === undefined) perUnit.set(unit.id, (c = meter.counter(`unit.${unit.name}`)))
+    return c
+  }
+}
 
 /**
  * A load balancer's listener, as little as there is of one: it forwards each request through its target group (the
@@ -176,15 +195,5 @@ export const Balancer = Component.make({
     })
 })
 
-/** The built-in registry plus the two test components. */
-export const registry = Registry.make([...builtins, Workers, Balancer], providers)
-
-const start = (doc: Design.Doc): Effect.Effect<Simulation.Service, never, Scope.Scope> =>
-  Effect.gen(function*() {
-    const design = yield* Schema.decodeUnknownEffect(codec(registry))(doc, { errors: "all" }).pipe(Effect.orDie)
-    return yield* Simulation.make(design).pipe(Effect.provide(VirtualTime.layer), Effect.provide(Registry.Registry.layer([...builtins, Workers, Balancer], providers)), Effect.orDie)
-  })
-
-/** Run a test body against a fresh simulation of `doc`, with the test components available. */
-export const sim = <A, E>(doc: Design.Doc, body: (sim: Simulation.Service) => Effect.Effect<A, E>): Promise<A> =>
-  Effect.runPromise(Effect.scoped(Effect.flatMap(start(doc), body)))
+/** The built-in registry plus the two test components, and running a design on it. */
+export const { registry, sim } = simulator([Workers, Balancer])

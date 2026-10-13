@@ -1,9 +1,9 @@
 import { Cause, Clock, Context, Effect, Exit, Fiber, Layer, PubSub, Queue, Ref, Schema, Scope, Stream } from "effect"
 import * as Alarm from "./Alarm.ts"
 import { type Manifest } from "./Component.ts"
-import * as Connector from "./Connector.ts"
+import type * as Connector from "./Connector.ts"
 import type * as Controller from "./Controller.ts"
-import * as Describe from "./Describe.ts"
+import type * as Describe from "./Describe.ts"
 import { Diagnostic, hasErrors } from "./Diagnostic.ts"
 import * as Design from "./Design.ts"
 import { diagnose } from "./Diagnostics.ts"
@@ -13,6 +13,8 @@ import * as Scenario from "./Scenario.ts"
 import * as Simulation from "./Simulation.ts"
 import { Frame } from "./Telemetry.ts"
 import { VirtualTime } from "./VirtualTime.ts"
+import * as internal from "./internal/engine.ts"
+import { firstLine, issues } from "./internal/simulation.ts"
 
 /**
  * The engine: what a UI (or a worker, or a server) talks to.
@@ -145,6 +147,14 @@ const TICK_MS = 16
 /** After a long stall (a hidden tab, a debugger) don't try to simulate the whole gap in one go. */
 const MAX_WALL_STEP_MS = 100
 
+/** Why the simulation refused a live edit. */
+type LiveEditError =
+  | Simulation.InvalidConfig
+  | Simulation.NoSuchNode
+  | Simulation.NoSuchEdge
+  | Simulation.NoSuchAccount
+  | Simulation.NoSuchController
+
 interface Live {
   readonly sim: Simulation.Service
   readonly scope: Scope.Closeable
@@ -232,11 +242,27 @@ export function make(options: Options = {}) {
       scenario === undefined ? doc : Scenario.prepare(doc, scenario, registry)
 
     /**
-     * Settings for a live edit. With a scenario playing, an edit is made to the document and the scenario's overrides stay
-     * on top of it, as they were when it started.
+     * Apply a live edit to the running simulation, then to the document. With a scenario playing, an edit is made to the
+     * document and the scenario's overrides stay on top of it, as they were when it started: `pick` finds those settings
+     * in the design as it runs (no `pick`: the settings go as given). A refused edit is reported, and changes neither.
      */
-    const liveSettings = (doc: Design.Doc | undefined, scenario: Scenario.Scenario | undefined, pick: (d: Design.Doc) => Record<string, unknown> | undefined, settings: Record<string, unknown>) =>
-      doc === undefined || scenario === undefined ? settings : (pick(running(doc, scenario)) ?? settings)
+    const liveEdit = (
+      command: { readonly _tag: string; readonly settings: Record<string, unknown> },
+      patch: (doc: Design.Doc) => Design.Doc,
+      pick: ((doc: Design.Doc) => Record<string, unknown> | undefined) | undefined,
+      apply: (sim: Simulation.Service, settings: Record<string, unknown>) => Effect.Effect<void, LiveEditError>,
+      missing: string
+    ) =>
+      Effect.gen(function*() {
+        const { live, doc, scenario } = yield* Ref.get(state)
+        if (live === undefined) return
+        const { settings } = command
+        const asRun = pick === undefined || doc === undefined || scenario === undefined ? settings : (pick(running(patch(doc), scenario)) ?? settings)
+        yield* apply(live.sim, asRun).pipe(
+          Effect.flatMap(() => edited(patch)),
+          Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [missing]))
+        )
+      })
 
     // --- Build ---------------------------------------------------------------------------------------------
     const build = Effect.gen(function*() {
@@ -379,7 +405,7 @@ export function make(options: Options = {}) {
       const pacer = yield* Effect.forkIn(
         pace.pipe(
           Effect.tapCause((cause) =>
-            Cause.hasInterruptsOnly(cause) ? Effect.void : reject("play", [Cause.pretty(cause).split("\n")[0] ?? "pacing loop crashed"])
+            Cause.hasInterruptsOnly(cause) ? Effect.void : reject("play", [firstLine(cause, "pacing loop crashed")])
           )
         ),
         scope
@@ -401,7 +427,7 @@ export function make(options: Options = {}) {
         const decoded = yield* Effect.result(Schema.decodeUnknownEffect(Command)(input))
         if (decoded._tag === "Failure") {
           const tag = typeof input === "object" && input !== null && "_tag" in input ? String(input._tag) : "unknown"
-          return yield* reject(tag, decoded.failure.message.split("\n").map((l) => l.trim()).filter(Boolean))
+          return yield* reject(tag, issues(decoded.failure.message))
         }
         const command = decoded.success
         const { live } = yield* Ref.get(state)
@@ -435,45 +461,27 @@ export function make(options: Options = {}) {
             return yield* status
           }
           case "updateNode": {
-            if (live === undefined) return
-            const { doc, scenario } = yield* Ref.get(state)
-            const settings = liveSettings(doc && Design.patchNode(doc, command.id, { settings: command.settings }), scenario, (d) => d.nodes[command.id]?.settings, command.settings)
-            return yield* live.sim.configureNode(command.id, settings).pipe(
-              Effect.flatMap(() => edited((d) => Design.patchNode(d, command.id, { settings: command.settings }))),
-              Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No node "${command.id}"`]))
-            )
+            const { id, settings } = command
+            const patch = (d: Design.Doc) => Design.patchNode(d, id, { settings })
+            return yield* liveEdit(command, patch, (d) => d.nodes[id]?.settings, (sim, s) => sim.configureNode(id, s), `No node "${id}"`)
           }
           case "updateEdge": {
-            if (live === undefined) return
-            const { doc, scenario } = yield* Ref.get(state)
-            const patched = doc?.edges[command.id] === undefined ? doc : { ...doc, edges: { ...doc.edges, [command.id]: { ...doc.edges[command.id]!, settings: command.settings } } }
-            const settings = liveSettings(patched, scenario, (d) => d.edges[command.id]?.settings, command.settings)
-            return yield* live.sim.configureEdge(command.id, settings).pipe(
-              Effect.flatMap(() => edited((d) => (d.edges[command.id] === undefined ? d : { ...d, edges: { ...d.edges, [command.id]: { ...d.edges[command.id]!, settings: command.settings } } }))),
-              Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No edge "${command.id}"`]))
-            )
+            const { id, settings } = command
+            const patch = (d: Design.Doc) => internal.withEdgeSettings(d, id, settings)
+            return yield* liveEdit(command, patch, (d) => d.edges[id]?.settings, (sim, s) => sim.configureEdge(id, s), `No edge "${id}"`)
           }
           case "updateAccount": {
-            if (live === undefined) return
-            const { doc, scenario } = yield* Ref.get(state)
-            const patched = doc === undefined ? doc : { ...doc, accounts: { ...doc.accounts, [command.placement]: command.settings } }
-            const settings = liveSettings(patched, scenario, (d) => d.accounts?.[command.placement], command.settings)
-            return yield* live.sim.configureAccount(command.placement, settings).pipe(
-              Effect.flatMap(() => edited((d) => ({ ...d, accounts: { ...d.accounts, [command.placement]: command.settings } }))),
-              Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No account for "${command.placement}" in this design`]))
-            )
+            const { placement, settings } = command
+            const patch = (d: Design.Doc) => internal.withAccount(d, placement, settings)
+            const missing = `No account for "${placement}" in this design`
+            return yield* liveEdit(command, patch, (d) => d.accounts?.[placement], (sim, s) => sim.configureAccount(placement, s), missing)
           }
-          case "updateController":
-            if (live === undefined) return
-            return yield* live.sim.configureController(command.id, command.settings).pipe(
-              Effect.flatMap(() =>
-                edited((d) => {
-                  const c = d.controllers?.[command.id]
-                  return c === undefined ? d : { ...d, controllers: { ...d.controllers, [command.id]: { ...c, settings: command.settings } } }
-                })
-              ),
-              Effect.catch((e) => reject(command._tag, e._tag === "InvalidConfig" ? e.issues : [`No controller "${command.id}"`]))
-            )
+          case "updateController": {
+            const { id, settings } = command
+            const patch = (d: Design.Doc) => internal.withControllerSettings(d, id, settings)
+            // A scenario doesn't override a controller's settings: they go to the simulation as given.
+            return yield* liveEdit(command, patch, undefined, (sim, s) => sim.configureController(id, s), `No controller "${id}"`)
+          }
           case "inject": {
             if (live === undefined) return
             const kind = Fault.catalog.find((k) => k.tag === command.fault._tag)
@@ -523,20 +531,7 @@ export function make(options: Options = {}) {
     return Engine.of({
       send: (command) => Queue.offer(commands, command).pipe(Effect.asVoid),
       events: Stream.fromPubSub(events),
-      catalog: {
-        providers: registry.providers.map((p) => ({
-          id: p.id,
-          title: p.title,
-          defaultRegion: p.defaultRegion,
-          regions: p.regions.map((r) => ({ id: r.id, name: r.name, zones: r.zones ?? [] })),
-          account: Object.fromEntries(p.regions.map((r) => [r.id, Describe.fields(p.account(r.id))]))
-        })),
-        components: registry.manifests,
-        connectors: registry.connectorManifests,
-        transport: Connector.transportFields(),
-        controllers: registry.controllerManifests,
-        faults: Fault.catalog
-      }
+      catalog: internal.catalog(registry)
     })
   })
 }

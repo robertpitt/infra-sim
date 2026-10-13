@@ -1,5 +1,6 @@
 import { Duration, Effect, Random } from "effect"
 import type { Latency } from "./Setting.ts"
+import { memoByIdentity } from "./internal/memo.ts"
 
 /** Sampling. Uses whatever `Random` service is in scope, so a seeded one makes everything repeatable. */
 
@@ -9,17 +10,16 @@ interface Shape {
   readonly mu: number
   readonly sigma: number
 }
-const shapes = new WeakMap<Latency, Shape>()
-const shapeOf = (l: Latency): Shape => {
-  let shape = shapes.get(l)
-  if (shape === undefined) {
-    const mean = Duration.toMillis(l.mean)
-    const sigma2 = l.cv > 0 && mean > 0 ? Math.log(1 + l.cv * l.cv) : 0
-    shape = { mean, mu: sigma2 > 0 ? Math.log(mean) - sigma2 / 2 : mean, sigma: Math.sqrt(sigma2) }
-    shapes.set(l, shape)
-  }
-  return shape
-}
+const shapeOf = memoByIdentity((l: Latency): Shape => {
+  const mean = Duration.toMillis(l.mean)
+  const sigma2 = l.cv > 0 && mean > 0 ? Math.log(1 + l.cv * l.cv) : 0
+  return { mean, mu: sigma2 > 0 ? Math.log(mean) - sigma2 / 2 : mean, sigma: Math.sqrt(sigma2) }
+})
+
+/** One lognormal draw from two uniform numbers in [0, 1), in milliseconds. */
+const lognormal = (shape: Shape, a: number, b: number): number =>
+  // Box–Muller; 1 - a keeps the argument of log in (0, 1].
+  Math.exp(shape.mu + shape.sigma * Math.sqrt(-2 * Math.log(1 - a)) * Math.cos(2 * Math.PI * b))
 
 /** Anything that can say a number in [0, 1): a `SeededRandom`. */
 export interface Source {
@@ -32,21 +32,14 @@ export interface Source {
  */
 export const latencyMs = (l: Latency, random: Source): number => {
   const shape = shapeOf(l)
-  if (shape.sigma === 0) return shape.mean
-  // Box–Muller; 1 - u keeps the argument of log in (0, 1].
-  const u = 1 - random.nextDoubleUnsafe()
-  const v = random.nextDoubleUnsafe()
-  return Math.exp(shape.mu + shape.sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v))
+  return shape.sigma === 0 ? shape.mean : lognormal(shape, random.nextDoubleUnsafe(), random.nextDoubleUnsafe())
 }
 
 /** A lognormal duration with the given mean and coefficient of variation; `cv` of 0 is exactly the mean. */
 export const latency = (l: Latency): Effect.Effect<Duration.Duration> => {
   const shape = shapeOf(l)
   if (shape.sigma === 0) return Effect.succeed(l.mean)
-  return Effect.map(Effect.zip(Random.next, Random.next), ([a, b]) => {
-    const u = 1 - a
-    return Duration.millis(Math.exp(shape.mu + shape.sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * b)))
-  })
+  return Effect.map(Effect.zip(Random.next, Random.next), ([a, b]) => Duration.millis(lognormal(shape, a, b)))
 }
 
 /** An exponentially distributed duration: the gaps between arrivals of a Poisson process. */

@@ -55,4 +55,4 @@ pages disagree the README says so and which one the simulator follows. Disagreem
 - SNS: the FIFO delivery targets are SQS only in current documentation.
 
 To check a number yourself, open the README row's source link. To change one for a design, change the setting (or the
-account quota); to change one for everyone, change the default in the service's `config.ts` or `quotas.ts` and update its row.
+account quota); to change one for everyone, change the default in the service's `internal/config.ts` or `Quotas.ts` and update its row.

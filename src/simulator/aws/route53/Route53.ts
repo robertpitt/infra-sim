@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import * as Aws from "../provider.ts"
+import * as Aws from "../internal/provider.ts"
 import {
   CHOOSING_URL,
   Config,
@@ -16,9 +16,9 @@ import {
   SIMPLE_URL,
   State,
   WEIGHTED_URL
-} from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { HealthCheckLedger, makeRuntime } from "./runtime.ts"
+} from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { HealthCheckLedger, makeRuntime } from "./internal/runtime.ts"
 
 /**
  * Amazon Route 53: DNS. One record name with its routing policy, each edge on its `out` port one record pointing at

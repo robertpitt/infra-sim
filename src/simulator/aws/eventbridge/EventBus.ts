@@ -8,7 +8,7 @@ import * as Flow from "../../Flow.ts"
 import type { Message } from "../../Message.ts"
 import { keyOf } from "../../Provider.ts"
 import type { Latency } from "../../Setting.ts"
-import * as Aws from "../provider.ts"
+import * as Aws from "../internal/provider.ts"
 import {
   API_DESTINATION_RATE,
   API_DESTINATION_TIMEOUT_MS,
@@ -19,11 +19,11 @@ import {
   MAX_RETRY_ATTEMPTS,
   MAX_TARGETS_PER_RULE,
   RuleTarget
-} from "./config.ts"
-import { Dispatcher, limitsOf, Pacer } from "./delivery.ts"
-import { dashboard } from "./dashboard.ts"
-import { QUOTAS_PAGE } from "./quotas.ts"
-import { type Rule, Rules } from "./rules.ts"
+} from "./Config.ts"
+import { DeliveryState, Dispatcher, limitsOf, Pacer } from "./Delivery.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { QUOTAS_PAGE } from "./Quotas.ts"
+import { type Rule, Rules } from "./internal/rules.ts"
 
 const D = Aws.docs.eventbridge
 
@@ -79,20 +79,7 @@ export const EventBus = Aws.component({
     rejected: Schema.Number,
     matched: Schema.Number,
     unmatched: Schema.Number,
-    pending: Schema.Number,
-    invocations: Schema.Number,
-    attempts: Schema.Number,
-    delivered: Schema.Number,
-    retries: Schema.Number,
-    failed: Schema.Number,
-    dropped: Schema.Number,
-    deadLettered: Schema.Number,
-    deadLetterFailed: Schema.Number,
-    expired: Schema.Number,
-    delayed: Schema.Number,
-    overflow: Schema.Number,
-    /** How long a new invocation would wait for the region's invocation quota, in ms. */
-    quotaWait: Schema.Number,
+    ...DeliveryState,
     rules: Schema.Array(Schema.Struct({ rule: Schema.String, active: Schema.Boolean, targets: Schema.Array(Schema.String), ignored: Schema.Array(Schema.String) })),
     backlog: Schema.Array(Schema.Struct({ node: Schema.String, pending: Schema.Number }))
   }),
@@ -174,9 +161,7 @@ export const EventBus = Aws.component({
         },
         probe: Effect.sync(() => ({
           ...totals(ingestion),
-          ...dispatcher.totals,
-          pending: dispatcher.pending,
-          quotaWait: dispatcher.quotaWait(),
+          ...dispatcher.probe(),
           rules: rules.describe(account().eventBridgeRulesPerBus).map((r) => ({
             rule: r.name,
             active: r.active,

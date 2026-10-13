@@ -1,31 +1,26 @@
-import { Duration, Effect } from "effect"
+import { Effect } from "effect"
 import * as Component from "../../Component.ts"
 import * as Distribution from "../../Distribution.ts"
 import type { Link } from "../../Edge.ts"
-import { type Cancel, noCancel } from "../../Flow.ts"
 import type { Call, CallFailure, Message } from "../../Message.ts"
 import type { Counter, Sampler } from "../../Telemetry.ts"
-import type { TimerHandle } from "../../VirtualTime.ts"
-import * as Aws from "../provider.ts"
-import { type AlbSettings, AlbConfig } from "./albConfig.ts"
-import { enabledZones, nodeHash, pickByWeight, rehash } from "./balancer.ts"
-import { albCosts, Capacity, type Costs, reservedLcu } from "./capacity.ts"
-import { albDashboard } from "./dashboard.ts"
-import { ALB_LCU, ALB_MIN_ZONES, DNS_TTL_MS, LAMBDA_MAX_BODY_BYTES, LAMBDA_MAX_WAIT_MS, TARGET_GROUPS_PER_ACTION, TICK_MS, URL } from "./config.ts"
-import { ZonalDns } from "./dns.ts"
-import { hostsIn, listenerOf, type Listener } from "./listener.ts"
-import { type AlbFailures, albFailures, badGateway, Outcome, outcomeOf } from "./responses.ts"
-import { AlbState, type Count, count, type TargetKind } from "./state.ts"
+import * as Aws from "../internal/provider.ts"
+import { type AlbSettings, AlbConfig } from "./internal/albConfig.ts"
+import { balancer, nodeHash, pickByWeight, rehash } from "./internal/balancer.ts"
+import { albCosts, reservedLcu } from "./internal/capacity.ts"
+import { albDashboard } from "./internal/dashboard.ts"
+import { ALB_LCU, ALB_MIN_ZONES, DNS_TTL_MS, LAMBDA_MAX_BODY_BYTES, LAMBDA_MAX_WAIT_MS, TARGET_GROUPS_PER_ACTION, URL } from "./internal/config.ts"
+import { Forwarded, type Node, start } from "./internal/request.ts"
+import { type AlbFailures, albFailures, badGateway, Outcome, outcomeOf } from "./internal/responses.ts"
+import { AlbState, type Count, count } from "./internal/state.ts"
 
 /** What one request needs of its load balancer, made once per node so that a request is one small object. */
-interface Host {
+interface Host extends Node {
   readonly fast: Component.Fast<AlbSettings>
-  readonly listener: Listener
   readonly f: AlbFailures
   readonly c: Counters
   /** TargetResponseTime: from the request leaving the load balancer to the target's answer. */
   readonly targetResponseTime: Sampler
-  active: number
 }
 
 /** The node's counters: CloudWatch's metrics, under the names in the README. */
@@ -48,55 +43,37 @@ interface Counters {
   readonly processedBytes: Counter
 }
 
-/**
- * One request inside the load balancer, from the moment a node takes it until it is answered or abandoned: the node's
- * processing time (a timer), then the target group (one call through the edge) raced against the idle timeout (a timer).
- */
-class Request {
-  open = true
-  timer: TimerHandle | undefined = undefined
-  private cancelDown: Cancel = noCancel
-  /** When the request left for the target group. */
-  private sentAt = 0
-
+/** One request inside an ALB: what it makes of the target group's answer, of the idle timeout, and of a client leaving. */
+class Request extends Forwarded<Host> {
   constructor(
-    private readonly host: Host,
-    private readonly message: Message,
-    private readonly link: Link,
+    host: Host,
+    message: Message,
+    link: Link,
     private readonly lambda: boolean,
-    private readonly zone: string | undefined,
-    private readonly waitMs: number,
-    private readonly resume: (effect: Call) => void
-  ) {}
-
-  /** Through the target group on the edge, with the idle timeout running. The listener tells the edge which node it is. */
-  forward(): void {
-    this.timer = this.host.fast.after(this.waitMs, onIdle, this)
-    this.sentAt = this.host.fast.now()
-    const listener = this.host.listener
-    listener.zone = this.zone
-    const cancel = this.link.send(this.message, this.answered)
-    listener.zone = undefined
-    if (this.open) this.cancelDown = cancel
+    zone: string | undefined,
+    waitMs: number,
+    resume: (effect: Call) => void
+  ) {
+    super(host, message, link, zone, waitMs, resume)
   }
 
-  private readonly answered = (failure: CallFailure | undefined): void => {
+  protected readonly answered = (failure: CallFailure | undefined): void => {
     if (!this.open) return
     this.close()
-    const { c, f } = this.host
+    const { c, f } = this.node
     // The target answered (well or with its own error): TargetResponseTime. The load balancer's own errors have none.
     if (failure === undefined) {
-      this.host.targetResponseTime.add(this.host.fast.now() - this.sentAt)
+      this.node.targetResponseTime.add(this.node.fast.now() - this.sentAt)
       return this.resume(Effect.void)
     }
     switch (outcomeOf(failure, this.lambda)) {
       case Outcome.Target5xx:
         c.target5xx.add()
-        this.host.targetResponseTime.add(this.host.fast.now() - this.sentAt)
+        this.node.targetResponseTime.add(this.node.fast.now() - this.sentAt)
         return this.resume(Effect.fail(failure))
       case Outcome.Target4xx:
         c.target4xx.add()
-        this.host.targetResponseTime.add(this.host.fast.now() - this.sentAt)
+        this.node.targetResponseTime.add(this.node.fast.now() - this.sentAt)
         return this.resume(Effect.fail(failure))
       case Outcome.Elb503:
         c.elb503.add()
@@ -122,44 +99,19 @@ class Request {
     }
   }
 
-  /** The node's own processing is done: forward. */
-  processed(): void {
-    this.timer = undefined
-    if (this.open) this.forward()
-  }
-
-  /** Nothing from the target within the idle timeout: 504. The target is not told, and keeps working. */
-  idle(): void {
-    this.timer = undefined
-    if (!this.open) return
-    this.close()
-    this.cancelDown()
-    this.cancelDown = noCancel
-    this.host.c.elb504.add()
-    this.host.c.elb5xx.add()
-    this.resume(Effect.fail(this.host.f.idle(this.waitMs)))
+  /** Nothing from the target within the idle timeout: 504. */
+  protected timedOut(): void {
+    this.node.c.elb504.add()
+    this.node.c.elb5xx.add()
+    this.resume(Effect.fail(this.node.f.idle(this.waitMs)))
   }
 
   /** The client gave up first and closed its connection: what the access log records as 460. */
-  abandon(): void {
-    if (!this.open) return
-    this.close()
-    this.cancelDown()
-    this.cancelDown = noCancel
-    this.host.c.elb460.add()
-    this.host.c.elb4xx.add()
-  }
-
-  private close(): void {
-    this.open = false
-    this.timer?.cancel()
-    this.timer = undefined
-    this.host.active--
+  protected abandoned(): void {
+    this.node.c.elb460.add()
+    this.node.c.elb4xx.add()
   }
 }
-
-const onIdle = (r: Request): void => r.idle()
-const onProcessed = (r: Request): void => r.processed()
 
 /**
  * An Application Load Balancer: a layer 7 load balancer with a node in each of its zones, a listener that routes each
@@ -209,8 +161,16 @@ export const Alb = Aws.component({
     Effect.gen(function*() {
       const { fast, meter } = node
       const out = node.out("out")
-      const listener = yield* listenerOf(node.shared, node.id)
-      listener.attached = true
+      const lb = yield* balancer(node, out, {
+        activePerLcu: ALB_LCU.active,
+        minZones: ALB_MIN_ZONES,
+        // An empty zone stays in an ALB's DNS: AWS warns that requests entering it get 503s.
+        emptyZonesStay: true,
+        costs: (s) => albCosts(s.requestsPerConnection, s.rules),
+        scaling: (s) => (s.capacity.model ? s.capacity : undefined),
+        active: () => host.active
+      })
+      const { listener, capacity, dns } = lb
       const counter = (name: string) => count(meter, name)
       const c: Counters = {
         requests: counter("requests"),
@@ -230,41 +190,6 @@ export const Alb = Aws.component({
         processedBytes: meter.counter("processedBytes")
       }
       const host: Host = { fast, listener, f: albFailures(node.id), c, targetResponseTime: meter.sampler("targetResponseTime"), active: 0 }
-      const capacity = new Capacity(ALB_LCU.active)
-      // An empty zone stays in an ALB's DNS: AWS warns that requests entering it get 503s.
-      const dns = new ZonalDns(node.zones, listener, fast.now, true)
-      const zonesNow = () => enabledZones(node.zones.all, fast.settings().zones, ALB_MIN_ZONES)
-
-      // Which edges invoke a Lambda function: known once the connectors exist, which is after this component is made.
-      let kinds: Array<TargetKind> | undefined
-      const kindsOf = (): Array<TargetKind> =>
-        (kinds ??= out.map((l) => (listener.lambdas.has(l.id) ? "lambda" : listener.groups.has(l.id) ? "fleet" : "address")))
-
-      // Derived numbers, worked out again only when the settings are replaced.
-      let costsFor: AlbSettings | undefined
-      let costs: Costs
-      let idleMs = 0
-      const costsOf = (s: AlbSettings): Costs => {
-        if (s !== costsFor) {
-          costsFor = s
-          costs = albCosts(s.requestsPerConnection, s.rules)
-          idleMs = Duration.toMillis(s.idleTimeout)
-        }
-        return costs
-      }
-
-      // Once a second: the zones' health for DNS, and the load for scaling.
-      const tick = (): void => {
-        const s = fast.settings()
-        dns.refresh(zonesNow())
-        capacity.tick(fast.now(), host.active, s.capacity.model ? s.capacity : undefined)
-        fast.after(TICK_MS, tick, undefined)
-      }
-      // DNS as it has been since before the run, read once the target groups exist (their connectors are made after this).
-      fast.after(0, () => dns.refresh(zonesNow()), undefined)
-      // The first tick, a second in, sizes the load balancer to the traffic it has seen.
-      fast.after(TICK_MS, tick, undefined)
-      node.zones.watch(() => dns.refresh(zonesNow()))
 
       meter.gaugeUnsafe("activeConnections", () => host.active)
       meter.gaugeUnsafe("capacity.lcu", () => capacity.lcu)
@@ -272,16 +197,14 @@ export const Alb = Aws.component({
       meter.gaugeUnsafe("peak.lcu", () => capacity.peak)
       meter.gaugeUnsafe("reserved.lcu", () => reservedLcu(fast.settings().capacity.reserved))
       meter.gaugeUnsafe("capacityUtilization", () => capacity.utilization)
-      meter.gaugeUnsafe("zones.inDns", () => dns.healthyZones)
-      meter.gaugeUnsafe("healthyHosts", () => hostsIn(listener, "healthy"))
-      meter.gaugeUnsafe("unhealthyHosts", () => hostsIn(listener, "unhealthy"))
+      lb.gaugeHealth(meter)
 
       const fail = (failure: CallFailure) => Effect.fail(failure)
 
       return {
         call: (message) => {
           const s = fast.settings()
-          const kind = kindsOf()
+          const kind = lb.kinds()
           const i = pickByWeight(out, s.routing === "rules" ? rehash(message.key) : fast.random.nextDoubleUnsafe())
           if (i < 0) {
             c.elb503.add()
@@ -300,7 +223,7 @@ export const Alb = Aws.component({
             c.deadNode.add()
             return fail(host.f.nodeDown)
           }
-          const k = costsOf(s)
+          const { costs: k, idleMs } = lb.derived(s)
           const cost = Math.max(k.perRequest, message.bytes * (lambda ? k.perLambdaByte : k.perByte))
           if (!capacity.admit(cost, fast.now(), s.capacity.model)) {
             c.rejected.add()
@@ -311,12 +234,7 @@ export const Alb = Aws.component({
           host.active++
           const waitMs = lambda ? LAMBDA_MAX_WAIT_MS : idleMs
           const delay = Distribution.latencyMs(s.overhead, fast.random)
-          return Effect.callback<void, CallFailure>((resume) => {
-            const r = new Request(host, message, out[i]!, lambda, zone, waitMs, resume)
-            if (delay > 0) r.timer = fast.after(delay, onProcessed, r)
-            else r.forward()
-            return Effect.sync(() => r.abandon())
-          })
+          return Effect.callback<void, CallFailure>((resume) => start(new Request(host, message, out[i]!, lambda, zone, waitMs, resume), delay))
         },
         probe: Effect.sync(() => ({
           zones: dns.report(),
@@ -332,7 +250,7 @@ export const Alb = Aws.component({
           elb4xx: c.elb4xx.total,
           target5xx: c.target5xx.total,
           rejectedConnections: c.rejected.total,
-          targetGroups: out.map((l, i) => ({ edge: l.id, to: l.to, kind: kindsOf()[i]! }))
+          targetGroups: lb.targetGroups()
         }))
       }
     })

@@ -1,3 +1,4 @@
+import { type CallFailure, failureCounter } from "../Message.ts"
 import type { Counter, Meter } from "../Telemetry.ts"
 
 /**
@@ -33,4 +34,18 @@ export const totals = <const K extends string>(of: Record<K, Tally>): Record<K, 
   const out = {} as Record<K, number>
   for (const name in of) out[name] = of[name].total
   return out
+}
+
+/**
+ * The `fail.<Tag>` counter for a failure (`fail.Throttled`, `fail.Timeout`, ...), resolved from `meter` the first time
+ * that kind of failure is seen and remembered after that: one map lookup per failure, nothing per success.
+ */
+export const failureCounters = (meter: Meter): ((failure: CallFailure) => Counter) => {
+  const failures = new Map<string, Counter>()
+  return (failure) => {
+    const name = failureCounter(failure)
+    let counter = failures.get(name)
+    if (counter === undefined) failures.set(name, (counter = meter.counter(name)))
+    return counter
+  }
 }

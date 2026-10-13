@@ -16,19 +16,19 @@ Availability Zone going down, which a Multi-AZ database survives from another zo
 | File | What it holds |
 | --- | --- |
 | `Rds.ts` | The database component: ports, state, admission (endpoint, failover, DNS, connection), the probe |
-| `config.ts` | The database's settings |
-| `catalog.ts` | Engines, instance classes (vCPU, memory), `max_connections` from the default parameter groups |
-| `database.ts` | A database's runtime: its writer and readers (`Role`: vCPUs, storage, connections), what follows from the settings |
-| `query.ts` | One query: handshake, vCPU line, CPU, storage and standby waits, releasing the connection |
-| `connections.ts` | Connection accounting: a server's open connections, each client's pool of idle ones, idle expiry, epochs |
-| `failover.ts` | The failover window, the DNS move, stale caches |
-| `zones.ts` | Where the instances are: the writer, standbys, readers and read replicas in the region's Availability Zones |
-| `client.ts` | The connectors on edges into a database or proxy: how a caller handles its connections; the proxy's own edge |
-| `endpoint.ts` | What a database and a proxy offer the connectors on their edges, and a proxy its database (`Instance.offer`) |
-| `Proxy.ts`, `proxyConfig.ts`, `borrow.ts` | RDS Proxy: the component, its settings, and the borrow (pool slots, waiting, pinning, riding out a failover) |
-| `limits.ts` | Named AWS numbers and the pages they come from |
-| `quotas.ts`, `audit.ts` | The account quotas, and checks of a design against them and against what AWS accepts |
-| `testkit.ts` | Test helpers |
+| `internal/config.ts` | The database's settings |
+| `internal/catalog.ts` | Engines, instance classes (vCPU, memory), `max_connections` from the default parameter groups |
+| `internal/database.ts` | A database's runtime: its writer and readers (`Role`: vCPUs, storage, connections), what follows from the settings |
+| `internal/query.ts` | One query: handshake, vCPU line, CPU, storage and standby waits, releasing the connection |
+| `internal/connections.ts` | Connection accounting: a server's open connections, each client's pool of idle ones, idle expiry, epochs |
+| `internal/failover.ts` | The failover window, the DNS move, stale caches |
+| `internal/zones.ts` | Where the instances are: the writer, standbys, readers and read replicas in the region's Availability Zones |
+| `Client.ts` | The connectors on edges into a database or proxy: how a caller handles its connections; the proxy's own edge |
+| `internal/endpoint.ts` | What a database and a proxy offer the connectors on their edges, and a proxy its database (`Instance.offer`) |
+| `Proxy.ts`, `internal/proxyConfig.ts`, `internal/borrow.ts` | RDS Proxy: the component, its settings, and the borrow (pool slots, waiting, pinning, riding out a failover) |
+| `internal/limits.ts` | Named AWS numbers and the pages they come from |
+| `Quotas.ts`, `Audit.ts` | The account quotas, and checks of a design against them and against what AWS accepts |
+| `testing.ts` | Test helpers |
 
 ## Coverage
 
@@ -144,7 +144,7 @@ The plain link's settings (`weight`, `request`, `timeout`, `cancelOnTimeout`, `r
 
 The proxy's edge to its database (`aws.rds-proxy.target`) has only `timeout`, `cancelOnTimeout` and `retry`: the proxy forwards what its clients asked.
 
-Account quotas (`quotas.ts`): `rdsInstances` 40 (20 in ap-south-1), `rdsClusters` 40, `rdsReadReplicas` 15, `rdsProxies` 20, `rdsStorage` 100,000 GB.
+Account quotas (`Quotas.ts`): `rdsInstances` 40 (20 in ap-south-1), `rdsClusters` 40, `rdsReadReplicas` 15, `rdsProxies` 20, `rdsStorage` 100,000 GB.
 
 ## Limits
 
@@ -315,7 +315,7 @@ The client connectors (`aws.rds.client`, `aws.rds-proxy.client`) count their own
 `connectionsOpened` and `connectionsRefused` (refused at `max_connections`; a proxy refuses none), and the gauges
 `connections` (open, busy and idle) and `connectionsInUse`.
 
-Each has a dashboard (`dashboard.ts`) under CloudWatch's names. The database's: CPUUtilization, DatabaseConnections
+Each has a dashboard (`internal/dashboard.ts`) under CloudWatch's names. The database's: CPUUtilization, DatabaseConnections
 against `max_connections`, Queries (SelectThroughput, DMLThroughput), SelectLatency and DMLLatency, the vCPU and disk
 queues (DiskQueueDepth), ReadIOPS and WriteIOPS against the volume's IOPS, ConnectionAttempts and refusals, failover errors,
 ReplicaLag (AuroraReplicaLag) and the failover itself. The proxy's: QueryRequests, DatabaseConnections,

@@ -167,21 +167,8 @@ export const valueOf = (metric: Metric, stats: Stats | undefined): number | unde
     const d = stats.dist[metric.dist]
     return d === undefined || d.n === 0 ? undefined : d[metric.stat]
   }
-  if ("ratio" in metric) {
-    const top = valueOf(metric.ratio[0], stats)
-    const bottom = valueOf(metric.ratio[1], stats)
-    return top === undefined || bottom === undefined || bottom === 0 ? undefined : (top / bottom) * (metric.scale ?? 1)
-  }
-  let total = 0
-  let any = false
-  for (const m of metric.sum) {
-    const v = valueOf(m, stats)
-    if (v !== undefined) {
-      total += v
-      any = true
-    }
-  }
-  return any ? total : undefined
+  if ("ratio" in metric) return ratioOf(valueOf(metric.ratio[0], stats), valueOf(metric.ratio[1], stats), metric.scale)
+  return sumOf(metric.sum, (m) => valueOf(m, stats))
 }
 
 /**
@@ -222,15 +209,20 @@ export const valueOver = (metric: Metric, frames: ReadonlyArray<Stats | undefine
     if (n === 0) return undefined
     return metric.stat === "max" ? max : weighted / n
   }
-  if ("ratio" in metric) {
-    const top = valueOver(metric.ratio[0], present, gauges)
-    const bottom = valueOver(metric.ratio[1], present, gauges)
-    return top === undefined || bottom === undefined || bottom === 0 ? undefined : (top / bottom) * (metric.scale ?? 1)
-  }
+  if ("ratio" in metric) return ratioOf(valueOver(metric.ratio[0], present, gauges), valueOver(metric.ratio[1], present, gauges), metric.scale)
+  return sumOf(metric.sum, (m) => valueOver(m, present, gauges))
+}
+
+/** One value over another, times `scale`; nothing when either is missing or the divisor is 0. */
+const ratioOf = (top: number | undefined, bottom: number | undefined, scale: number | undefined): number | undefined =>
+  top === undefined || bottom === undefined || bottom === 0 ? undefined : (top / bottom) * (scale ?? 1)
+
+/** The values that are there, added up; nothing when none is. */
+const sumOf = (metrics: ReadonlyArray<Metric>, read: (m: Metric) => number | undefined): number | undefined => {
   let total = 0
   let any = false
-  for (const m of metric.sum) {
-    const v = valueOver(m, present, gauges)
+  for (const m of metrics) {
+    const v = read(m)
     if (v !== undefined) {
       total += v
       any = true

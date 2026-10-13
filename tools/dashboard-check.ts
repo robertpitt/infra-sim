@@ -11,7 +11,7 @@ import { Graph } from "effect"
 import YAML from "yaml"
 import { Dashboard, Design } from "#simulator"
 import { registry } from "#simulator/components"
-import { frames } from "../src/simulator/components/testing.ts"
+import { frames } from "../src/simulator/testing.ts"
 
 /** The examples, read from disk (the app bundles them with Vite; here there is no Vite). */
 const examples = fs

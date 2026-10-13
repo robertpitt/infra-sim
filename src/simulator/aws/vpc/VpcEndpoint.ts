@@ -1,14 +1,14 @@
 import { Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
 import * as Setting from "../../Setting.ts"
-import * as Aws from "../provider.ts"
-import { vpcEndpointDashboard } from "./dashboard.ts"
-import { hop } from "./Hop.ts"
-import { source } from "./sources.ts"
+import * as Aws from "../internal/provider.ts"
+import { vpcEndpointDashboard } from "./internal/dashboard.ts"
+import { hop } from "./internal/hop.ts"
+import { source } from "./internal/sources.ts"
+import { BYTES_PER_GBPS } from "../internal/units.ts"
 
 const MIN_GBPS_PER_ZONE = 10
 const MAX_GBPS_PER_ZONE = 100
-const BYTES_PER_GBPS = 1e9 / 8
 
 const Config = Schema.Struct({
   type: Setting.choice(["gateway", "interface"], {

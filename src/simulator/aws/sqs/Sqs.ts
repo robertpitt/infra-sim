@@ -1,23 +1,23 @@
 import { Duration, Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
 import { Rejected, Throttled } from "../../Message.ts"
-import * as Aws from "../provider.ts"
+import * as Aws from "../internal/provider.ts"
 import {
   API_BATCH,
   MAX_MESSAGE_BYTES,
   DEDUP_WINDOW_MS,
   Queue,
   SWEEP_MS
-} from "./config.ts"
+} from "./internal/config.ts"
 import { DedupWindow } from "../../kit/Dedup.ts"
-import { dashboard } from "./dashboard.ts"
-import { Deliveries } from "./delivery.ts"
-import { makeTallies } from "./metrics.ts"
-import { QueuePull } from "./pull.ts"
-import { Redrive } from "./redrive.ts"
-import { QueueStore } from "./store.ts"
-import { FifoRate, fifoRate, takePartition } from "./throughput.ts"
-import type { Entry } from "./types.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { Deliveries } from "./internal/delivery.ts"
+import { makeTallies } from "./internal/metrics.ts"
+import { QueuePull } from "./internal/pull.ts"
+import { Redrive } from "./internal/redrive.ts"
+import { QueueStore } from "./internal/store.ts"
+import { FifoRate, fifoRate, takePartition } from "./internal/throughput.ts"
+import type { Entry } from "./internal/types.ts"
 
 const D = Aws.docs.sqs
 /** The probe lists this many messages. */

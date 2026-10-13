@@ -190,7 +190,7 @@ and `hotKeys` on the client. Request rate is checked at the start of a call, not
   about 1 KiB, asynchronous.
 - **`replication`** (many): replicas. Wire to another `aws.s3`. Edge settings: `filter`, `retry`, plus the universal ones.
 
-CloudFormation import (`importers/cloudformation/s3.ts`): `AWS::S3::Bucket` is an `aws.s3`; `VersioningConfiguration.Status:
+CloudFormation import (`importers/internal/cloudformation/s3.ts`): `AWS::S3::Bucket` is an `aws.s3`; `VersioningConfiguration.Status:
 Enabled` gives `versioning: true`; `AWS::S3Express::DirectoryBucket` gives `bucketType: directory`.
 
 - **Notifications** (the bucket's `NotificationConfiguration`, the custom resource CDK writes next to it, or a SAM `S3`
@@ -235,7 +235,7 @@ Distributions: `firstByteLatency` (FirstByteLatency, including a multipart initi
 Gauges: `transferring` (calls moving bytes), `pending` (notifications not yet delivered), `replicating` (replicas not yet
 landed), `readCeiling` and `writeCeiling` (highest per-prefix rate now: the guarantee, or what scale-up reached).
 
-The dashboard (`dashboard.ts`) charts these under CloudWatch's names: requests (AllRequests, GetRequests, PutRequests),
+The dashboard (`internal/dashboard.ts`) charts these under CloudWatch's names: requests (AllRequests, GetRequests, PutRequests),
 4xx and 5xx errors, first-byte and total latency, bytes downloaded and uploaded and per request (their Average
 statistic), the per-prefix ceilings, replication latency, operations pending replication (`replicating`, beside
 `pending` notifications), replicas and event messages delivered or failed (OperationsFailedReplication), and the other

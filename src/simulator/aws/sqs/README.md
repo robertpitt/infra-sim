@@ -159,7 +159,7 @@ message (new id, no carried enqueue time, receive count 0) and deletes it once t
 returns after the visibility timeout. A message that keeps failing in the source goes round again: that is the redrive loop.
 
 **Event source mapping.** The mapping is the connector on a consumer edge (`EventSourceMapping.ts`), not part of the queue:
-the queue offers ReceiveMessage on its `pull` port (`pull.ts`: at most ten a receive, the in-flight limit, FIFO's receive
+the queue offers ReceiveMessage on its `pull` port (`internal/pull.ts`: at most ten a receive, the in-flight limit, FIFO's receive
 rate and groups, the visibility timer each receive starts) and says when something becomes receivable; the mapping takes.
 Each mapping has pollers (no fibers). `pump` hands receivable messages to idle pollers when the queue says so. It invokes
 synchronously and waits for the function however long it runs (the function's timeout ends a slow batch). With a batching window a poller holds what it has received (its visibility timers already
@@ -189,7 +189,7 @@ removes a message (AWS may, for a standard queue that has not been received agai
 - `redrive` (one): where a redrive sends messages. Wiring a DLQ back to its source forms a loop (the engine's loop warning
   applies, and is correct).
 
-CloudFormation import (`importers/cloudformation/sqs.ts`):
+CloudFormation import (`importers/internal/cloudformation/sqs.ts`):
 
 | CloudFormation | Setting |
 | --- | --- |
@@ -241,7 +241,7 @@ failed), `itemFailures`, `itemFailuresIgnored`; gauges `concurrency` (the concur
 (pollers holding or running a batch), `batchSize` (what a batch is gathered to). `core.poller` records `batches`, `records`,
 `batchesFailed`, `recordsFailed` and gauges `workers`, `busy`, `batchSize`.
 
-The node's dashboard (`dashboard.ts`) charts these the way CloudWatch does; the mapping's charts follow transport's on its
+The node's dashboard (`internal/dashboard.ts`) charts these the way CloudWatch does; the mapping's charts follow transport's on its
 edge. Not charted, because the simulator doesn't model them: the fair-queue metrics (`...InQuietGroups`,
 ApproximateNumberOfNoisyGroups) and the mapping's DeletedEventCount (the queue's NumberOfMessagesDeleted counts deletes).
 

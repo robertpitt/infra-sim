@@ -6,7 +6,7 @@ import * as Flow from "../Flow.ts"
 import { type CallFailure, Failed, type Reply, Unavailable } from "../Message.ts"
 import { Slots } from "../kit/Slots.ts"
 import * as Setting from "../Setting.ts"
-import * as dashboards from "./dashboards.ts"
+import * as dashboards from "./internal/dashboards.ts"
 
 export const Config = Schema.Struct({
   objects: Setting.int({

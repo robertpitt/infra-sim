@@ -5,7 +5,7 @@ import { core } from "./connectors/index.ts"
 import * as Controller from "./Controller.ts"
 import { core as coreControllers } from "./controllers/index.ts"
 import type { Provider } from "./Provider.ts"
-import { known } from "./providers.ts"
+import { known } from "./internal/providers.ts"
 
 /** The set of components, connectors and controllers a design may use. Designs refer to each by `type`. */
 export interface Components {
@@ -44,24 +44,22 @@ export const queryOf = (source: AnyComponent | undefined, port: string, target: 
   return { from: { component: source.type, port, protocol: def.protocol }, to: { component: target.type, protocol: accepts(target), ...(also.length === 0 ? {} : { also }) } }
 }
 
+/** Definitions by type, in order. A type registered twice is a mistake in whoever assembled the registry. */
+const byTypeOnce = <A extends { readonly type: string }>(kind: string, defs: ReadonlyArray<A>): Map<string, A> => {
+  const out = new Map<string, A>()
+  for (const d of defs) {
+    if (out.has(d.type)) throw new Error(`${kind} type "${d.type}" is registered twice`)
+    out.set(d.type, d)
+  }
+  return out
+}
+
 export const make = (components: ReadonlyArray<AnyComponent>, providers: ReadonlyArray<Provider> = []): Components => {
   const knownProviders = known(providers)
-  const byType = new Map<string, AnyComponent>()
-  for (const c of components) {
-    if (byType.has(c.type)) throw new Error(`Component type "${c.type}" is registered twice`)
-    byType.set(c.type, c)
-  }
-  const connectors = new Map<string, Connector.AnyConnector>()
-  for (const c of [...core, ...[...knownProviders.values()].flatMap((p) => p.connectors ?? [])]) {
-    if (connectors.has(c.type)) throw new Error(`Connector type "${c.type}" is registered twice`)
-    connectors.set(c.type, c)
-  }
+  const byType = byTypeOnce("Component", components)
+  const connectors = byTypeOnce("Connector", [...core, ...[...knownProviders.values()].flatMap((p) => p.connectors ?? [])])
   const connectorList = [...connectors.values()]
-  const controllers = new Map<string, Controller.AnyController>()
-  for (const c of [...coreControllers, ...[...knownProviders.values()].flatMap((p) => p.controllers ?? [])]) {
-    if (controllers.has(c.type)) throw new Error(`Controller type "${c.type}" is registered twice`)
-    controllers.set(c.type, c)
-  }
+  const controllers = byTypeOnce("Controller", [...coreControllers, ...[...knownProviders.values()].flatMap((p) => p.controllers ?? [])])
   const controllerList = [...controllers.values()]
   return {
     get: (type) => byType.get(type),

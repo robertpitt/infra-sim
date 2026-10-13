@@ -197,7 +197,7 @@ treats it) and `healthCheckPercentageHealthy` (HealthCheckPercentageHealthy, 0 t
 `healthChecks` (checks that crossed it) and the sampler `healthCheckTime`. The connector finds its record's health check
 by the identity of the edge's settings, which the record and the connector share.
 
-The dashboards (`dashboard.ts`) chart these: DNS queries and the resolvers' cache, health check status and percentage
+The dashboards (`internal/dashboard.ts`) chart these: DNS queries and the resolvers' cache, health check status and percentage
 healthy against the threshold, the checkers' requests and time, and the answers still cached to unhealthy records.
 
 Probe state: `policy`, `ttlSeconds`, `records` (per record: edge, endpoint, `healthChecked`, `healthy`, `checkersHealthy` of

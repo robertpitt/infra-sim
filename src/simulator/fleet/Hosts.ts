@@ -1,5 +1,6 @@
 import type { Unit } from "../Protocol.ts"
 import type { Fleet, Placement, UnitEvent } from "./Fleet.ts"
+import { isLive } from "./Unit.ts"
 
 /**
  * Units placed on hosts: ECS tasks on the container instances of an Auto Scaling group, Kubernetes pods on the nodes of a
@@ -56,6 +57,10 @@ export type ZoneSpread = "zones" | "strict" | "none"
 
 const EPSILON = 1e-9
 
+/** Whether a host with `room`, `n` tenants and `cpu` and `memory` used has room for one more asking for `d`. */
+const hasRoom = (room: Room, cpu: number, memory: number, n: number, d: Resources): boolean =>
+  n < room.slots && cpu + d.cpu <= room.cpu + EPSILON && memory + d.memory <= room.memory + EPSILON
+
 /** A host as the pool keeps it. */
 export class Host {
   /** Its tenants, in the order they were placed. */
@@ -87,8 +92,7 @@ export class Host {
 
   /** Whether a tenant asking for `d` fits now. */
   fits(d: Resources): boolean {
-    return this.alive && !this.cordoned && this.tenants.size < this.room.slots && this.cpu + d.cpu <= this.room.cpu + EPSILON &&
-      this.memory + d.memory <= this.room.memory + EPSILON
+    return this.alive && !this.cordoned && hasRoom(this.room, this.cpu, this.memory, this.tenants.size, d)
   }
 
   /** Its share used, as binpack and spread weigh it: CPU, memory, or the mean of the two (as Kubernetes scores nodes). */
@@ -221,7 +225,7 @@ export class HostPool {
       for (let i = 0; i < others.length; i++) {
         const h = others[i]!
         const u = used[i]!
-        if (u.n < h.room.slots && u.cpu + d.cpu <= h.room.cpu + EPSILON && u.memory + d.memory <= h.room.memory + EPSILON) {
+        if (hasRoom(h.room, u.cpu, u.memory, u.n, d)) {
           u.cpu += d.cpu
           u.memory += d.memory
           u.n++
@@ -355,5 +359,3 @@ export class HostPool {
     for (const f of this.tenantFleets) f.retry()
   }
 }
-
-const isLive = (u: Unit): boolean => u.state === "requested" || u.state === "starting" || u.state === "grace" || u.state === "inService"

@@ -15,15 +15,15 @@ through a target group (`connector: core.target-group`, or a load balancer's own
 | File | What it holds |
 | --- | --- |
 | `Ec2.ts` | The component: the fleet's options, the request handler, gauges and probe |
-| `config.ts` | The settings schema |
-| `instanceTypes.ts` | The instance type catalog (vCPUs, memory), also for ECS capacity providers and EKS node groups |
-| `vcpus.ts` | The region's vCPU ledger against the On-Demand and Spot quotas, shared through `node.shared` (and with ECS and EKS on EC2) |
-| `warmPool.ts` | The warm pool |
-| `spot.ts` | The On-Demand/Spot split, Spot interruptions and Capacity Rebalancing |
-| `termination.ts` | The termination policies |
-| `metrics.ts` | The CPU and request-count metrics target tracking scales on |
-| `limits.ts` | Named constants with their sources |
-| `quotas.ts`, `audit.ts` | The account's EC2 quotas, and checks of a design against them |
+| `internal/config.ts` | The settings schema |
+| `InstanceTypes.ts` | The instance type catalog (vCPUs, memory), also for ECS capacity providers and EKS node groups |
+| `Vcpus.ts` | The region's vCPU ledger against the On-Demand and Spot quotas, shared through `node.shared` (and with ECS and EKS on EC2) |
+| `internal/warmPool.ts` | The warm pool |
+| `internal/spot.ts` | The On-Demand/Spot split, Spot interruptions and Capacity Rebalancing |
+| `internal/termination.ts` | The termination policies |
+| `internal/metrics.ts` | The CPU and request-count metrics target tracking scales on |
+| `Limits.ts` | Named constants with their sources |
+| `Quotas.ts`, `Audit.ts` | The account's EC2 quotas, and checks of a design against them |
 
 ## Coverage
 
@@ -71,7 +71,7 @@ through a target group (`connector: core.target-group`, or a load balancer's own
 | OldestInstance, NewestInstance, ClosestToNextInstanceHour | ✅ | |
 | Instance scale-in protection | 🟡 | `scaleInProtection` protects instances launched while it is on; per-instance `SetInstanceProtection` is not modelled. Health replacement and Spot interruptions still take protected instances. |
 | **Account quotas** | | |
-| Running On-Demand Standard vCPUs | ✅ | Shared by every group in the region (and ECS/EKS on EC2, through `vcpus.ts`). Launches past it wait and retry. |
+| Running On-Demand Standard vCPUs | ✅ | Shared by every group in the region (and ECS/EKS on EC2, through `Vcpus.ts`). Launches past it wait and retry. |
 | Standard Spot vCPUs | ✅ | Likewise for Spot. |
 | Auto Scaling groups per region | ✅ | Audit only. |
 
@@ -214,7 +214,7 @@ Counters (rates, or `total.` in assertions): `launches`, `warmStarts`, `launchRe
 launched and are now terminated), `spotInterruptions`, `rebalanceRecommendations`; and the node's own `in`, `ok`, `fail`,
 `fail.<Tag>`.
 
-The dashboard (`dashboard.ts`) charts them as the console's Monitoring tab and CloudWatch do: the group metrics
+The dashboard (`internal/dashboard.ts`) charts them as the console's Monitoring tab and CloudWatch do: the group metrics
 (`GroupDesiredCapacity`, `GroupInServiceInstances`, `GroupPendingInstances`, `GroupTerminatingInstances`), CPU
 (`CPUUtilization`, and target tracking's `ASGAverageCPUUtilization`), requests and response time as the load balancer
 counts them, `RequestCountPerTarget`, launches and terminations (the activity history), the warm pool

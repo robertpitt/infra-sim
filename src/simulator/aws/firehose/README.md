@@ -138,7 +138,7 @@ The Kinesis source edge: rates `records`, `bytes` (DataReadFromKinesisStream), `
 (ThrottledGetRecords: its GetRecords calls the shard's read limits refused); gauges `millisBehindLatest`
 (KinesisMillisBehindLatest), `backlog`. Its GetRecords calls are counted on the stream too.
 
-The stream's and the source's dashboards (`dashboard.ts`) chart these under CloudWatch's names (DeliveryToS3.* for either
+The stream's and the source's dashboards (`internal/dashboard.ts`) chart these under CloudWatch's names (DeliveryToS3.* for either
 destination; an HTTP endpoint's are DeliveryToHttpEndpoint.*). Not charted, because not modelled: RecordsPerSecondLimit
 and PutRequestsPerSecondLimit (charted only in bytes, the limit usually met first), PutRecord/PutRecordBatch latency,
 dynamic partitioning, format conversion, decompression, SSE and the BackupToS3 freshness.

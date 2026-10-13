@@ -1,6 +1,7 @@
 import type { Unit } from "../Protocol.ts"
 import type { TimerHandle } from "../VirtualTime.ts"
 import type { Fleet } from "./Fleet.ts"
+import { isLive, isServing } from "./Unit.ts"
 
 /**
  * A rolling replacement of a fleet's units by a new version of them: an ECS service deploying a new task definition
@@ -58,9 +59,6 @@ export interface RolloutStatus {
   readonly freshHealthy: number
   readonly target: number
 }
-
-const isLive = (u: Unit): boolean => u.state === "requested" || u.state === "starting" || u.state === "grace" || u.state === "inService"
-const isServing = (u: Unit): boolean => u.state === "grace" || u.state === "inService"
 
 export class Rollout {
   private fleet: Fleet | undefined = undefined

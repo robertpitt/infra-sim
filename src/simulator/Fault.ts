@@ -1,6 +1,7 @@
 import { Context, Duration, Effect, Schema, type Scope, Stream, SubscriptionRef } from "effect"
 import { type FieldSpec, fields } from "./Describe.ts"
 import * as Setting from "./Setting.ts"
+import * as internal from "./internal/fault.ts"
 
 /**
  * Faults are universal: the framework applies them around every node and every edge, so a component author
@@ -107,23 +108,8 @@ export class NoSuchTarget extends Schema.TaggedError<NoSuchTarget>()("NoSuchTarg
   id: Schema.String
 }) {}
 
-const NO_NODE: NodeEffect = { outage: false, extraMs: 0, extra: Duration.zero, errorRate: 0 }
-
 /** Nothing wrong: what every lookup answers while no fault reaches what it asks about. */
-export const NO_FAULT: NodeEffect = NO_NODE
-
-/** The faults on one target, if any. */
-type Faulted = ReadonlyArray<ActiveFault> | undefined
-
-const add = (effect: { outage: boolean; extraMs: number; ok: number }, faults: Faulted): void => {
-  if (faults === undefined) return
-  for (const { fault } of faults) {
-    if (fault._tag === "Outage") effect.outage = true
-    else if (fault._tag === "Slow") effect.extraMs += Duration.toMillis(fault.extra)
-    else if (fault._tag === "Errors") effect.ok *= 1 - fault.rate
-  }
-}
-const NO_EDGE: EdgeEffect = { outage: false, blackhole: false, extraMs: 0, extra: Duration.zero, lossRate: 0 }
+export const NO_FAULT: NodeEffect = internal.NO_NODE
 
 export class Faults extends Context.Service<Faults, {
   readonly inject: (target: Target, fault: Fault, duration?: Duration.Input) => Effect.Effect<ActiveFault, NoSuchTarget>
@@ -172,6 +158,7 @@ export const make = (
   now: Effect.Effect<number>
 ): Effect.Effect<Context.Service.Shape<typeof Faults>, never, Scope.Scope> =>
   Effect.gen(function*() {
+    const { NO_EDGE, NO_NODE, sum, sumEdge } = internal
     const scope = yield* Effect.scope
     const state = yield* SubscriptionRef.make<ReadonlyArray<ActiveFault>>([])
     // Indexed by target for the hot path; `state` is the source of truth for everyone else.
@@ -219,16 +206,6 @@ export const make = (
         return true
       })
 
-    /** What up to three sets of faults (a node's own, its region's, its zone's) add up to. On the call path: no allocation unless something applies. */
-    const sum = (a: Faulted, b: Faulted, c: Faulted): NodeEffect => {
-      if (a === undefined && b === undefined && c === undefined) return NO_NODE
-      const effect = { outage: false, extraMs: 0, ok: 1 }
-      add(effect, a)
-      add(effect, b)
-      add(effect, c)
-      return { outage: effect.outage, extraMs: effect.extraMs, extra: Duration.millis(effect.extraMs), errorRate: 1 - effect.ok }
-    }
-
     const forNodeUnsafe = (id: string): NodeEffect => {
       if (active === 0) return NO_NODE
       const k = keysOf(id)
@@ -248,18 +225,7 @@ export const make = (
     const forEdgeUnsafe = (id: string): EdgeEffect => {
       if (active === 0) return NO_EDGE
       const faults = byTarget.get(`edge:${id}`)
-      if (faults === undefined) return NO_EDGE
-      let outage = false
-      let blackhole = false
-      let extra = 0
-      let ok = 1
-      for (const { fault } of faults) {
-        if (fault._tag === "Outage") outage = true
-        else if (fault._tag === "Blackhole") blackhole = true
-        else if (fault._tag === "Slow") extra += Duration.toMillis(fault.extra)
-        else if (fault._tag === "Loss") ok *= 1 - fault.rate
-      }
-      return { outage, blackhole, extraMs: extra, extra: Duration.millis(extra), lossRate: 1 - ok }
+      return faults === undefined ? NO_EDGE : sumEdge(faults)
     }
 
     return {

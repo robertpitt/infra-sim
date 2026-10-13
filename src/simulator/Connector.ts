@@ -3,6 +3,7 @@ import type * as Dashboard from "./Dashboard.ts"
 import type { PortDef } from "./Component.ts"
 import * as Describe from "./Describe.ts"
 import * as Edge from "./Edge.ts"
+import { memoByIdentity } from "./internal/memo.ts"
 import type { Limiter } from "./Limiter.ts"
 import type { Message } from "./Message.ts"
 import type { Fleet, Protocol, Pull } from "./Protocol.ts"
@@ -257,7 +258,8 @@ export const isPlain = (type: string): boolean => type === LINK
 // An edge's settings
 // ---------------------------------------------------------------------------------------------------------
 
-const schemas = new WeakMap<AnyConnector, Map<PortDef | undefined, Settings>>()
+/** Each connector's edge schemas, by the port they leave from, each built once. */
+const schemas = memoByIdentity((_: AnyConnector) => new Map<PortDef | undefined, Settings>())
 
 /**
  * The full settings of an edge leaving `port` through `connector`: the port's own fields first (the source component
@@ -265,8 +267,7 @@ const schemas = new WeakMap<AnyConnector, Map<PortDef | undefined, Settings>>()
  * change its default (SNS gives its subscriptions a far longer retry policy than a plain call has).
  */
 export const edgeSchema = (connector: AnyConnector, port: PortDef | undefined): Settings => {
-  let byPort = schemas.get(connector)
-  if (byPort === undefined) schemas.set(connector, (byPort = new Map()))
+  const byPort = schemas(connector)
   const known = byPort.get(port)
   if (known !== undefined) return known
   const own: Schema.Struct.Fields = port?.config?.fields ?? {}

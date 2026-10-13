@@ -3,7 +3,7 @@ import * as Component from "../Component.ts"
 import * as Edge from "../Edge.ts"
 import { type CallFailure, failureCounter, type Message } from "../Message.ts"
 import * as Setting from "../Setting.ts"
-import * as dashboards from "./dashboards.ts"
+import * as dashboards from "./internal/dashboards.ts"
 
 /** The key a client's hot share is sent with: one fixed partition key, so it keeps landing on one partition or shard. */
 export const HOT_KEY = 0.1234

@@ -1,4 +1,5 @@
 {
+  "$schema": "./node_modules/@effect/tsgo/schema.json",
   // The app: UI + simulator, with DOM types. `tsconfig.simulator.json` re-checks the simulator without them.
   "compilerOptions": {
     "target": "es2023",
@@ -18,7 +19,19 @@
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // The Effect language service (via @effect/tsgo): Effect diagnostics in the editor and in `tsc`.
+    // Warnings and errors fail `npm run typecheck`; suggestions show in the editor only.
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        // Auto-imports match the codebase: `import { Effect } from "effect"`.
+        "barrelImportPackages": ["effect"],
+        "includeSuggestionsInTsc": false,
+        // Marked unstable upstream, used on purpose: Design is a Graph, and the command line is built on effect/cli.
+        "allowedUnstableApis": ["effect/Graph", "effect/cli", "@effect/platform-node"]
+      }
+    ]
   },
   "include": ["src", "vite.config.ts", "vitest.config.ts"],
   // The command line is Node-only and has its own config (tsconfig.cli.json).

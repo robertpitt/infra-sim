@@ -10,13 +10,14 @@ group on the edge to the fleet and keeps only listener-level behaviour for itsel
 | --- | --- |
 | `Fleet.ts` | The fleet: units, their life, zones, desired capacity, scale-in and draining, replacement, interruptions, and the two ways calls reach units. |
 | `Unit.ts` | Its pieces: `Member` (a unit as the fleet keeps it), `Ticket` (one call's place on the fleet), `Job` (what the component does with a call), `Line`. |
+| `internal/fleet.ts`, `internal/targetGroup.ts` | The machinery behind `Fleet.ts` (lines, placing, a unit's life, reconciling, rebalancing) and `TargetGroup.ts` (the pools and the choosing algorithms). |
 | `TargetGroup.ts` | A load balancer's target group: registration, health checks, choosing a unit per call (round robin, least outstanding requests, random, flow hash), slow start, cross-zone, fail open, deregistration delay. |
 | `../connectors/TargetGroup.ts` | `core.target-group`, the connector that puts a `TargetGroup` on an edge. |
 | `../Protocol.ts` (`fleet`) | What a fleet offers the connector on an edge into it: `Fleet`, `Unit`, `UnitChange`, `HealthAnswer`. |
 | `Hosts.ts` | Units placed on hosts: a `HostPool` over a fleet of hosts, which a fleet of tenants uses as its `Options.hosts` (ECS tasks on container instances, pods on nodes). See **Units on hosts** below. |
 | `Rollout.ts` | A rolling replacement of a fleet's units by a new version within min-healthy and max-total bounds (ECS deployments, Kubernetes rolling updates, instance refresh). See **Rolling replacement** below. |
-| `testing.ts` | The worked example below as real code (`test.workers`, `test.balancer`), and `sim` for tests that use them. |
-| `Fleet.test.ts`, `TargetGroup.test.ts` | Behaviour tests (zones, draining, quotas, interruptions, health checks, algorithms, slow start, cross-zone). |
+| `testing.ts` | The worked example below as real code (`test.workers`, `test.balancer`), `sim` for tests that use them, and `served` for a test component's handler on a fleet. |
+| `tests/Fleet.test.ts`, `tests/TargetGroup.test.ts` | Behaviour tests (zones, draining, quotas, interruptions, health checks, algorithms, slow start, cross-zone). |
 
 ## A unit's life
 
@@ -226,7 +227,7 @@ What it added to `Fleet` (all optional, existing fleets unchanged): `Options.hos
 protection), `Options.rebalance` (off for Kubernetes, which never moves running pods), `capacity.take(unit)`/`give(unit)`
 told which unit (Fargate and Fargate Spot take from different quotas), and `observe`, `retry`, `stop(unit)` (let one unit
 go: lower `desired` first to remove it, or leave it to have it replaced), `hold`/`unhold`. Rebalancing also gives up when its
-extra unit could only be placed in a zone no emptier than the rest. `Hosts.test.ts` covers binpack and spread, pending until a
+extra unit could only be placed in a zone no emptier than the rest. `tests/Hosts.test.ts` covers binpack and spread, pending until a
 host comes up, strict zone spread, a dead host's tenants, eviction from a draining host with nothing lost, and protection.
 
 ## Rolling replacement (`Rollout.ts`)
@@ -238,7 +239,7 @@ and at least `minHealthy(desired)` healthy. Give the fleet `desired: () => rollo
 (`Fleet.stop`, never scale-in's choice) and launches new ones into the room left; a new unit is healthy once up for
 `healthyAfter` (ECS: 40 s after RUNNING) and passing `ok`. `replaceInKind` (Kubernetes) makes a lost old unit come back
 old, as its ReplicaSet recreates it, and bounds old units' removal by every unit less the minimum less new units not yet
-available, as the Deployment controller does. `Rollout.test.ts` covers both bounds, a configuration that can't move, a
+available, as the Deployment controller does. `tests/Rollout.test.ts` covers both bounds, a configuration that can't move, a
 desired count changing mid-rollout, and replacement in kind.
 
 ## Load balancers: the `fleet` protocol and the target group

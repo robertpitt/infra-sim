@@ -24,7 +24,7 @@ import { StepFunctions } from "./stepfunctions/index.ts"
 import { NatGateway, Vpc, VpcEndpoint } from "./vpc/index.ts"
 import { Waf } from "./waf/index.ts"
 
-export { provider } from "./provider.ts"
+export { provider } from "./internal/provider.ts"
 export { Alb, Nlb } from "./elb/index.ts"
 export { Ecs } from "./ecs/index.ts"
 export { Eks } from "./eks/index.ts"

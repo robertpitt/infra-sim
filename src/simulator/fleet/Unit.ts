@@ -104,13 +104,6 @@ export class Line {
     return undefined
   }
 
-  /** Everyone still waiting, emptying the line. */
-  takeAll(): Array<Ticket> {
-    const out: Array<Ticket> = []
-    for (let t = this.shift(); t !== undefined; t = this.shift()) out.push(t)
-    return out
-  }
-
   private compact(): void {
     if (this.live === 0) this.clear()
     else if (this.head > 1024 && this.head * 2 > this.items.length) {
@@ -124,6 +117,12 @@ export class Line {
     this.head = 0
   }
 }
+
+/** A unit counts towards its fleet's desired number: not draining, not gone. */
+export const isLive = (u: Unit): boolean => u.state === "requested" || u.state === "starting" || u.state === "grace" || u.state === "inService"
+
+/** A unit is up and taking calls: in service, or in its grace period. */
+export const isServing = (u: Unit): boolean => u.state === "grace" || u.state === "inService"
 
 /** One unit, as its fleet keeps it. What everyone else sees of it is `Unit`. */
 export class Member implements Unit {
@@ -181,12 +180,12 @@ export class Member implements Unit {
 
   /** It counts towards the desired number: not draining, not gone. */
   get live(): boolean {
-    return this.state === "requested" || this.state === "starting" || this.state === "grace" || this.state === "inService"
+    return isLive(this)
   }
 
   /** Up and taking calls. */
   get serving(): boolean {
-    return this.state === "grace" || this.state === "inService"
+    return isServing(this)
   }
 
   attach(t: Ticket): void {

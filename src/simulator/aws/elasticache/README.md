@@ -281,7 +281,7 @@ engine has reached it). Gauges: `hitRate` (last ten seconds), `items`, `memoryUs
 network, of its baseline bandwidth), `shardsWriteBlocked`, `ecpuCeiling`, `nodesDown` (failed, being replaced or
 resynced, or in a zone that is down). The framework adds `in`, `ok`, `fail`, `fail.<Kind>`, `latency`, `inflight`.
 
-The dashboard (`dashboard.ts`) charts these under CloudWatch's names: CacheHitRate, CacheHits and CacheMisses with
+The dashboard (`internal/dashboard.ts`) charts these under CloudWatch's names: CacheHitRate, CacheHits and CacheMisses with
 SetTypeCmds, EngineCPUUtilization (and serverless's ElastiCacheProcessingUnits as a share of its current ceiling),
 SuccessfulRead/WriteRequestLatency, the cache-aside code's database calls, DatabaseMemoryUsagePercentage, CurrItems,
 Evictions and Reclaimed, NetworkBytesIn/Out and ReplicationBytes, ErrorCount and ThrottledCmds, and ReplicationLag.

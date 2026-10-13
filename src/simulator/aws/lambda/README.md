@@ -15,15 +15,15 @@ The code is split by mechanism:
 | File | What it holds |
 | --- | --- |
 | `Lambda.ts` | The component: ports, state schema, wiring, the sync/async entry |
-| `config.ts` | The settings schema (every setting, with its limit source) |
-| `invocation.ts` | One invocation attempt: admission, environment, cold start, run, timeout, settle |
-| `environments.ts` | Warm environments: reuse, idle expiry, maximum lifetime |
-| `provisioned.ts` | Provisioned concurrency: allocation delay, busy count |
-| `concurrency.ts` | The regional pool: claims, a function's standing |
-| `async.ts` | Asynchronous invocation: queue, retries, age, destinations |
-| `stats.ts` | The counters and samplers |
-| `limits.ts` | Named constants with their sources |
-| `quotas.ts`, `audit.ts` | The account-level concurrency quota, and checks of a design against it |
+| `internal/config.ts` | The settings schema (every setting, with its limit source) |
+| `internal/invocation.ts` | One invocation attempt: admission, environment, cold start, run, timeout, settle |
+| `internal/environments.ts` | Warm environments: `WarmPool` (reuse, idle expiry) plus a maximum lifetime |
+| `internal/provisioned.ts` | Provisioned concurrency: allocation delay, busy count |
+| `internal/concurrency.ts` | The regional pool: claims, a function's standing |
+| `internal/async.ts` | Asynchronous invocation: queue, retries, age, destinations |
+| `internal/stats.ts` | The tallies, counters and samplers |
+| `internal/limits.ts` | Named constants with their sources |
+| `Quotas.ts`, `Audit.ts` | The account-level concurrency quota, and checks of a design against it |
 
 ## Coverage
 
@@ -111,7 +111,7 @@ behaviour.
 | `async.secondRetryDelay` | 2 min | 0–6 h | hard (AWS value) | Wait before the second retry. |
 | `async.maxEventAge` | 6 h | 1 min–6 h | hard | Discard events older than this. |
 
-Account quota (in `quotas.ts`): `lambdaConcurrency`, default 1,000, 10 to 1,000,000, quota.
+Account quota (in `Quotas.ts`): `lambdaConcurrency`, default 1,000, 10 to 1,000,000, quota.
 
 Edge settings on the ports are the universal edge policy (latency, timeout, retry, cancel on timeout); the function adds none.
 
@@ -233,7 +233,7 @@ memory. Environments are not tied to function versions.
 An SQS consumer edge carries `batchSize`, `batchWindow` and `maxConcurrency`; those belong to the queue's component. The
 edge's `cancelOnTimeout` is what decides whether a caller that gives up stops the function (see Giving back).
 
-**CloudFormation import** (`importers/cloudformation/lambda.ts`, `events.ts`, `vpc.ts`): `AWS::Lambda::Function` and SAM
+**CloudFormation import** (`importers/internal/cloudformation/lambda.ts`, `events.ts`, `vpc.ts`): `AWS::Lambda::Function` and SAM
 `AWS::Serverless::Function` map `MemorySize` to `memory`, `Timeout` to `timeout`, `ReservedConcurrentExecutions` to
 `reserved` (enabled when given), `ProvisionedConcurrencyConfig` to `provisioned`, and `SnapStart.ApplyOn: PublishedVersions`
 to `coldStart.snapStart`. `EventInvokeConfig` (inline in SAM, or the `AWS::Lambda::EventInvokeConfig` resource) maps
@@ -284,7 +284,7 @@ Frames (per second unless noted; names as in the node's frame):
 | `accountConcurrency` | gauge | The region's concurrent-executions quota. |
 | `asyncPending` | gauge | Asynchronous events not yet finished. Registered with the function's first asynchronous event. |
 
-The dashboard (`dashboard.ts`) charts them as the Lambda console's Monitor tab and CloudWatch do: invocations with
+The dashboard (`internal/dashboard.ts`) charts them as the Lambda console's Monitor tab and CloudWatch do: invocations with
 errors, throttles and cold starts; the error, timeout and throttle rates; duration (average, p99, max); concurrency and
 environments; the regional concurrency against the quota; init duration; provisioned concurrency utilization and
 spillover; and the asynchronous queue's events and event age. Not charted, because nothing here models them:

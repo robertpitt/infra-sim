@@ -91,16 +91,11 @@ const settingsObject = (description: string, fields: ReadonlyArray<Describe.Fiel
   additionalProperties: false
 })
 
-/**
- * Settings that may come from several places (an edge's port, its connector, transport) under one object. A key two
- * sources describe differently takes whichever comes first: the forms are the same in practice, and a schema can't
- * know which source applies without the design.
- */
-const mergedFields = (lists: ReadonlyArray<ReadonlyArray<Describe.FieldSpec>>): ReadonlyArray<Describe.FieldSpec> => {
-  const out = new Map<string, Describe.FieldSpec>()
-  for (const list of lists) for (const f of list) if (!out.has(f.key)) out.set(f.key, f)
-  return [...out.values()]
-}
+/** A settings schema that applies when an object's `type` is `type`: how a node's or controller's settings follow from it. */
+const whenType = (type: string, properties: JsonSchema): JsonSchema => ({
+  if: { properties: { type: { const: type } }, required: ["type"] },
+  then: { properties }
+})
 
 // ---------------------------------------------------------------------------------------------------------
 // Scenarios (the shape is `ScenarioSpec.ts`; the descriptions are for people writing one)
@@ -255,15 +250,12 @@ export const designSchema = (registry: Components): JsonSchema => {
 
   // A node's settings and region follow from its type.
   const regionsOf = (provider: string) => registry.providers.find((p) => p.id === provider)?.regions.map((r) => r.id) ?? []
-  const byType = components.map((m) => ({
-    if: { properties: { type: { const: m.type } }, required: ["type"] },
-    then: {
-      properties: {
-        settings: { $ref: `#/definitions/${m.type}.settings` },
-        ...(regionsOf(m.provider).length === 0 ? {} : { region: { enum: regionsOf(m.provider) } })
-      }
-    }
-  }))
+  const byType = components.map((m) =>
+    whenType(m.type, {
+      settings: { $ref: `#/definitions/${m.type}.settings` },
+      ...(regionsOf(m.provider).length === 0 ? {} : { region: { enum: regionsOf(m.provider) } })
+    })
+  )
 
   definitions.node = {
     type: "object",
@@ -297,11 +289,13 @@ export const designSchema = (registry: Components): JsonSchema => {
   }
 
   // An edge's settings come from its source port, what sits on it (its connector) and transport, which every edge has.
-  const edgeFields = mergedFields([
+  // A key two sources describe differently takes whichever comes first: the forms are the same in practice, and a
+  // schema can't know which source applies without the design.
+  const edgeFields = Connector.edgeFields(
     ...connectors.map((c) => c.settings),
     ...components.flatMap((m) => m.outputs.map((o) => o.settings)),
     Connector.transportFields()
-  ])
+  )
   definitions.edge = {
     type: "object",
     description: "A connection: calls or messages from one node's output to another node.",
@@ -339,10 +333,7 @@ export const designSchema = (registry: Components): JsonSchema => {
       settings: { type: "object", description: "Only the settings you change." }
     },
     additionalProperties: false,
-    allOf: controllers.map((c) => ({
-      if: { properties: { type: { const: c.type } }, required: ["type"] },
-      then: { properties: { settings: { $ref: `#/definitions/${c.type}.settings` } } }
-    }))
+    allOf: controllers.map((c) => whenType(c.type, { settings: { $ref: `#/definitions/${c.type}.settings` } }))
   }
 
   // Account quotas by placement (`aws:us-east-1`), for providers that have any.

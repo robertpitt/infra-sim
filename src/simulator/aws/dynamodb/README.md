@@ -80,7 +80,7 @@ Names marked * are stable: designs, examples and the CloudFormation importer use
 
 Port settings on each `stream` edge (the event source mapping): `batchSize` (100; 1 to 10,000, hard), `batchWindow` (0 to 5 minutes, hard), `parallelization` (1; 1 to 10, hard), `maxRecordAge` (-1 = infinite; 60 to 604,800 s, hard), `maxRetries` (-1 = infinite; 0 to 10,000, hard), `bisectOnError` (false), `retryBackoff` (1 s, assumed), `maxRetryBackoff` (1 minute, assumed), `timeout` (5 minutes). `replicas` and `discarded` edges carry a retry policy only.
 
-Account quotas (`quotas.ts`): `dynamodbTableReadUnits` and `dynamodbTableWriteUnits` (40,000), `dynamodbAccountReadUnits` and `dynamodbAccountWriteUnits` (80,000), `dynamodbTables` (2,500), `dynamodbIndexesPerTable` (20).
+Account quotas (`Quotas.ts`): `dynamodbTableReadUnits` and `dynamodbTableWriteUnits` (40,000), `dynamodbAccountReadUnits` and `dynamodbAccountWriteUnits` (80,000), `dynamodbTables` (2,500), `dynamodbIndexesPerTable` (20).
 
 ## Limits
 
@@ -140,7 +140,7 @@ Pages that differ, or that the code had wrong: the earlier model forgot the prev
 - `replicas`: other tables of the same global table. The receiving table needs the reverse edge for writes there to replicate back.
 - `discarded`: gets one small asynchronous message per dropped batch (AWS sends metadata, not the records), for an SQS queue or SNS topic.
 
-CloudFormation import (`importers/cloudformation/dynamodb.ts`; `AWS::DynamoDB::Table`, `AWS::DynamoDB::GlobalTable` and SAM `SimpleTable`, which keeps its default 5/5 capacity):
+CloudFormation import (`importers/internal/cloudformation/dynamodb.ts`; `AWS::DynamoDB::Table`, `AWS::DynamoDB::GlobalTable` and SAM `SimpleTable`, which keeps its default 5/5 capacity):
 
 - **Capacity:** `BillingMode: PAY_PER_REQUEST` gives `mode: on-demand`; otherwise `ProvisionedThroughput` gives `mode: provisioned`, `readCapacity`, `writeCapacity`. `OnDemandThroughput.MaxReadRequestUnits/MaxWriteRequestUnits` give `onDemand.maxReadUnits/maxWriteUnits` (-1 is 0, no limit); `WarmThroughput.ReadUnitsPerSecond/WriteUnitsPerSecond` give `onDemand.warmReadUnits/warmWriteUnits`.
 - **Indexes:** `GlobalSecondaryIndexes` give `gsi.count`, and the component models them alike, so `gsi.readCapacity/writeCapacity` (provisioned) and `gsi.maxReadUnits/maxWriteUnits` (on-demand) take the largest index's values; indexes that differ are reported. `gsi.entryBytes` is 128 when every index is `KEYS_ONLY`, and stays 0 (the whole item) for `ALL`; an `INCLUDE` projection is charged as whole items and reported. `LocalSecondaryIndexes` give `lsi.count`.

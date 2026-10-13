@@ -1,49 +1,29 @@
 import { Duration, Effect, Schema, Stream, SubscriptionRef } from "effect"
 import * as Component from "../../Component.ts"
+import * as Work from "../../common/Work.ts"
 import { Fleet, type Phase } from "../../fleet/Fleet.ts"
 import { Rollout } from "../../fleet/Rollout.ts"
 import type { Unit } from "../../Protocol.ts"
-import * as Vcpus from "../ec2/vcpus.ts"
-import { handler, type WorkHost } from "../ecs/work.ts"
-import * as Aws from "../provider.ts"
-import { NodeAutoscaler } from "./autoscaler.ts"
-import { Config, type Settings } from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { BACKOFF_CAP_S, BACKOFF_FIRST_S, CONTAINER_START_MS, NODES_PER_GROUP, PAGES, PROGRESS_DEADLINE_S } from "./limits.ts"
-import { NodeGroup } from "./nodes.ts"
+import * as Vcpus from "../ec2/Vcpus.ts"
+import * as Aws from "../internal/provider.ts"
+import { NodeAutoscaler } from "./internal/autoscaler.ts"
+import { Config, type Settings } from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { NODES_PER_GROUP, PAGES, PROGRESS_DEADLINE_S } from "./internal/limits.ts"
+import { NodeGroup } from "./internal/nodes.ts"
+import * as Pods from "./internal/pods.ts"
 
-/** A phase that never ends: a pod in CrashLoopBackOff or failing its readiness probe never becomes ready. */
-const NEVER_MS = 1e13
 /** Pods and nodes listed in a probe at most. */
 const PROBE_UNITS = 200
-
-/** What a pod template revision is, kept from the settings when it was current. */
-interface Revision {
-  readonly imageSize: number
-  readonly pullRate: number
-  readonly appStartMs: number
-  readonly failure: Settings["pod"]["failure"]
-}
 
 /**
  * When a pod whose application is up after `appMs` passes its readiness probe: at the first probe, `initialDelay` after
  * the container starts and then every `period`, that finds it up (success threshold 1).
  */
-export const readyAfter = (appMs: number, initialDelayMs: number, periodMs: number): number =>
-  initialDelayMs + Math.max(0, Math.ceil((appMs - initialDelayMs) / periodMs)) * periodMs
+export const readyAfter = (appMs: number, initialDelayMs: number, periodMs: number): number => Pods.readyAfter(appMs, initialDelayMs, periodMs)
 
 /** CrashLoopBackOff: how many times a container has been restarted `ms` after its first crash (10 s, 20 s, 40 s... capped at 5 min apart). */
-export const restartsAfter = (ms: number): number => {
-  let n = 0
-  let t = 0
-  let gap = BACKOFF_FIRST_S * 1000
-  while (t + gap <= ms && n < 10_000) {
-    t += gap
-    n++
-    gap = Math.min(gap * 2, BACKOFF_CAP_S * 1000)
-  }
-  return n
-}
+export const restartsAfter = (ms: number): number => Pods.restartsAfter(ms)
 
 export const State = Schema.Struct({
   /** Pods Ready (in the Service's endpoints), not counting ones on dead nodes not yet noticed. */
@@ -125,8 +105,7 @@ export const Eks = Aws.component({
       const workersPerPod = () => Math.max(1, Math.floor((s().pod.cpu / 1000) * s().pod.requestsPerCore))
 
       // Pod template revisions, each with the settings it had when it was current.
-      const revisionOf = (c: Settings): Revision => ({ imageSize: c.pod.imageSize, pullRate: c.pod.pullRate, appStartMs: ms(c.pod.appStart), failure: c.pod.failure })
-      const revisions = new Map<number, Revision>([[s().pod.revision, revisionOf(s())]])
+      const revisions = new Map<number, Pods.Revision>([[s().pod.revision, Pods.revisionOf(s())]])
       let rolloutStarted = 0
       const rollout = new Rollout({
         version: () => s().pod.revision,
@@ -139,7 +118,7 @@ export const Eks = Aws.component({
         // An evicted pod is recreated by its own ReplicaSet, from its own template.
         replaceInKind: true
       })
-      const revision = (unit: Unit): Revision => revisions.get(rollout.versionOf(unit)) ?? revisionOf(s())
+      const revision = (unit: Unit): Pods.Revision => revisions.get(rollout.versionOf(unit)) ?? Pods.revisionOf(s())
 
       /** A pod's start-up once scheduled on a node: its image (unless the node has it), the container, then readiness. */
       const phases = (unit: Unit): ReadonlyArray<Phase> => {
@@ -147,15 +126,7 @@ export const Eks = Aws.component({
         const rev = revision(unit)
         const full = (rev.imageSize / rev.pullRate) * 1000
         const pull = group.images.pullMs(group.pool.hostOf(unit), `revision-${rollout.versionOf(unit)}`, full, 0, 0)
-        if (rev.failure !== "none") {
-          return [{ name: "pulling image", ms: pull }, { name: "starting", ms: CONTAINER_START_MS }, { name: rev.failure === "crash" ? "CrashLoopBackOff" : "not ready", ms: NEVER_MS }]
-        }
-        const r = s().readiness
-        return [
-          { name: "pulling image", ms: pull },
-          { name: "starting", ms: CONTAINER_START_MS },
-          { name: "readiness", ms: readyAfter(rev.appStartMs, ms(r.initialDelay), Math.max(1, ms(r.period))) }
-        ]
+        return Pods.phases(rev, pull, s().readiness)
       }
 
       const nf = () => s().nodeFailure
@@ -178,33 +149,27 @@ export const Eks = Aws.component({
       group.images.seed(group.pool.hosts, `revision-${s().pod.revision}`)
       const autoscaler = new NodeAutoscaler(group, () => pods, demand, s, fast)
 
-      const host: WorkHost = {
+      const host: Work.WorkHost = {
         id: node.id,
         fast,
         out: node.out("out"),
         serviceTime: () => s().pod.serviceTime,
         fanOut: () => s().fanOut,
-        broken: () => false,
         totals
       }
-      const serve = handler(pods, host)
+      const serve = Work.handler(pods, host)
 
-      const zoneGauges = new Set<string>()
-      const gaugeZones = (): void => {
-        for (const zone of pods.zonesList()) {
-          if (zoneGauges.has(zone)) continue
-          zoneGauges.add(zone)
-          node.meter.gaugeUnsafe(`ready.${zone}`, () => pods.servingIn(zone))
-          node.meter.gaugeUnsafe(`nodes.${zone}`, () => group.fleet.servingIn(zone))
-        }
-      }
+      const gaugeZones = Work.zoneGauges(() => pods, (zone) => {
+        node.meter.gaugeUnsafe(`ready.${zone}`, () => pods.servingIn(zone))
+        node.meter.gaugeUnsafe(`nodes.${zone}`, () => group.fleet.servingIn(zone))
+      })
       yield* node.spawn(
         SubscriptionRef.changes(node.config).pipe(
           Stream.runForEach(() =>
             Effect.sync(() => {
               const c = s()
               if (!revisions.has(c.pod.revision)) rolloutStarted = fast.now()
-              revisions.set(c.pod.revision, revisionOf(c))
+              revisions.set(c.pod.revision, Pods.revisionOf(c))
               rollout.step()
               group.refresh()
               pods.refresh()

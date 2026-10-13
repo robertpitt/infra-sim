@@ -39,7 +39,7 @@ the core's `Rollout`.
 | Managed scaling (CapacityProviderReservation, target capacity) | ✅ | Out after one minute's data point, in after 15 minutes below target and 15 minutes after a scale-out; step sizes; scale out from zero launches two. |
 | Managed termination protection | ✅ | Only instances without tasks are scaled in. |
 | Managed instance draining | ✅ | A terminating instance's tasks are replaced elsewhere and stop gracefully; off, they stop with it. |
-| EC2 vCPU quota | ✅ | The region's Standard On-Demand vCPUs, shared with every EC2 instance (`../ec2/vcpus.ts`). |
+| EC2 vCPU quota | ✅ | The region's Standard On-Demand vCPUs, shared with every EC2 instance (`../ec2/Vcpus.ts`). |
 | ENI limits per instance (awsvpc), instance warm-up | ❌ | See the backlog. |
 | **Load balancers** | ✅ | A fleet: an ALB's or NLB's target group picks tasks one by one, checks their health, and reports unhealthy ones, which ECS replaces (and the circuit breaker counts). |
 
@@ -72,7 +72,7 @@ the core's `Rollout`.
 | `fargate.base` | 0 | 0-100,000 | hard | Tasks always on FARGATE. |
 | `fargate.weight`, `fargate.spotWeight` | 1, 0 | 0-1,000 | hard | The strategy's weights. |
 | `fargate.spotInterruptionsPerTaskHour` | 0.0000685 | 0-1,000 | assumed | EC2's Spot Instance Advisor's under 5% a month; raise it for a wave. |
-| `ec2.instanceType` | m7i.large | the EC2 catalog | | `../ec2/instanceTypes.ts`. |
+| `ec2.instanceType` | m7i.large | the EC2 catalog | | `../ec2/InstanceTypes.ts`. |
 | `ec2.minSize`, `ec2.maxSize` | 0, 10 | 0-5,000 | hard | Container instances per cluster: 5,000. |
 | `ec2.desiredSize` | 2 | | | Instances at the start; a live change sets the group's desired size. |
 | `ec2.managedScaling` | on | | | |
@@ -82,9 +82,9 @@ the core's `Rollout`.
 | `ec2.managedDraining` | on | | | |
 | `ec2.placement` | spread | spread, binpack | | Within a zone. |
 | `ec2.pending`, `ec2.boot`, `ec2.register` | 30 s, 30 s, 15 s | | assumed | Instance launch, boot, ECS agent registration. |
-| `ec2.replaceAfter` | 180 s | 0-1 h | assumed | EC2 status checks finding a dead instance (`../ec2/limits.ts`). |
+| `ec2.replaceAfter` | 180 s | 0-1 h | assumed | EC2 status checks finding a dead instance (`../ec2/Limits.ts`). |
 
-Account quotas (`quotas.ts`, in the Region box): `fargateOnDemandVcpus` 6, `fargateSpotVcpus` 6, `fargateLaunchRate` 20/s,
+Account quotas (`Quotas.ts`, in the Region box): `fargateOnDemandVcpus` 6, `fargateSpotVcpus` 6, `fargateLaunchRate` 20/s,
 `fargateLaunchBurst` 100. On EC2, the instances count against EC2's `ec2OnDemandStandardVcpus` (5 by default).
 
 ## Limits
@@ -178,7 +178,7 @@ and `targetCapacity` (the same and managed scaling's target, 0-1, 1 being 100%),
 that crashed or failed their health checks, once each), `spotInterruptions`. Rates and latency as every node (`in`,
 `ok`, `fail`, `fail.<Tag>`, `latency`).
 
-The dashboard (`dashboard.ts`) charts them as the console, CloudWatch (`AWS/ECS`) and Container Insights do:
+The dashboard (`internal/dashboard.ts`) charts them as the console, CloudWatch (`AWS/ECS`) and Container Insights do:
 `RunningTaskCount`, `PendingTaskCount` and `DesiredTaskCount`; `CPUUtilization`; requests and response time as the load
 balancer counts them; the deployment (tasks per revision, the circuit breaker); task launches, stops, failures and Spot
 interruptions; tasks per Fargate capacity provider; and on EC2 `ContainerInstanceCount`, `CPUReservation`,

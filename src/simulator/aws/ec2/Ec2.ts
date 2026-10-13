@@ -1,44 +1,34 @@
 import { Duration, Effect, Stream, SubscriptionRef } from "effect"
 import * as Component from "../../Component.ts"
 import { Fleet, type Phase } from "../../fleet/Fleet.ts"
-import { type Call, type CallFailure, type Message, type Reply, Unavailable } from "../../Message.ts"
 import type { Unit } from "../../Protocol.ts"
-import type { Account } from "../account.ts"
-import * as Aws from "../provider.ts"
-import { Config, type Settings } from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { instanceType } from "./instanceTypes.ts"
-import { overMaxMargin, PAGES } from "./limits.ts"
-import { type Cpu, cpuOf, PerMinute } from "./metrics.ts"
-import { Request, type RequestHost } from "./request.ts"
-import { onDemandOf, SpotInterruptions } from "./spot.ts"
-import { State } from "./state.ts"
-import { pick } from "./termination.ts"
-import { give, ledgerOf, type Purchase, quotaOf, take } from "./vcpus.ts"
-import { WarmPool } from "./warmPool.ts"
+import * as Work from "../../common/Work.ts"
+import type { Account } from "../internal/account.ts"
+import * as Aws from "../internal/provider.ts"
+import { Config, type Settings } from "./internal/config.ts"
+import * as Instances from "./internal/instances.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { instanceType } from "./InstanceTypes.ts"
+import { overMaxMargin, PAGES } from "./Limits.ts"
+import { type Cpu, cpuOf, PerMinute } from "./internal/metrics.ts"
+import { onDemandOf, SpotInterruptions } from "./internal/spot.ts"
+import { State } from "./internal/state.ts"
+import { pick } from "./internal/termination.ts"
+import { give, ledgerOf, type Purchase, quotaOf, take } from "./Vcpus.ts"
+import { WarmPool } from "./internal/warmPool.ts"
 
 /** How long a launch EC2 refused (quota, no Spot capacity) waits before the group tries again. AWS publishes no figure: an assumption. */
 export const LAUNCH_RETRY_MS = 30_000
 
 const ms = (d: Duration.Duration): number => Duration.toMillis(d)
 
-/** What the group knows of an instance from its launch to its termination. */
-interface Instance {
-  readonly purchase: Purchase
-  readonly vcpus: number
-  readonly launchedAt: number
-  /** How it started: there before the simulation, launched from scratch, or taken from the warm pool. */
-  start: "initial" | "cold" | "warm"
-  /** Let go (scale-in, replacement, interruption): no longer counted in the purchase split. */
-  draining: boolean
-}
-
 /**
  * An Amazon EC2 Auto Scaling group: a fleet of identical instances, spread over the group's Availability Zones, kept at
  * its desired capacity between its minimum and maximum size. Built on the fleet core (`fleet/Fleet.ts`): each instance
- * is a unit with a zone, a life and workers (its vCPUs). The modules beside this file hold the AWS mechanisms: the
- * instance types (`instanceTypes.ts`), the vCPU quotas (`vcpus.ts`), the warm pool (`warmPool.ts`), Spot and Capacity
- * Rebalancing (`spot.ts`), the termination policy (`termination.ts`) and the scaling metrics (`metrics.ts`). README.md
+ * is a unit with a zone, a life and workers (its vCPUs), and its requests are `common/Work.ts`'s. The modules beside
+ * this file hold the AWS mechanisms: the instance types (`InstanceTypes.ts`), the vCPU quotas (`Vcpus.ts`), and in
+ * `internal/` the warm pool (`warmPool.ts`), Spot and Capacity Rebalancing (`spot.ts`), the termination policy
+ * (`termination.ts`), the scaling metrics (`metrics.ts`) and the instances' bookkeeping (`instances.ts`). README.md
  * documents them against AWS.
  */
 export const Ec2 = Aws.component({
@@ -77,7 +67,7 @@ export const Ec2 = Aws.component({
       const out = node.out("out")
       const ledger = yield* ledgerOf(node)
       const totals = { served: 0, errors: 0, refused: 0, lost: 0 }
-      const instances = new Map<number, Instance>()
+      const instances = new Map<number, Instances.Instance>()
       const upAt = new Map<number, number>()
       const broken = new Set<number>()
       const protectedIds = new Set<number>()
@@ -105,22 +95,10 @@ export const Ec2 = Aws.component({
       }
       const zones = (): ReadonlyArray<string> => node.zones.all.slice(0, settings().availabilityZones)
 
-      /** Live instances by purchase option, from what the group launched (draining ones don't count). */
-      const split = (): { onDemand: number; total: number } => {
-        let onDemand = 0
-        let total = 0
-        for (const i of instances.values()) {
-          if (i.draining) continue
-          total++
-          if (i.purchase === "onDemand") onDemand++
-        }
-        return { onDemand, total }
-      }
-
       /** The purchase option of the next launch: whichever is short of the split for the group's size after it. */
       const nextPurchase = (c: Settings): Purchase => {
         if (c.warmPool.enabled || c.spot.onDemandPercentageAboveBase >= 100) return "onDemand"
-        const { onDemand, total } = split()
+        const { onDemand, total } = Instances.split(instances)
         return onDemand < onDemandOf(total + 1, c.spot.onDemandBaseCapacity, c.spot.onDemandPercentageAboveBase) ? "onDemand" : "spot"
       }
 
@@ -140,7 +118,6 @@ export const Ec2 = Aws.component({
       /** The phases a launch goes through: from scratch, or from the warm pool (which skips what was done before). */
       const phases = (unit: Unit): ReadonlyArray<Phase> => {
         const c = settings()
-        const l = c.launch
         const warm = pool.take(unit.zone)
         const instance = instances.get(unit.id)
         if (instance !== undefined) instance.start = warm === undefined ? "cold" : "warm"
@@ -151,28 +128,7 @@ export const Ec2 = Aws.component({
           broken.add(unit.id)
           fleet().setHealthy(unit, false)
         }
-        switch (warm) {
-          case undefined:
-            return [
-              { name: "pending", ms: ms(l.pending) },
-              { name: "boot", ms: ms(l.boot) },
-              { name: "user data", ms: ms(l.userData) },
-              { name: "application start", ms: ms(l.appStart) }
-            ]
-          case "Stopped":
-            return [
-              { name: "pending (from the warm pool)", ms: ms(l.pending) },
-              { name: "boot", ms: ms(l.boot) },
-              { name: "application start", ms: ms(l.appStart) }
-            ]
-          case "Hibernated":
-            return [
-              { name: "pending (from the warm pool)", ms: ms(l.pending) },
-              { name: "resume from hibernation", ms: ms(l.boot) }
-            ]
-          case "Running":
-            return []
-        }
+        return Instances.launchPhases(c.launch, warm)
       }
 
       fleetRef = new Fleet(node, {
@@ -224,7 +180,7 @@ export const Ec2 = Aws.component({
         },
         protect: (unit) => protectedIds.has(unit.id),
         scaleIn: () => (settings().terminationPolicy === "NewestInstance" ? "newest" : "oldest"),
-        pick: (candidates) => pick(settings(), candidates, (u) => instances.get(u.id), split(), fast.now()),
+        pick: (candidates) => pick(settings(), candidates, (u) => instances.get(u.id), Instances.split(instances), fast.now()),
         name: (id) => `i-${id}`
       })
 
@@ -242,10 +198,7 @@ export const Ec2 = Aws.component({
           return n
         },
         desired,
-        coldMs: () => {
-          const l = settings().launch
-          return ms(l.pending) + ms(l.boot) + ms(l.userData) + ms(l.appStart)
-        },
+        coldMs: () => Instances.coldMs(settings().launch),
         retryMs: LAUNCH_RETRY_MS
       })
 
@@ -270,22 +223,21 @@ export const Ec2 = Aws.component({
       })
       spot.schedule()
 
-      const host: RequestHost = { id: node.id, fast, out, broken, totals }
       const requests = new PerMinute()
+      const host: Work.WorkHost = {
+        id: node.id,
+        fast,
+        out,
+        serviceTime: () => settings().serviceTime,
+        fanOut: () => settings().fanOut,
+        errorRate: () => settings().errorRate,
+        broken: (unit) => broken.size > 0 && broken.has(unit.id),
+        brokenReason: "500 the instance's application is broken",
+        arrived: () => requests.add(fast.now()),
+        totals
+      }
       /** One request: wait for a worker (on `unit`, if a balancer chose one), work for the service time, then call downstream. */
-      const handle = (message: Message, unit: Unit | undefined): Call =>
-        Effect.callback<Reply, CallFailure>((resume) => {
-          requests.add(fast.now())
-          const request = new Request(host, message, resume)
-          const admitted = fleet().admit(request, unit)
-          if (typeof admitted === "string") {
-            totals.refused++
-            resume(Effect.fail(Unavailable({ node: node.id, reason: admitted })))
-            return Effect.void
-          }
-          request.ticket = admitted
-          return Effect.sync(() => request.abandon())
-        })
+      const handle = Work.handler(fleet(), host)
 
       // CPU of the instances past their warmup, worked out once per instant however many gauges read it.
       let cpuMemo: { t: number; value: Cpu } | undefined
@@ -296,14 +248,7 @@ export const Ec2 = Aws.component({
       }
 
       // In service per zone, for each zone the group spreads over (registered when it first does).
-      const zoneGauges = new Set<string>()
-      const gaugeZones = (): void => {
-        for (const zone of fleet().zonesList()) {
-          if (zoneGauges.has(zone)) continue
-          zoneGauges.add(zone)
-          node.meter.gaugeUnsafe(`inService.${zone}`, () => fleet().servingIn(zone))
-        }
-      }
+      const gaugeZones = Work.zoneGauges(fleet, (zone) => node.meter.gaugeUnsafe(`inService.${zone}`, () => fleet().servingIn(zone)))
 
       // Gauges a group has only once it uses what they measure, so its dashboard shows their charts only then: the warm
       // pool's desired capacity (WarmPoolDesiredCapacity) once it has a warm pool, and the Spot instances its purchase
@@ -347,16 +292,8 @@ export const Ec2 = Aws.component({
         pool.refresh()
       }))))
 
-      const groupVcpus = (): number => {
-        let n = pool.vcpus
-        for (const i of instances.values()) n += i.vcpus
-        return n
-      }
-      const count = (purchase: Purchase): number => {
-        let n = 0
-        for (const i of instances.values()) if (!i.draining && i.purchase === purchase) n++
-        return n
-      }
+      const groupVcpus = (): number => Instances.vcpusOf(instances, pool.vcpus)
+      const count = (purchase: Purchase): number => Instances.countOf(instances, purchase)
 
       const meter = node.meter
       meter.gaugeUnsafe("desired", desired)

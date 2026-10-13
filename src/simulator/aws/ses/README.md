@@ -182,7 +182,7 @@ first. Open and click draw their own rates only when someone listens.
   sent with `link.send`, asynchronously (`invocation: async`), so a slow or failing destination never slows the sender;
   they carry `bytes` of 2 KB (assumed). Each edge picks its event types and has its own retry policy. A destination that
   never accepts an event counts under `events.lost`.
-- **Wiring** (`importers/cloudformation/ses.ts`, `infer.ts`): `AWS::SES::ConfigurationSet` is the SES node.
+- **Wiring** (`importers/internal/cloudformation/ses.ts`, `infer.ts`): `AWS::SES::ConfigurationSet` is the SES node.
   `SuppressionOptions.SuppressedReasons` maps to `suppression` (an empty list turns it off; `BOUNCE` and `COMPLAINT` to
   `bounces`, `complaints` or `both`), and `DeliveryOptions.MaxDeliverySeconds` to `timing.retryWindow` (outside AWS's
   5 minutes to 14 hours it is brought into range and reported). `SendingEnabled: false` is not modelled: the node still
@@ -227,7 +227,7 @@ the daily quota), `suppressionList` (addresses on it), `pending` (events being d
 (GetSendQuota's Max24HourSend and MaxSendRate), and the reputation thresholds as constant lines: `bounceRateReview`,
 `bounceRatePause`, `complaintRateReview`, `complaintRatePause`.
 
-The node's dashboard (`dashboard.ts`) charts these under SES's event and CloudWatch names. Not charted, because not
+The node's dashboard (`internal/dashboard.ts`) charts these under SES's event and CloudWatch names. Not charted, because not
 modelled: RenderingFailure, Subscription, and the per-configuration-set and per-ISP dimensions.
 
 Probe state: `status`, `sandbox`, `bounceRate`, `complaintRate`, `daily {used, quota}`, `recipients`, `delivered`,

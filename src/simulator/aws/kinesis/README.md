@@ -196,7 +196,7 @@ the function, a retried batch again), `failedInvokeEvents` (FailedInvokeEventCou
 `concurrency` (batches in flight), `maxConcurrency` (its lanes: shards read times the parallelization factor), `blocked`
 (records in batches that have failed), `batchSize`.
 
-The stream's and the mapping's dashboards (`dashboard.ts`) chart these under CloudWatch's names. Not charted, because not
+The stream's and the mapping's dashboards (`internal/dashboard.ts`) chart these under CloudWatch's names. Not charted, because not
 modelled: GetRecords.Latency, PutRecord(s).Latency (calls are answered at once), PutRecords.FailedRecords (internal
 failures), SubscribeToShard.* subscription events, and per-shard series (the hot-spot gauges summarise them). Probe: shards read, in
 flight, IteratorAge, backlog, blocked, enhanced fan-out and refusal, totals.

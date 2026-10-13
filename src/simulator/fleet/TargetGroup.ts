@@ -7,6 +7,8 @@ import type { SeededRandom } from "../SeededRandom.ts"
 import * as Setting from "../Setting.ts"
 import type { Counter, Meter } from "../Telemetry.ts"
 import type { TimerHandle } from "../VirtualTime.ts"
+import { memoByIdentity } from "../internal/memo.ts"
+import { byShare, leastOutstanding, NONE, Pools, type Target, weightedTurn } from "./internal/targetGroup.ts"
 
 /**
  * A load balancer's target group: the part of a load balancer that knows the units of one fleet, checks their health,
@@ -154,25 +156,6 @@ export const State = Schema.Struct({
 })
 export type State = typeof State.Type
 
-/** One registered unit. */
-interface Target {
-  readonly unit: Unit
-  health: Health
-  /** Checks passed and failed in a row. */
-  passes: number
-  fails: number
-  /** Requests sent to it and not yet answered: least outstanding requests counts these. */
-  outstanding: number
-  /** When it last became healthy, for slow start. */
-  healthySince: number
-  /** Smooth weighted round robin's running credit. */
-  credit: number
-  tick: TimerHandle | undefined
-  ping: Edge.Cancel | undefined
-  readonly answer: () => HealthAnswer
-  readonly heard: (healthy: boolean) => void
-}
-
 /** What a target group works with: the fleet it targets, the edge's transport, time and randomness, and the edge's meter. */
 export interface Context {
   /** The node the edge leads to, for failures. */
@@ -194,17 +177,10 @@ export interface Context {
   readonly zones?: () => ReadonlyArray<string> | undefined
 }
 
-/** A share of requests is never quite zero in slow start, so a target at the very start of it still gets one now and then. */
-const MIN_WEIGHT = 0.01
-const NONE: ReadonlyArray<Target> = []
-
-const policies = new WeakMap<object, Edge.CallPolicy>()
 /** The call policy of a request: the edge's timeout, and no retries (a load balancer doesn't retry a request). */
-const policyOf = (c: Settings): Edge.CallPolicy => {
-  let p = policies.get(c)
-  if (p === undefined) policies.set(c, (p = { ...Edge.once, timeoutMs: Duration.toMillis(c.timeout), cancelOnTimeout: c.cancelOnTimeout }))
-  return p
-}
+const policyOf = memoByIdentity(
+  (c: Settings): Edge.CallPolicy => ({ ...Edge.once, timeoutMs: Duration.toMillis(c.timeout), cancelOnTimeout: c.cancelOnTimeout })
+)
 
 export class TargetGroup {
   private readonly targets = new Map<number, Target>()
@@ -213,18 +189,8 @@ export class TargetGroup {
   private dirty = true
   private builtFor: Settings | undefined
   private builtZones: ReadonlyArray<string> | undefined
-  /** Who may get requests now: the healthy targets (or every registered one, failing open). */
-  private pool: ReadonlyArray<Target> = NONE
-  private readonly byZone = new Map<string, Array<Target>>()
-  /**
-   * Per zone, who a balancer node there sends to with cross-zone off: its zone's healthy targets, or (none healthy) every
-   * registered one there, as ELB's routing failover does. Only used when the balancer says where a request arrived.
-   */
-  private readonly zonePools = new Map<string, ReadonlyArray<Target>>()
-  /** The zones a request can reach the balancer in: those with targets in the pool. */
-  private zones: ReadonlyArray<string> = []
-  /** Until when some target in the pool is in slow start. */
-  private rampUntil = -Infinity
+  /** Who may get requests, per zone: rebuilt only when something changed. */
+  private readonly pools = new Pools()
   private turn = 0
   private readonly noTarget: Counter
   private noTargetTotal = 0
@@ -259,15 +225,22 @@ export class TargetGroup {
   send(message: Message, done: Edge.Done | undefined, arrival?: string): Edge.Cancel {
     const c = this.ctx.fast.settings()
     const enabled = this.ctx.zones?.()
-    if (this.dirty || c !== this.builtFor || enabled !== this.builtZones) this.build(c, enabled)
+    const pools = this.pools
+    if (this.dirty || c !== this.builtFor || enabled !== this.builtZones) {
+      this.dirty = false
+      this.builtFor = c
+      this.builtZones = enabled
+      pools.build(this.order, c, enabled)
+    }
     let zone: string | undefined
-    let pool = this.pool
+    let pool = pools.pool
     if (arrival !== undefined) {
       zone = arrival
-      if (!c.crossZone) pool = this.zonePools.get(arrival) ?? NONE
-    } else if (this.zones.length > 0) {
-      zone = this.zones.length === 1 ? this.zones[0] : this.zones[Math.floor(this.ctx.fast.random.nextDoubleUnsafe() * this.zones.length)]
-      if (!c.crossZone) pool = this.byZone.get(zone!) ?? NONE
+      if (!c.crossZone) pool = pools.zonePools.get(arrival) ?? NONE
+    } else if (pools.zones.length > 0) {
+      const zones = pools.zones
+      zone = zones.length === 1 ? zones[0] : zones[Math.floor(this.ctx.fast.random.nextDoubleUnsafe() * zones.length)]
+      if (!c.crossZone) pool = pools.byZone.get(zone!) ?? NONE
     }
     if (pool.length === 0) {
       this.noTarget.n++
@@ -333,16 +306,16 @@ export class TargetGroup {
   private pick(pool: ReadonlyArray<Target>, c: Settings, message: Message): Target {
     if (pool.length === 1) return pool[0]!
     const now = this.ctx.fast.now()
-    const slow = now < this.rampUntil ? Duration.toMillis(c.slowStart) : 0
+    const slow = now < this.pools.rampUntil ? Duration.toMillis(c.slowStart) : 0
     switch (c.algorithm) {
       case "round-robin":
-        return slow > 0 ? this.weightedTurn(pool, now, slow) : pool[this.nextTurn() % pool.length]!
+        return slow > 0 ? weightedTurn(pool, now, slow) : pool[this.nextTurn() % pool.length]!
       case "least-outstanding":
-        return this.leastOutstanding(pool, now, slow)
+        return leastOutstanding(pool, now, slow, this.nextTurn() % pool.length)
       case "random":
-        return this.byShare(pool, now, slow, this.ctx.fast.random.nextDoubleUnsafe())
+        return byShare(pool, now, slow, this.ctx.fast.random.nextDoubleUnsafe())
       case "flow-hash":
-        return this.byShare(pool, now, slow, message.key)
+        return byShare(pool, now, slow, message.key)
     }
   }
 
@@ -350,100 +323,6 @@ export class TargetGroup {
     const turn = this.turn
     this.turn = turn >= 1e9 ? 0 : turn + 1
     return turn
-  }
-
-  /** A target's share: 1, or less while it is in slow start (growing linearly from when it became healthy). */
-  private weight(t: Target, now: number, slow: number): number {
-    if (slow <= 0 || t.health !== "healthy") return 1
-    const into = now - t.healthySince
-    return into >= slow ? 1 : Math.max(MIN_WEIGHT, into / slow)
-  }
-
-  /** Round robin by share (nginx's smooth weighted round robin): each target's turns in proportion to its weight. */
-  private weightedTurn(pool: ReadonlyArray<Target>, now: number, slow: number): Target {
-    let best = pool[0]!
-    let total = 0
-    for (const t of pool) {
-      const w = this.weight(t, now, slow)
-      t.credit += w
-      total += w
-      if (t.credit > best.credit) best = t
-    }
-    best.credit -= total
-    return best
-  }
-
-  /** The fewest requests in flight for its share; ties go round, so equal targets take turns. */
-  private leastOutstanding(pool: ReadonlyArray<Target>, now: number, slow: number): Target {
-    const n = pool.length
-    const start = this.nextTurn() % n
-    let best = pool[start]!
-    let score = Infinity
-    for (let k = 0; k < n; k++) {
-      const t = pool[(start + k) % n]!
-      const s = slow > 0 ? (t.outstanding + 1) / this.weight(t, now, slow) : t.outstanding
-      if (s < score) {
-        score = s
-        best = t
-      }
-    }
-    return best
-  }
-
-  /** The target at `u` of the way along the pool, by share: a random draw, or a flow's key. */
-  private byShare(pool: ReadonlyArray<Target>, now: number, slow: number, u: number): Target {
-    if (slow <= 0) return pool[Math.min(pool.length - 1, Math.floor(u * pool.length))]!
-    let total = 0
-    for (const t of pool) total += this.weight(t, now, slow)
-    let r = u * total
-    for (const t of pool) {
-      r -= this.weight(t, now, slow)
-      if (r < 0) return t
-    }
-    return pool[pool.length - 1]!
-  }
-
-  /** Who may get requests, per zone, and until when anyone is in slow start: rebuilt only when something changed. */
-  private build(c: Settings, enabled: ReadonlyArray<string> | undefined): void {
-    this.dirty = false
-    this.builtFor = c
-    this.builtZones = enabled
-    // Targets in a zone the balancer has no node in are registered but unused.
-    const used = enabled === undefined ? this.order : this.order.filter((t) => t.unit.zone === undefined || enabled.includes(t.unit.zone))
-    const healthy = used.filter((t) => t.health === "healthy")
-    this.pool = healthy.length > 0 ? healthy : c.failOpen ? used.filter((t) => t.health !== "draining") : NONE
-    this.byZone.clear()
-    const zones: Array<string> = []
-    let rampUntil = -Infinity
-    const slow = Duration.toMillis(c.slowStart)
-    for (const t of this.pool) {
-      if (t.health === "healthy" && slow > 0) rampUntil = Math.max(rampUntil, t.healthySince + slow)
-      const z = t.unit.zone
-      if (z === undefined) continue
-      let inZone = this.byZone.get(z)
-      if (inZone === undefined) {
-        this.byZone.set(z, (inZone = []))
-        zones.push(z)
-      }
-      inZone.push(t)
-    }
-    this.zones = zones
-    this.rampUntil = rampUntil
-    for (const t of this.order) t.credit = 0
-    // Each zone's own pool, for requests a balancer says arrived there: healthy ones, else (failing open) all registered.
-    this.zonePools.clear()
-    const registered = new Map<string, Array<Target>>()
-    for (const t of used) {
-      const z = t.unit.zone
-      if (z === undefined || t.health === "draining") continue
-      let inZone = registered.get(z)
-      if (inZone === undefined) registered.set(z, (inZone = []))
-      inZone.push(t)
-    }
-    for (const [z, all] of registered) {
-      const well = all.filter((t) => t.health === "healthy")
-      this.zonePools.set(z, well.length > 0 ? well : c.failOpen ? all : NONE)
-    }
   }
 
   // ---------------------------------------------------------------------------------------------------------

@@ -672,8 +672,7 @@ export const program = (argv: ReadonlyArray<string>, io: IO) =>
     const exit = yield* Command.runWith(root, { version: versionOf(io) })(argv).pipe(
       Effect.provideService(Io, io),
       Effect.provideService(Console.Console, collectingConsole(out, err)),
-      Effect.provide(CliOutput.layer(formatterFor(io, argv))),
-      Effect.provide(cliConfig),
+      Effect.provide([CliOutput.layer(formatterFor(io, argv)), cliConfig]),
       Effect.exit
     )
     if (exit._tag === "Success") {

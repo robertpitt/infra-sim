@@ -3,20 +3,22 @@ import * as Component from "../../Component.ts"
 import * as Distribution from "../../Distribution.ts"
 import * as Flow from "../../Flow.ts"
 import { Rejected, Throttled } from "../../Message.ts"
+import { Tally } from "../../kit/Tally.ts"
 import { keyOf } from "../../Provider.ts"
-import * as Aws from "../provider.ts"
+import * as Aws from "../internal/provider.ts"
 import {
   Config,
   Destination,
+  type EventKind,
   LARGE_MESSAGE_BANDWIDTH,
   LARGE_MESSAGE_BYTES,
   MAX_MESSAGE_BYTES,
   MAX_RECIPIENTS,
   MIME_OVERHEAD
-} from "./config.ts"
-import { Publisher } from "./events.ts"
-import { decide, type Fate } from "./fate.ts"
-import { dashboard } from "./dashboard.ts"
+} from "./internal/config.ts"
+import { Publisher } from "./internal/events.ts"
+import { decide, type Fate } from "./internal/fate.ts"
+import { dashboard } from "./internal/dashboard.ts"
 import {
   type Enforcement,
   HEALTHY,
@@ -26,9 +28,9 @@ import {
   REVIEW_BOUNCE_RATE,
   REVIEW_COMPLAINT_RATE,
   STATUS_NAMES
-} from "./reputation.ts"
-import { sources } from "./sources.ts"
-import { AccountState } from "./standing.ts"
+} from "./internal/reputation.ts"
+import { sources } from "./internal/sources.ts"
+import { AccountState } from "./internal/standing.ts"
 
 const enforcementOf = (c: Config): Enforcement => ({
   enforcement: c.reputation.enforcement,
@@ -102,39 +104,38 @@ export const Ses = Aws.component({
       const rateKey = `${keyOf(node.placement)}/ses/rate`
       const bandwidthKey = `${keyOf(node.placement)}/ses/bandwidth`
 
-      // Totals for the probe; the counters beside them are reset every frame.
-      const t = {
-        recipients: 0, delivered: 0, permanent: 0, transient: 0, complaints: 0, rejected: 0, delayed: 0, suppressed: 0,
-        throttledRate: 0, throttledDaily: 0, throttledBandwidth: 0, refused: 0, published: 0, lost: 0
+      // Each tally is a per-second rate (its counter, reset every frame) and a running total for the probe; the plain
+      // counters are rates only, and `refused` is a total only.
+      const tally = (name: string): Tally => new Tally(node.meter.counter(name))
+      const m = {
+        recipients: tally("recipients"),
+        send: node.meter.counter("send"),
+        delivered: tally("delivery"),
+        bounce: node.meter.counter("bounce"),
+        permanent: tally("bounce.permanent"),
+        transient: tally("bounce.transient"),
+        complaints: tally("complaint"),
+        rejected: tally("reject"),
+        delayed: tally("deliveryDelay"),
+        open: node.meter.counter("open"),
+        click: node.meter.counter("click"),
+        suppressed: tally("suppressed"),
+        published: tally("events.published"),
+        lost: tally("events.lost"),
+        // Sends refused by each limit (all are fail.Throttled): the per-second rate, the rolling daily quota, large-message bandwidth.
+        throttledRate: tally("throttled.rate"),
+        throttledDaily: tally("throttled.daily"),
+        throttledBandwidth: tally("throttled.bandwidth"),
+        refused: new Tally(undefined)
       }
-      const recipientsC = node.meter.counter("recipients")
-      const sendC = node.meter.counter("send")
-      const deliveryC = node.meter.counter("delivery")
-      const bounceC = node.meter.counter("bounce")
-      const permanentC = node.meter.counter("bounce.permanent")
-      const transientC = node.meter.counter("bounce.transient")
-      const complaintC = node.meter.counter("complaint")
-      const rejectC = node.meter.counter("reject")
-      const delayC = node.meter.counter("deliveryDelay")
-      const openC = node.meter.counter("open")
-      const clickC = node.meter.counter("click")
-      const suppressedC = node.meter.counter("suppressed")
-      const publishedC = node.meter.counter("events.published")
-      const lostC = node.meter.counter("events.lost")
-      // Sends refused by each limit (all are fail.Throttled): the per-second rate, the rolling daily quota, large-message bandwidth.
-      const throttledRateC = node.meter.counter("throttled.rate")
-      const throttledDailyC = node.meter.counter("throttled.daily")
-      const throttledBandwidthC = node.meter.counter("throttled.bandwidth")
 
-      const publisher = new Publisher(node.out("events"), (failure) => {
-        if (failure === undefined) {
-          t.published++
-          publishedC.n++
-        } else {
-          t.lost++
-          lostC.n++
-        }
-      })
+      const publisher = new Publisher(node.out("events"), (failure) => (failure === undefined ? m.published : m.lost).add(1))
+
+      /** Count `n` recipients' outcome on `tally` and publish it as an event of `kind`. */
+      const outcome = (tally: Tally, kind: EventKind, f: Fate, n: number): void => {
+        tally.add(n)
+        publisher.publish(kind, f.message, n)
+      }
 
       const listsBounces = (c: Config): boolean => c.suppression.enabled && c.suppression.reasons !== "complaints"
       const listsComplaints = (c: Config): boolean => c.suppression.enabled && c.suppression.reasons !== "bounces"
@@ -145,34 +146,18 @@ export const Ses = Aws.component({
       const onSettle = (f: Fate): void => {
         const c = fast.settings()
         const hard = f.hardNew + f.hardRepeat
-        if (f.rejected > 0) {
-          rejectC.n += f.rejected
-          t.rejected += f.rejected
-          publisher.publish("reject", f.message, f.rejected)
-        }
+        if (f.rejected > 0) outcome(m.rejected, "reject", f, f.rejected)
         // A send to a suppressed address is reported as a permanent bounce, which does not count toward the bounce rate.
         const bounces = hard + f.suppressedBounce
         if (bounces > 0) {
-          bounceC.n += bounces
-          permanentC.n += bounces
-          t.permanent += bounces
-          publisher.publish("bounce", f.message, bounces)
+          m.bounce.n += bounces
+          outcome(m.permanent, "bounce", f, bounces)
         }
-        if (f.suppressedComplaint > 0) {
-          complaintC.n += f.suppressedComplaint
-          t.complaints += f.suppressedComplaint
-          publisher.publish("complaint", f.message, f.suppressedComplaint)
-        }
-        if (f.delivered > 0) {
-          deliveryC.n += f.delivered
-          t.delivered += f.delivered
-          publisher.publish("delivery", f.message, f.delivered)
-        }
+        if (f.suppressedComplaint > 0) outcome(m.complaints, "complaint", f, f.suppressedComplaint)
+        if (f.delivered > 0) outcome(m.delivered, "delivery", f, f.delivered)
         const delayed = f.deferredOk + f.deferredFail
         if (delayed > 0) {
-          delayC.n += delayed
-          t.delayed += delayed
-          publisher.publish("deliveryDelay", f.message, delayed)
+          outcome(m.delayed, "deliveryDelay", f, delayed)
           const windowMs = Duration.toMillis(c.timing.retryWindow)
           if (f.deferredOk > 0) fast.after(Math.min(Distribution.latencyMs(c.timing.retryDelay, fast.random), windowMs), onRecovered, f)
           if (f.deferredFail > 0) fast.after(windowMs, onGaveUp, f)
@@ -190,26 +175,18 @@ export const Ses = Aws.component({
       }
 
       /** A delayed message got through on a retry. */
-      const onRecovered = (f: Fate): void => {
-        deliveryC.n += f.deferredOk
-        t.delivered += f.deferredOk
-        publisher.publish("delivery", f.message, f.deferredOk)
-      }
+      const onRecovered = (f: Fate): void => outcome(m.delivered, "delivery", f, f.deferredOk)
 
       /** SES stopped retrying: a soft bounce (transient), which AWS leaves out of the bounce rate. */
       const onGaveUp = (f: Fate): void => {
-        bounceC.n += f.deferredFail
-        transientC.n += f.deferredFail
-        t.transient += f.deferredFail
-        publisher.publish("bounce", f.message, f.deferredFail)
+        m.bounce.n += f.deferredFail
+        outcome(m.transient, "bounce", f, f.deferredFail)
       }
 
       /** A complaint arrived through a feedback loop. */
       const onComplaint = (f: Fate): void => {
         const c = fast.settings()
-        complaintC.n += f.complaints
-        t.complaints += f.complaints
-        publisher.publish("complaint", f.message, f.complaints)
+        outcome(m.complaints, "complaint", f, f.complaints)
         if (f.complaintsNew > 0) {
           if (listsComplaints(c)) account.complainedListed += f.complaintsNew
           else account.complainedUnlisted += f.complaintsNew
@@ -220,11 +197,11 @@ export const Ses = Aws.component({
 
       const onEngaged = (f: Fate): void => {
         if (f.opens > 0) {
-          openC.n += f.opens
+          m.open.n += f.opens
           publisher.publish("open", f.message, f.opens)
         }
         if (f.clicks > 0) {
-          clickC.n += f.clicks
+          m.click.n += f.clicks
           publisher.publish("click", f.message, f.clicks)
         }
       }
@@ -256,7 +233,7 @@ export const Ses = Aws.component({
       node.meter.gaugeUnsafe("complaintRatePause", () => PAUSE_COMPLAINT_RATE)
 
       const refuse = (reason: string) => {
-        t.refused++
+        m.refused.add(1)
         return Effect.fail(Rejected({ node: node.id, reason }))
       }
 
@@ -290,19 +267,16 @@ export const Ses = Aws.component({
 
           // The rolling daily quota first, then the per-second rate: a throttled send is dropped, not queued, and takes nothing.
           if (account.daily.used(now) + n > dailyQuota(q)) {
-            t.throttledDaily++
-            throttledDailyC.n++
+            m.throttledDaily.add(1)
             return Effect.fail(Throttled({ node: node.id, reason: "ThrottlingException: Daily message quota exceeded" }))
           }
           const rate = q.sesSandbox ? q.sesSandboxSendingRate : q.sesSendingRate
           if (!node.limiter.takeUnsafe(rateKey, { rate, burst: rate }, n)) {
-            t.throttledRate++
-            throttledRateC.n++
+            m.throttledRate.add(1)
             return Effect.fail(Throttled({ node: node.id, reason: "ThrottlingException: Maximum sending rate exceeded" }))
           }
           if (perMessage > LARGE_MESSAGE_BYTES && !node.limiter.takeUnsafe(bandwidthKey, { rate: LARGE_MESSAGE_BANDWIDTH, burst: LARGE_MESSAGE_BANDWIDTH }, encoded)) {
-            t.throttledBandwidth++
-            throttledBandwidthC.n++
+            m.throttledBandwidth.add(1)
             return Effect.fail(Throttled({ node: node.id, reason: "ThrottlingException: bandwidth throttling of large messages" }))
           }
 
@@ -312,15 +286,11 @@ export const Ses = Aws.component({
           const suppressed = f.suppressedBounce + f.suppressedComplaint
           // Suppressed sends are left out of the rates (the Bounce and Complaint metrics still count them).
           reputation.addSent(n - suppressed, c.reputation.window)
-          recipientsC.n += n
-          t.recipients += n
-          if (suppressed > 0) {
-            suppressedC.n += suppressed
-            t.suppressed += suppressed
-          }
+          m.recipients.add(n)
+          if (suppressed > 0) m.suppressed.add(suppressed)
           const sent = n - f.rejected
           if (sent > 0) {
-            sendC.n += sent
+            m.send.n += sent
             publisher.publish("send", message, sent)
           }
           fast.after(Distribution.latencyMs(c.timing.delivery, fast.random), onSettle, f)
@@ -335,18 +305,18 @@ export const Ses = Aws.component({
             bounceRate: reputation.bounceRate,
             complaintRate: reputation.complaintRate,
             daily: { used: account.daily.used(fast.now()), quota: dailyQuota(q) },
-            recipients: t.recipients,
-            delivered: t.delivered,
-            bounced: { permanent: t.permanent, transient: t.transient },
-            complaints: t.complaints,
-            rejected: t.rejected,
-            delayed: t.delayed,
-            suppressed: t.suppressed,
+            recipients: m.recipients.total,
+            delivered: m.delivered.total,
+            bounced: { permanent: m.permanent.total, transient: m.transient.total },
+            complaints: m.complaints.total,
+            rejected: m.rejected.total,
+            delayed: m.delayed.total,
+            suppressed: m.suppressed.total,
             suppressionList: account.listed,
             addresses: account.unique,
-            throttled: { rate: t.throttledRate, daily: t.throttledDaily, bandwidth: t.throttledBandwidth },
-            refused: t.refused,
-            events: { destinations: node.out("events").length, pending: publisher.pending, published: t.published, lost: t.lost }
+            throttled: { rate: m.throttledRate.total, daily: m.throttledDaily.total, bandwidth: m.throttledBandwidth.total },
+            refused: m.refused.total,
+            events: { destinations: node.out("events").length, pending: publisher.pending, published: m.published.total, lost: m.lost.total }
           }
         })
       }

@@ -1,17 +1,17 @@
 import { Effect, Schema } from "effect"
 import { type CallFailure, Rejected, type Reply, Throttled, Unavailable } from "../../Message.ts"
 import { totals } from "../../kit/Tally.ts"
-import * as Aws from "../provider.ts"
-import { classOf, isMysqlFamily } from "./catalog.ts"
-import { Config } from "./config.ts"
-import { DEFAULT_POLICY } from "./client.ts"
-import { database } from "./dashboard.ts"
-import { REFUSED } from "./connections.ts"
-import { Database, makeStats } from "./database.ts"
-import type { Database as DatabaseOffer } from "./endpoint.ts"
-import { SOURCES } from "./limits.ts"
-import { runQuery } from "./query.ts"
-import { NO_EFFECT } from "./zones.ts"
+import * as Aws from "../internal/provider.ts"
+import { classOf, isMysqlFamily } from "./internal/catalog.ts"
+import { Config } from "./internal/config.ts"
+import { DEFAULT_POLICY } from "./Client.ts"
+import { database } from "./internal/dashboard.ts"
+import { REFUSED, sweepEverySecond } from "./internal/connections.ts"
+import { Database, makeStats } from "./internal/database.ts"
+import type { Database as DatabaseOffer } from "./internal/endpoint.ts"
+import { SOURCES } from "./internal/limits.ts"
+import { runQuery } from "./internal/query.ts"
+import { NO_EFFECT } from "./internal/zones.ts"
 
 /** Why a client that still caches the old primary's address can't connect after a failover. */
 export const STALE_DNS = "connect timeout: the endpoint's DNS name is cached and still points at the old primary"
@@ -126,19 +126,12 @@ export const Rds = Aws.component({
         attach: (key, policy, counters) => db.attach(key, policy, counters),
         // Readers are the writer's class, so one instance of either has the same limit.
         maxConnections: () => db.derived().maxConnections,
-        connections: (key) => {
-          const client = db.clients.get(key)
-          return client === undefined ? 0 : client.writer.busy + client.writer.idle + client.reader.busy + client.reader.idle
-        },
+        connections: (key) => db.connections(key),
         mysql: () => isMysqlFamily(fast.settings().engine)
       }
 
-      // Idle connections close when their client's idle timeout passes, whether or not anything calls: check every second.
-      const sweep = (): void => {
-        db.sweep(fast.now())
-        fast.after(1_000, sweep, undefined)
-      }
-      fast.after(1_000, sweep, undefined)
+      // Idle connections close when their client's idle timeout passes, whether or not anything calls.
+      sweepEverySecond(fast, (now) => db.sweep(now))
 
       node.meter.gaugeUnsafe("connections", () => db.writer.server.open)
       node.meter.gaugeUnsafe("idleConnections", () => db.writer.server.idle)
@@ -209,7 +202,6 @@ export const Rds = Aws.component({
           db.settle(now)
           const d = db.derived()
           const cls = classOf(c.instanceClass)
-          const t = totals(count)
           return {
             engine: c.engine,
             instanceClass: c.instanceClass,
@@ -234,16 +226,8 @@ export const Rds = Aws.component({
             },
             iops: d.iops === Number.POSITIVE_INFINITY ? 0 : d.iops,
             clients: db.clients.size,
-            queries: t.queries,
-            reads: t.reads,
-            writes: t.writes,
-            opened: t.opened,
-            refused: t.refused,
-            readOnly: t.readOnly,
-            stale: t.stale,
-            lost: t.lost,
-            unavailable: t.unavailable,
-            failovers: t.failovers,
+            // queries, reads, writes, opened, refused, readOnly, stale, lost, unavailable, failovers: in that order.
+            ...totals(count),
             failingOver: db.failover.down(now),
             failoverUntil: db.failover.until,
             writerZone: db.topology.writerZoneName() ?? "",

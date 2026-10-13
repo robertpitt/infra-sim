@@ -1,8 +1,8 @@
 import { Effect, Schema } from "effect"
 import * as Setting from "../../Setting.ts"
-import * as Aws from "../provider.ts"
-import { addresses, capacity, MAX_PREFIX, MIN_PREFIX, usablePerSubnet } from "./cidr.ts"
-import { source } from "./sources.ts"
+import * as Aws from "../internal/provider.ts"
+import { addresses, capacity, MAX_PREFIX, MIN_PREFIX, usablePerSubnet } from "./internal/cidr.ts"
+import { source } from "./internal/sources.ts"
 
 /**
  * Component types that are VPC resources (they live in your subnets). Everything else on AWS is a regional service outside

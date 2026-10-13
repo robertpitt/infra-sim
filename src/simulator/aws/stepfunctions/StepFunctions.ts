@@ -8,10 +8,10 @@ import { bodyBytes, chance } from "../../kit/Shape.ts"
 import { tallies, totals } from "../../kit/Tally.ts"
 import { type CallFailure, Failed } from "../../Message.ts"
 import { keyOf } from "../../Provider.ts"
-import * as Aws from "../provider.ts"
-import { Config, Fallback, State } from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { Execution, type Outcome, Planner, type Workflow } from "./execution.ts"
+import * as Aws from "../internal/provider.ts"
+import { Config, Fallback, State } from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { Execution, type Outcome, Planner, type Workflow } from "./internal/execution.ts"
 import {
   D,
   DISTRIBUTED_MAP_CONCURRENCY,
@@ -20,9 +20,10 @@ import {
   INLINE_MAP_CONCURRENCY,
   MAX_PAYLOAD_BYTES,
   QUOTAS
-} from "./limits.ts"
-import { makeRegion } from "./region.ts"
-import { type Machine, TALLIES } from "./states.ts"
+} from "./internal/limits.ts"
+import { makeRegion } from "./internal/region.ts"
+import { type Machine, TALLIES } from "./internal/states.ts"
+import { memoByIdentity } from "../../internal/memo.ts"
 
 /** Why a synchronous Express caller hears a failure: StartSyncExecution answers with the execution's status and error. */
 const syncFailure = (node: string, outcome: Outcome, failure: CallFailure | undefined): CallFailure =>
@@ -31,18 +32,10 @@ const syncFailure = (node: string, outcome: Outcome, failure: CallFailure | unde
     : Failed({ node, reason: `ExecutionFailed: ${failure === undefined ? "the fallback path ended in a Fail state" : "reason" in failure ? `${failure._tag}: ${failure.reason}` : failure._tag}` })
 
 /** The account's StartExecution buckets, rebuilt only when the quotas change. */
-const buckets = new WeakMap<Aws.Account, { readonly standard: Bucket; readonly express: Bucket }>()
-const startBuckets = (a: Aws.Account) => {
-  let b = buckets.get(a)
-  if (b === undefined) {
-    b = {
-      standard: { rate: a.sfnStartExecutionRate, burst: a.sfnStartExecutionBurst },
-      express: { rate: a.sfnExpressStartRate, burst: a.sfnExpressStartBurst }
-    }
-    buckets.set(a, b)
-  }
-  return b
-}
+const startBuckets = memoByIdentity((a: Aws.Account): { readonly standard: Bucket; readonly express: Bucket } => ({
+  standard: { rate: a.sfnStartExecutionRate, burst: a.sfnStartExecutionBurst },
+  express: { rate: a.sfnExpressStartRate, burst: a.sfnExpressStartBurst }
+}))
 
 /**
  * AWS Step Functions: a state machine whose `out` edges are its states, run in the order they are wired. Each state is a

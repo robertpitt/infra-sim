@@ -12,7 +12,7 @@ costs), which quotas you are sharing, and what a regional outage does to a multi
 | Feature | Status | Notes |
 | --- | --- | --- |
 | **Placement** | | |
-| Region list | ✅ | The 34 commercial-partition Regions of the AWS table, in `catalog.ts`. The provider's own list (`../regions.ts`) is missing two of them: see Not yet simulated |
+| Region list | ✅ | The 34 commercial-partition Regions of the AWS table, in `Catalog.ts`. The provider's own list (`../internal/regions.ts`) is missing two of them: see Not yet simulated |
 | Box decides the Region of its contents | ✅ | Nested containers (a VPC) inherit it. A node whose own Region disagrees is a `region-mismatch` error |
 | Only AWS components fit; not another Region | ✅ | A component that must sit in a VPC (NAT gateway, VPC endpoint) is refused straight in the box |
 | Default Region (`us-east-1`) for a component with no box | ✅ | Engine behaviour |
@@ -20,10 +20,10 @@ costs), which quotas you are sharing, and what a regional outage does to a multi
 | Latency between Regions from distance | 🟡 | Engine estimate (great-circle distance, 200 km/ms, x1.35 route factor); AWS publishes no inter-Region latency. Editable per edge |
 | Latency inside a Region | 🟡 | 1 ms, an estimate; 0.5 ms more between two nodes placed in different zones (assumed: AWS says zones are up to ~100 km apart with single-digit millisecond latency) |
 | **Availability Zones** | | |
-| Zones of each Region | ✅ | Named `us-east-1a`... as AWS names them, as many as the Regions table lists (`catalog.ts`, engine `Region.zones`) |
+| Zones of each Region | ✅ | Named `us-east-1a`... as AWS names them, as many as the Regions table lists (`Catalog.ts`, engine `Region.zones`) |
 | A node in one zone | ✅ | `zone: us-east-1a` on the node (engine). No AWS component uses it yet; the NAT gateway still has its own `zone` setting |
 | **Quotas** | | |
-| Account quotas shown and edited in the box | ✅ | Each service contributes its own (`../<service>/quotas.ts`); the box is where the panel lives |
+| Account quotas shown and edited in the box | ✅ | Each service contributes its own (`../<service>/Quotas.ts`); the box is where the panel lives |
 | Quotas differ by Region | 🟡 | Only where a service supplies per-Region defaults (Lambda, API Gateway). Others are one number everywhere |
 | **Failure modes** | | |
 | Regional outage, slowdown, errors | ✅ | Inject a fault on `aws:<region>`: every node inside is affected (engine, `Fault.ts`) |
@@ -61,7 +61,7 @@ The box itself does nothing at run time. The engine applies a Region in three pl
    it that decides a Region (this box), else the node's own `region`, else the provider default. A container inside a
    Region (a VPC) inherits it. A node that names a different Region than its box is rejected with `region-mismatch`.
 2. **Latency.** An edge's default network latency is `1 ms` inside a Region and `1 + distance / 200 km/ms * 1.35`
-   between Regions (plus transit when crossing providers). The distance uses the coordinates in `catalog.ts`; they are
+   between Regions (plus transit when crossing providers). The distance uses the coordinates in `Catalog.ts`; they are
    the main city of each Region, not a data-centre address, so two Regions in the same country differ by a few
    milliseconds at most. Any edge can override it.
 3. **Quotas and faults.** Nodes in the same placement share one account's quotas and are hit together by a regional
@@ -88,10 +88,10 @@ None: the box is not a traffic node. Diagnostics it contributes (through the aud
    node's zone, an interface endpoint should have a network interface per zone, a function in a VPC should run in the
    zones of its subnets, and `Member` in `Provider.ts` should carry the zone and the parent container so audits can count
    per zone and per VPC.
-2. **Two newer Regions in the provider's list.** `../regions.ts` (outside this folder) lacks `ap-east-2` (Taipei) and
-   `ap-southeast-6` (New Zealand). `catalog.ts` has all 34 and exports `regions` in the provider's shape: replacing the
-   body of `../regions.ts` with `export { regions } from "./region/catalog.ts"` fixes it and makes the catalog the one
-   source. `Region.test.ts` allows the two to be missing there today and passes either way once they appear (its allowance can then be deleted).
+2. **Two newer Regions in the provider's list.** `../internal/regions.ts` (outside this folder) lacks `ap-east-2` (Taipei) and
+   `ap-southeast-6` (New Zealand). `Catalog.ts` has all 34 and exports `regions` in the provider's shape: replacing the
+   body of `../internal/regions.ts` with `export { regions } from "./region/catalog.ts"` fixes it and makes the catalog the one
+   source. `tests/Region.test.ts` allows the two to be missing there today and passes either way once they appear (its allowance can then be deleted).
 3. **Inter-Region latency from measurement.** AWS publishes none; the distance model is an estimate. Per-pair
    overrides would need a table in the provider.
 4. **Region-scoped service availability** (a service not offered in a Region, such as a newer Lambda feature). AWS has

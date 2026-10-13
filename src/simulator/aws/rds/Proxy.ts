@@ -2,12 +2,13 @@ import { Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
 import type { CallFailure, Reply } from "../../Message.ts"
 import { totals } from "../../kit/Tally.ts"
-import * as Aws from "../provider.ts"
-import { forward, makeProxyStats, ProxyRuntime } from "./borrow.ts"
-import { proxy as dashboard } from "./dashboard.ts"
-import { SOURCES } from "./limits.ts"
-import { ProxyConfig } from "./proxyConfig.ts"
-import type { Endpoint } from "./endpoint.ts"
+import * as Aws from "../internal/provider.ts"
+import { forward, makeProxyStats, ProxyRuntime } from "./internal/borrow.ts"
+import { proxy as dashboard } from "./internal/dashboard.ts"
+import { sweepEverySecond } from "./internal/connections.ts"
+import { SOURCES } from "./internal/limits.ts"
+import { ProxyConfig } from "./internal/proxyConfig.ts"
+import type { Endpoint } from "./internal/endpoint.ts"
 
 /**
  * Amazon RDS Proxy: a pool of database connections shared by many clients. Clients connect to the proxy (as many as
@@ -84,11 +85,7 @@ export const RdsProxy = Aws.component({
       yield* Effect.addFinalizer(() => Effect.sync(() => proxy.stop()))
 
       // Idle client connections close at the idle timeout whether or not anything calls (a pinned one frees its slot).
-      const sweep = (): void => {
-        proxy.clientServer.sweep(fast.now())
-        fast.after(1_000, sweep, undefined)
-      }
-      fast.after(1_000, sweep, undefined)
+      sweepEverySecond(fast, (now) => proxy.clientServer.sweep(now))
 
       const limit = (): number => {
         const n = proxy.limit()

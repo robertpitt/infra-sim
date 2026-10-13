@@ -1,12 +1,12 @@
 import { Effect, Schema } from "effect"
 import * as Connector from "../../Connector.ts"
+import { shapeCall } from "../../connectors/Link.ts"
 import * as Edge from "../../Edge.ts"
-import type { Message } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
-import { docs } from "../docs.ts"
-import { HEALTHY_SHARE, TCP_CONNECT_TIMEOUT_MS } from "./config.ts"
-import { connectionDashboard } from "./dashboard.ts"
-import { endpointOfEdge, percentageHealthyOf, statusOf } from "./health.ts"
+import { docs } from "../internal/docs.ts"
+import { HEALTHY_SHARE, TCP_CONNECT_TIMEOUT_MS } from "./internal/config.ts"
+import { connectionDashboard } from "./internal/dashboard.ts"
+import { endpointOfEdge, percentageHealthyOf, statusOf } from "./internal/health.ts"
 
 /**
  * What a call does once DNS has named the endpoint. A plain link would make every call through it a write (an edge's
@@ -44,13 +44,6 @@ type ConnectionPolicy = typeof ConnectionPolicy.Type
  * 10 seconds). The record itself judges an HTTP check against its shorter deadline and abandons it then.
  */
 const PROBE = Edge.within(TCP_CONNECT_TIMEOUT_MS)
-
-const shape = (m: Message, c: ConnectionPolicy): Message => {
-  const operation = c.request.operation === "caller" ? m.operation : c.request.operation
-  return operation === m.operation && c.request.payload === 0
-    ? m
-    : { ...m, operation, ...(c.request.payload > 0 ? { bytes: c.request.payload * 1024 } : {}) }
-}
 
 /**
  * The caller's own connection to the endpoint a Route 53 record named. Route 53 answers the name and is then out of
@@ -93,7 +86,7 @@ export const Connection = Connector.make({
             })
           }
           const c = fast.settings()
-          return sink.call(shape(message, c), Edge.policyOf(c), done)
+          return sink.call(shapeCall(message, c), Edge.policyOf(c), done)
         }
       }
     })

@@ -1,32 +1,17 @@
-import {
-  Cause,
-  Context,
-  Duration,
-  Effect,
-  Exit,
-  Fiber,
-  Graph,
-  Layer,
-  Random,
-  Schema,
-  Scope,
-  Stream,
-  SubscriptionRef
-} from "effect"
-import type { Instance as ComponentInstance, Node as NodeContext, PortDefs } from "./Component.ts"
+import { Context, Duration, Effect, Exit, Fiber, Graph, Layer, Predicate, Random, Schema, Scope, type Stream, SubscriptionRef } from "effect"
+import type { Instance as ComponentInstance, PortDefs } from "./Component.ts"
 import type * as Connector from "./Connector.ts"
 import type * as Controller from "./Controller.ts"
 import type * as Design from "./Design.ts"
 import * as Edge from "./Edge.ts"
 import * as Limiter from "./Limiter.ts"
-import { ActiveFault, type Fault, Faults, make as makeFaults, NO_FAULT, NoSuchTarget, type Target } from "./Fault.ts"
-import { Failed, type Call, type CallFailure, failureCounter, type ItemFailures, type Message, Unavailable } from "./Message.ts"
-import type { Fleet, Pull, Unit } from "./Protocol.ts"
+import { ActiveFault, type Fault, Faults, make as makeFaults, type NoSuchTarget, type Target } from "./Fault.ts"
 import { keyOf, zoneKeyOf } from "./Provider.ts"
 import * as SeededRandom from "./SeededRandom.ts"
 import { type Frame, make as makeTelemetry, Telemetry } from "./Telemetry.ts"
 import { Registry } from "./Registry.ts"
 import { VirtualTime } from "./VirtualTime.ts"
+import * as internal from "./internal/simulation.ts"
 
 /**
  * A running simulation: a configured `Design` brought to life inside a virtual-time world.
@@ -171,7 +156,6 @@ export class Simulation extends Context.Service<Simulation, Service>()("simulato
     Layer.effect(Simulation, make(design, options))
 }
 
-
 export interface Options {
   /** Overrides the design's own seed. */
   readonly seed?: number
@@ -179,78 +163,36 @@ export interface Options {
   readonly frameMs?: number
 }
 
-interface Runtime {
-  readonly node: Design.Node
-  readonly config: SubscriptionRef.SubscriptionRef<unknown>
-  readonly random: SeededRandom.SeededRandom
-  readonly links: Map<string, Array<Edge.Link<never>>>
-  readonly totals: { in: number; ok: number; fail: number }
-  inflight: number
-  /** The context the node's fibers run in: the world's clock and scheduler, and this node's own random stream. */
-  readonly context: Context.Context<never>
-  /** Start the node's handler for a message (see `Edge.Target`). Undefined for nodes with no `call`. */
-  start: Edge.Target["start"] | undefined
-  /** What the node offers on its `pull` ports. */
-  offers: Readonly<Record<string, Pull>> | undefined
-  /** Its units, if its component is a fleet. */
-  fleet: Fleet | undefined
-  /** What it offers beyond calls (`Instance.offer`). */
-  offer: unknown
-  probe: Effect.Effect<unknown> | undefined
-}
-
-/** One controller, running. */
-interface ControllerRuntime {
-  readonly controller: Design.Controller
-  readonly config: SubscriptionRef.SubscriptionRef<unknown>
-  /** What it said it decided, newest last. */
-  readonly log: Array<{ readonly t: number; readonly text: string }>
-  probe: Effect.Effect<unknown> | undefined
-}
-
-/** How many of a controller's log lines are kept. */
-const LOG_KEEP = 50
-
-/** `settings` with `value` at `path`, as a new object. */
-const setAt = (settings: Readonly<Record<string, unknown>>, path: ReadonlyArray<string>, value: unknown): Record<string, unknown> => {
-  const [head, ...rest] = path
-  if (head === undefined) return { ...settings }
-  const inner = (settings[head] ?? {}) as Record<string, unknown>
-  return { ...settings, [head]: rest.length === 0 ? value : setAt(inner, rest, value) }
-}
-
-/** One edge, running: its transport and the connector on it. */
-interface EdgeRuntime {
-  readonly edge: Design.Edge
-  readonly config: SubscriptionRef.SubscriptionRef<unknown>
-  readonly wire: Edge.Wire
-  /** What the connector does with a message a source sends; set once the connector is built. */
-  send: ((message: Message, done?: Edge.Done) => Edge.Cancel) | undefined
-  probe: Effect.Effect<unknown> | undefined
-}
-
-const encodeWith = (schema: Schema.Top, value: unknown): unknown => Schema.encodeSync(schema as Schema.Encoder<unknown>)(value)
-
-const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
 /** Deep merge: objects merge key by key, anything else replaces. */
 const mergeDeep = (base: Readonly<Record<string, unknown>>, over: Readonly<Record<string, unknown>>): Record<string, unknown> => {
   const out: Record<string, unknown> = { ...base }
-  for (const [k, v] of Object.entries(over)) out[k] = isPlain(v) && isPlain(out[k]) ? mergeDeep(out[k] as Record<string, unknown>, v) : v
+  for (const [k, v] of Object.entries(over)) out[k] = Predicate.isObject(v) && Predicate.isObject(out[k]) ? mergeDeep(out[k] as Record<string, unknown>, v) : v
   return out
 }
 
 /** A change to some settings, merged over what is live now (encoded, then decoded and validated as a whole). */
 const patched = (id: string, schema: Schema.Top, live: unknown, settings: Readonly<Record<string, unknown>>) =>
-  decodeOverrides(id, schema, mergeDeep(encodeWith(schema, live) as Record<string, unknown>, settings))
+  decodeOverrides(id, schema, mergeDeep(internal.encodeWith(schema, live) as Record<string, unknown>, settings))
 
+/** Settings decoded and validated as a whole, or the issues that stop them. */
 const decodeOverrides = (id: string, schema: Schema.Top, overrides: Readonly<Record<string, unknown>>) =>
   Effect.mapError(
     Schema.decodeUnknownEffect(schema as Schema.Decoder<unknown>)(overrides),
-    (error) => new InvalidConfig({ id, issues: error.message.split("\n").map((s) => s.trim()).filter(Boolean) })
+    (error) => new InvalidConfig({ id, issues: internal.issues(error.message) })
   )
 
-const noop = (): void => {}
+/** Where a live edit lands: the settings it replaces, their schema, and the id its errors name. */
+interface Settable {
+  readonly id: string
+  readonly schema: Schema.Top
+  readonly ref: SubscriptionRef.SubscriptionRef<unknown>
+}
 
+/**
+ * Builds the simulation inside the world: every node's runtime, every edge's transport and link, then the components,
+ * the connectors on the edges and the controllers, in that order. A definition that fails to build stops it all, as a
+ * `ComponentCrashed`.
+ */
 export const make = (design: Design.Design, options: Options = {}): Effect.Effect<Service, ComponentCrashed, VirtualTime | Scope.Scope | Registry> =>
   Effect.gen(function*() {
     const world = yield* VirtualTime
@@ -266,57 +208,21 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
     const defects: Array<Defect> = []
     // A callback that throws inside a timer is a component defect, reported like any other.
     world.onError = (error) => void defects.push({ t: world.nowUnsafe(), node: "(timer)", message: error instanceof Error ? error.message : String(error) })
-    const nodes = new Map<string, Runtime>()
-    const edges = new Map<string, EdgeRuntime>()
-    const controllers = new Map<string, ControllerRuntime>()
-    let messages = 0
-
-    /** A fresh message from `origin`, its key drawn from the caller's own stream. */
-    const mint = (origin: string, random: SeededRandom.SeededRandom, init: Partial<Message>): Message => ({
-      id: ++messages,
-      bornAt: world.nowUnsafe(),
-      origin,
-      attempt: 1,
-      bytes: 1024,
-      count: 1,
-      invocation: "sync",
-      operation: "write",
-      key: random.nextDoubleUnsafe(),
-      ...init
-    })
-
-    /** Run a background loop for the life of the simulation, reporting a defect in it against `owner`. */
-    const spawnFor = (owner: string) => <A, E>(effect: Effect.Effect<A, E>): Effect.Effect<void, never, Scope.Scope> =>
-      Effect.asVoid(
-        Effect.forkScoped(
-          effect.pipe(
-            Effect.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause)
-                ? Effect.void
-                : Effect.gen(function*() {
-                  defects.push({ t: yield* world.now, node: owner, message: Cause.pretty(cause).split("\n")[0] ?? "crashed" })
-                })
-            )
-          )
-        )
-      )
+    const nodes = new Map<string, internal.NodeRuntime>()
+    const edges = new Map<string, internal.EdgeRuntime>()
+    const controllers = new Map<string, internal.ControllerRuntime>()
 
     const built = yield* inWorld(
       Effect.gen(function*() {
         const scope = yield* Scope.make()
-        const nodeIds = new Set(design.nodeIndex.keys())
-        const edgeIds = new Set(design.edgeIndex.keys())
         const telemetry = yield* makeTelemetry(frameMs, world.now).pipe(Scope.provide(scope))
         // Every zone of every placement in use can be faulted, whether or not anything is placed in it yet.
-        const zonesOf = (key: string): ReadonlyArray<string> => {
-          const account = design.accounts.get(key)
-          return account === undefined ? [] : registry.provider(account.placement.provider)?.regions.find((r) => r.id === account.placement.region)?.zones ?? []
-        }
+        const zonesOf = internal.zonesOf(design, registry)
         const zoneIds = new Set([...design.accounts.keys()].flatMap((key) => zonesOf(key).map((zone) => zoneKeyOf(key, zone))))
         const faults = yield* makeFaults(
           {
-            nodes: nodeIds,
-            edges: edgeIds,
+            nodes: new Set(design.nodeIndex.keys()),
+            edges: new Set(design.edgeIndex.keys()),
             regions: new Set(design.accounts.keys()),
             zones: zoneIds,
             // A global component (CloudFront, Route 53) runs everywhere: no region's or zone's fault reaches it.
@@ -332,26 +238,37 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
           world.now
         ).pipe(Scope.provide(scope))
 
-        /**
-         * The faults the engine applies around a node's calls: its own, its region's and its zone's, except that a
-         * component that handles its zone's faults itself (a Multi-AZ resource) is spared its zone's.
-         */
-        const effectOn = (id: string) => (nodes.get(id)?.node.component.handlesZoneFaults ? faults.forNodeOwnUnsafe(id) : faults.forNodeUnsafe(id))
-
         // Account-level quotas: one live value per placement, and a store for resources nodes there share.
         const accountRefs = new Map<string, SubscriptionRef.SubscriptionRef<unknown>>()
         for (const [key, account] of design.accounts) accountRefs.set(key, yield* SubscriptionRef.make(account.config))
-        const shared = new Map<string, unknown>()
-        /** A resource shared by everything in a placement, built the first time anyone asks. */
-        const sharedIn = <A>(placement: string, name: string, build: Effect.Effect<A, never, Scope.Scope>): Effect.Effect<A> =>
-          Effect.suspend(() => {
-            const key = `${placement}/${name}`
-            if (shared.has(key)) return Effect.succeed(shared.get(key) as A)
-            // Built once, in the world's scope, on behalf of whoever asked first.
-            return build.pipe(Scope.provide(scope), Effect.tap((value) => Effect.sync(() => void shared.set(key, value))))
-          })
-        const limiter = yield* Limiter.make
+        const kernel: internal.Kernel = {
+          world,
+          telemetry,
+          faults,
+          limiter: yield* Limiter.make,
+          nodes,
+          accountRefs,
+          defects,
+          mint: internal.minter(world.nowUnsafe),
+          spawnFor: internal.spawner(world, defects),
+          sharedIn: internal.sharer(scope),
+          zonesOf
+        }
         const services = Context.make(Telemetry, telemetry).pipe(Context.add(Faults, faults), Context.add(VirtualTime, world))
+
+        /** Make one definition inside the world scope with its own random stream; a failure is recorded as a crash of `owner`. */
+        const crashes: Array<ComponentCrashed> = []
+        const instantiate = <A, E>(owner: string, random: SeededRandom.SeededRandom, effect: Effect.Effect<A, E, Scope.Scope>) =>
+          effect.pipe(
+            Effect.provideService(Random.Random, random),
+            Scope.provide(scope),
+            Effect.exit,
+            Effect.map((made) => {
+              if (Exit.isSuccess(made)) return made.value
+              crashes.push(new ComponentCrashed({ node: owner, message: internal.firstLine(made.cause) }))
+              return undefined
+            })
+          )
 
         // --- Nodes ---------------------------------------------------------------------------------------
         for (const [, node] of Graph.nodes(design.graph)) {
@@ -378,188 +295,29 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
         // its connector turns out to be.
         for (const [, edge] of Graph.edges(design.graph)) {
           const e = edge.data
-          const source = nodes.get(e.from)!
           const config = yield* SubscriptionRef.make(e.config)
           const wire = yield* Edge.wire({
             id: e.id,
             from: e.from,
             to: e.to,
             config: config as SubscriptionRef.SubscriptionRef<Edge.Transport>,
-            target: {
-              start: (message, done, unit) => {
-                const start = nodes.get(e.to)!.start
-                if (start === undefined) {
-                  done(Failed({ node: e.to, reason: "component has no handler" }))
-                  return noop
-                }
-                return start(message, done, unit)
-              },
-              reachable: () => !effectOn(e.to).outage
-            },
+            target: internal.edgeTarget(kernel, e.to),
             random: root.fork(`edge:${e.id}`)
           }).pipe(Effect.provideContext(services))
-          const rt: EdgeRuntime = { edge: e, config, wire, send: undefined, probe: undefined }
+          const rt: internal.EdgeRuntime = { edge: e, config, wire, send: undefined, probe: undefined }
           edges.set(e.id, rt)
-          const port = (source.node.component.ports as PortDefs)[e.port]
-          if (port?.protocol === "invoke") {
-            const link = Edge.link({
-              id: e.id,
-              from: e.from,
-              to: e.to,
-              config: config as SubscriptionRef.SubscriptionRef<Edge.Config>,
-              send: (message, done) => {
-                if (rt.send !== undefined) return rt.send(message, done)
-                done?.(Unavailable({ node: e.to, reason: "not connected yet" }))
-                return noop
-              },
-              offer: () => nodes.get(e.to)?.offer
-            })
-            source.links.get(e.port)!.push(link as unknown as Edge.Link<never>)
-          }
-        }
-
-        // --- Universal node behaviour: faults, metrics, defect containment ------------------------------
-        // The node's handler runs in a fiber of its own (so it can outlive a caller that gave up), and the guard
-        // watches that fiber from outside: when it ends, the outcome is counted and handed to the edge. Nothing wraps
-        // the handler's effect, so the guard adds no operators to the call.
-        const guard = (rt: Runtime, call: (message: Message) => Call): Edge.Target["start"] => {
-          // A call a connector addressed to one unit of a fleet runs on that unit; everything else about it is the same.
-          const serve = (message: Message, unit: Unit | undefined): Call =>
-            unit === undefined
-              ? call(message)
-              : rt.fleet === undefined
-              ? Effect.fail(Failed({ node: rt.node.id, reason: "addressed to a unit, but this is not a fleet" }))
-              : rt.fleet.serve(unit, message)
-          const meter = telemetry.node(rt.node.id)
-          const received = meter.counter("in")
-          const succeeded = meter.counter("ok")
-          const partial = meter.counter("partial")
-          const failed = meter.counter("fail")
-          const latency = meter.sampler("latency")
-          const age = meter.sampler("age")
-          const failures = new Map<string, { n: number }>()
-          const record = (failure: CallFailure) => {
-            rt.totals.fail++
-            failed.n++
-            const name = failureCounter(failure)
-            let counter = failures.get(name)
-            if (counter === undefined) failures.set(name, (counter = meter.counter(name)))
-            counter.n++
-          }
-          const spawn = world.spawn
-          const handlesZone = rt.node.component.handlesZoneFaults
-          return (message, done, unit) => {
-            const started = world.nowUnsafe()
-            received.n++
-            rt.totals.in++
-            rt.inflight++
-            const f = handlesZone ? faults.forNodeOwnUnsafe(rt.node.id) : faults.forNodeUnsafe(rt.node.id)
-            if (f.outage) {
-              rt.inflight--
-              const failure = Unavailable({ node: rt.node.id, reason: "outage" })
-              record(failure)
-              done(failure)
-              return noop
-            }
-            const body: Call = f.extraMs > 0 || f.errorRate > 0
-              ? Effect.gen(function*() {
-                if (f.extraMs > 0) yield* Effect.sleep(f.extraMs)
-                const reply = yield* serve(message, unit)
-                if (f.errorRate > 0 && (yield* Random.next) < f.errorRate) {
-                  return yield* Effect.fail(Failed({ node: rt.node.id, reason: "injected error" }))
-                }
-                return reply
-              })
-              : serve(message, unit)
-            const fiber = spawn(body, rt.context)
-            fiber.addObserver((exit) => {
-              rt.inflight--
-              if (Exit.isSuccess(exit)) {
-                const t = world.nowUnsafe()
-                rt.totals.ok++
-                succeeded.n++
-                latency.add(t - started)
-                age.add(t - message.bornAt)
-                // A success may name records of its batch that failed: the caller decides what to do about them.
-                const items = exit.value as ItemFailures | undefined
-                if (items !== undefined) partial.n++
-                return done(undefined, items)
-              }
-              // A typed failure is the component saying no; a defect is the component breaking, which is contained.
-              let failure: CallFailure | undefined
-              let defect: unknown
-              let interrupted = false
-              for (const reason of exit.cause.reasons) {
-                if (reason._tag === "Fail") {
-                  failure = reason.error as CallFailure
-                  break
-                }
-                if (reason._tag === "Die") defect = reason.defect
-                else interrupted = true
-              }
-              if (failure === undefined) {
-                // Cancelled by an edge that gave up, or interrupted for good: nobody is waiting, nothing to report.
-                if (defect === undefined && interrupted) return
-                defects.push({ t: world.nowUnsafe(), node: rt.node.id, message: defect instanceof Error ? defect.message : String(defect) })
-                failure = Failed({ node: rt.node.id, reason: "component crashed" })
-              }
-              record(failure)
-              done(failure)
-            })
-            return () => void fiber.interruptUnsafe()
-          }
+          const source = nodes.get(e.from)!
+          if ((source.node.component.ports as PortDefs)[e.port]?.protocol === "invoke") source.links.get(e.port)!.push(internal.link(rt, nodes))
         }
 
         // --- Instantiate the components, each inside the world scope with its own random stream -------
-        const crashes: Array<ComponentCrashed> = []
+        // Every call into a node passes the guard: faults, metrics and defect containment, whatever the component.
         for (const rt of nodes.values()) {
           const meter = telemetry.node(rt.node.id)
           yield* meter.gauge("inflight", Effect.sync(() => rt.inflight))
-          const placementKey = keyOf(rt.node.placement)
-          const context: NodeContext<unknown, PortDefs> = {
-            id: rt.node.id,
-            name: rt.node.name,
-            config: rt.config,
-            fast: {
-              settings: () => SubscriptionRef.getUnsafe(rt.config),
-              now: world.nowUnsafe,
-              random: rt.random,
-              after: world.after,
-              account: () => SubscriptionRef.getUnsafe(accountRefs.get(keyOf(rt.node.placement))!),
-              mint: (init = {}) => mint(rt.node.id, rt.random, init)
-            },
-            out: (port) => (rt.links.get(port) ?? []) as never,
-            meter,
-            placement: rt.node.placement,
-            limiter,
-            account: accountRefs.get(keyOf(rt.node.placement))!,
-            shared: <A>(name: string, build: Effect.Effect<A, never, Scope.Scope>) => sharedIn(placementKey, name, build),
-            mint: (init = {}) => Effect.sync(() => mint(rt.node.id, rt.random, init)),
-            spawn: spawnFor(rt.node.id),
-            zones: {
-              all: zonesOf(placementKey),
-              effect: (zone) => faults.forZoneUnsafe(placementKey, zone),
-              down: (zone) => faults.forZoneUnsafe(placementKey, zone).outage,
-              watch: faults.listen
-            },
-            faults: {
-              own: () => faults.forNodeOwnUnsafe(rt.node.id),
-              zone: rt.node.placement.zone === undefined ? () => NO_FAULT : () => faults.forZoneUnsafe(placementKey, rt.node.placement.zone!),
-              active: () => faults.reaching(rt.node.id),
-              watch: faults.listen
-            }
-          }
-          const made = yield* rt.node.component.make(context).pipe(
-            Effect.provideService(Random.Random, rt.random),
-            Scope.provide(scope),
-            Effect.exit
-          )
-          if (Exit.isFailure(made)) {
-            crashes.push(new ComponentCrashed({ node: rt.node.id, message: Cause.pretty(made.cause).split("\n")[0] ?? "crashed" }))
-            continue
-          }
-          const instance = made.value as ComponentInstance
-          if (instance.call !== undefined) rt.start = guard(rt, instance.call)
+          const instance: ComponentInstance | undefined = yield* instantiate(rt.node.id, rt.random, rt.node.component.make(internal.nodeContext(kernel, rt, meter)))
+          if (instance === undefined) continue
+          if (instance.call !== undefined) rt.start = internal.guard(kernel, rt, instance.call)
           rt.offers = instance.pull
           rt.fleet = instance.fleet
           rt.offer = instance.offer
@@ -583,34 +341,8 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
             break
           }
           const random = root.fork(`connector:${e.id}`)
-          const context: Connector.Context<unknown> = {
-            id: e.id,
-            from: e.from,
-            port: e.port,
-            to: e.to,
-            config: rt.config,
-            fast: {
-              settings: () => SubscriptionRef.getUnsafe(rt.config),
-              now: world.nowUnsafe,
-              random,
-              after: world.after,
-              mint: (init = {}) => mint(e.from, random, init)
-            },
-            meter: telemetry.edge(e.id),
-            limiter,
-            spawn: spawnFor(e.id),
-            sink: rt.wire,
-            source: offered,
-            target: fleet,
-            offer: () => nodes.get(e.to)?.offer,
-            shared: (name, build) => sharedIn(keyOf(nodes.get(e.to)!.node.placement), name, build)
-          }
-          const made = yield* e.connector.make(context).pipe(Effect.provideService(Random.Random, random), Scope.provide(scope), Effect.exit)
-          if (Exit.isFailure(made)) {
-            crashes.push(new ComponentCrashed({ node: e.id, message: Cause.pretty(made.cause).split("\n")[0] ?? "crashed" }))
-            break
-          }
-          const instance = made.value as Connector.Instance
+          const instance: Connector.Instance | undefined = yield* instantiate(e.id, random, e.connector.make(internal.connectorContext(kernel, rt, random, offered, fleet)))
+          if (instance === undefined) break
           if (protocol === "invoke" && instance.send === undefined) {
             crashes.push(new ComponentCrashed({ node: e.id, message: `the ${e.connector.type} connector can't be sent to` }))
             break
@@ -622,43 +354,14 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
         // --- Controllers, last: they watch and change what everything above built ------------------
         for (const c of design.controllers.values()) {
           if (crashes.length > 0) break
-          const target = nodes.get(c.target)!
-          const schema = target.node.component.config
-          const config = yield* SubscriptionRef.make(c.config)
-          const random = root.fork(`controller:${c.id}`)
-          const rt: ControllerRuntime = { controller: c, config, log: [], probe: undefined }
+          const rt: internal.ControllerRuntime = { controller: c, config: yield* SubscriptionRef.make(c.config), log: [], probe: undefined }
           controllers.set(c.id, rt)
-          const settings = () => encodeWith(schema, SubscriptionRef.getUnsafe(target.config)) as Record<string, unknown>
-          const context: Controller.Context<unknown> = {
-            id: c.id,
-            target: c.target,
-            config,
-            fast: { settings: () => SubscriptionRef.getUnsafe(config), now: world.nowUnsafe, random, after: world.after },
-            watch: (listener, of) => spawnFor(c.id)(Stream.runForEach(telemetry.frames, (frame) => listener(frame.nodes[of?.() || c.target], frame.t))),
-            settings,
-            // The same door an edit uses: the whole settings, decoded and validated, then swapped in.
-            set: (path, value) =>
-              Effect.suspend(() => decodeOverrides(c.target, schema, setAt(settings(), path, value))).pipe(
-                Effect.mapError((e) => e.issues),
-                Effect.flatMap((decoded) => SubscriptionRef.set(target.config, decoded))
-              ),
-            inject: (fault, ms) => faults.inject({ kind: "node", id: c.target }, fault, ms).pipe(Effect.orDie),
-            clear: (id) => faults.clear(id),
-            meter: telemetry.controller(c.id),
-            log: (text) => {
-              rt.log.push({ t: world.nowUnsafe(), text })
-              if (rt.log.length > LOG_KEEP) rt.log.shift()
-            },
-            spawn: spawnFor(c.id)
-          }
-          const made = yield* c.def.make(context).pipe(Effect.provideService(Random.Random, random), Scope.provide(scope), Effect.exit)
-          if (Exit.isFailure(made)) {
-            crashes.push(new ComponentCrashed({ node: c.id, message: Cause.pretty(made.cause).split("\n")[0] ?? "crashed" }))
-            break
-          }
-          rt.probe = (made.value as Controller.Instance).probe
+          const random = root.fork(`controller:${c.id}`)
+          const instance: Controller.Instance | undefined = yield* instantiate(c.id, random, c.def.make(internal.controllerContext(kernel, rt, nodes.get(c.target)!, random)))
+          if (instance === undefined) break
+          rt.probe = instance.probe
         }
-        return { scope, telemetry, faults, accountRefs, crash: crashes[0] }
+        return { telemetry, faults, accountRefs, crash: crashes[0] }
       })
     )
 
@@ -668,38 +371,37 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
     }
     yield* Effect.addFinalizer(() => world.dispose)
 
-    const probeOf = (rt: Runtime): Effect.Effect<NodeProbe> =>
+    const lookup = (id: string) => internal.find(nodes, id, (id) => new NoSuchNode({ id }))
+    const lookupEdge = (id: string) => internal.find(edges, id, (id) => new NoSuchEdge({ id }))
+    const lookupController = (id: string) => internal.find(controllers, id, (id) => new NoSuchController({ id }))
+
+    /** An account's quotas, as something a live edit can change. */
+    const accountSettings = (placement: string): Effect.Effect<Settable, NoSuchAccount> => {
+      const ref = built.accountRefs.get(placement)
+      const account = design.accounts.get(placement)
+      if (ref === undefined || account === undefined) return Effect.fail(new NoSuchAccount({ placement }))
+      return Effect.succeed({ id: placement, schema: registry.provider(account.placement.provider)!.account(account.placement.region), ref })
+    }
+    const nodeSettings = (id: string) => Effect.map(lookup(id), (rt): Settable => ({ id, schema: rt.node.component.config, ref: rt.config }))
+    const edgeSettings = (id: string) => Effect.map(lookupEdge(id), (rt): Settable => ({ id, schema: rt.edge.schema, ref: rt.config }))
+    const controllerSettings = (id: string) =>
+      Effect.map(lookupController(id), (rt): Settable => ({ id, schema: rt.controller.def.config, ref: rt.config }))
+
+    /** Replace the settings wholesale: anything not given takes its default. */
+    const configure = <E>(find: Effect.Effect<Settable, E>, overrides: Readonly<Record<string, unknown>>) =>
       Effect.gen(function*() {
-        const state = rt.probe === undefined ? {} : encodeWith(rt.node.component.state, yield* rt.probe)
-        return { inflight: rt.inflight, totals: { ...rt.totals }, state }
+        const { id, schema, ref } = yield* find
+        const decoded = yield* decodeOverrides(id, schema, overrides)
+        yield* inWorld(SubscriptionRef.set(ref, decoded))
       })
 
-    const lookup = (id: string) => {
-      const rt = nodes.get(id)
-      return rt === undefined ? Effect.fail(new NoSuchNode({ id })) : Effect.succeed(rt)
-    }
-
-    const edgeProbeOf = (rt: EdgeRuntime): Effect.Effect<EdgeProbe> =>
+    /** Change some settings, keeping the rest as they are live. */
+    const patch = <E>(find: Effect.Effect<Settable, E>, settings: Readonly<Record<string, unknown>>) =>
       Effect.gen(function*() {
-        const state = rt.probe === undefined ? {} : encodeWith(rt.edge.connector.state, yield* rt.probe)
-        return { connector: rt.edge.connector.type, inflight: rt.wire.inflight(), state }
+        const { id, schema, ref } = yield* find
+        const decoded = yield* patched(id, schema, SubscriptionRef.getUnsafe(ref), settings)
+        yield* inWorld(SubscriptionRef.set(ref, decoded))
       })
-
-    const lookupEdge = (id: string) => {
-      const rt = edges.get(id)
-      return rt === undefined ? Effect.fail(new NoSuchEdge({ id })) : Effect.succeed(rt)
-    }
-
-    const controllerProbeOf = (rt: ControllerRuntime): Effect.Effect<ControllerProbe> =>
-      Effect.gen(function*() {
-        const state = rt.probe === undefined ? {} : encodeWith(rt.controller.def.state, yield* rt.probe)
-        return { type: rt.controller.type, target: rt.controller.target, state, log: [...rt.log] }
-      })
-
-    const lookupController = (id: string) => {
-      const rt = controllers.get(id)
-      return rt === undefined ? Effect.fail(new NoSuchController({ id })) : Effect.succeed(rt)
-    }
 
     const advanceTo = (to: Duration.Input) =>
       Effect.flatMap(world.advanceTo(Duration.toMillis(Duration.fromInputUnsafe(to))), () => built.telemetry.drain)
@@ -712,15 +414,10 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
       advanceTo,
       advance: (by) => Effect.flatMap(world.now, (now) => advanceTo(now + Duration.toMillis(Duration.fromInputUnsafe(by)))),
       frames: built.telemetry.frames,
-      probe: (id) => Effect.flatMap(lookup(id), (rt) => inWorld(probeOf(rt))),
-      probeEdge: (id) => Effect.flatMap(lookupEdge(id), (rt) => inWorld(edgeProbeOf(rt))),
-      probeController: (id) => Effect.flatMap(lookupController(id), (rt) => inWorld(controllerProbeOf(rt))),
-      configureController: (id, overrides) =>
-        Effect.gen(function*() {
-          const rt = yield* lookupController(id)
-          const decoded = yield* decodeOverrides(id, rt.controller.def.config, overrides)
-          yield* inWorld(SubscriptionRef.set(rt.config, decoded))
-        }),
+      probe: (id) => Effect.flatMap(lookup(id), (rt) => inWorld(internal.nodeProbe(rt))),
+      probeEdge: (id) => Effect.flatMap(lookupEdge(id), (rt) => inWorld(internal.edgeProbe(rt))),
+      probeController: (id) => Effect.flatMap(lookupController(id), (rt) => inWorld(internal.controllerProbe(rt))),
+      configureController: (id, overrides) => configure(controllerSettings(id), overrides),
       inspect: inWorld(
         Effect.gen(function*() {
           const inspectedNodes: Record<string, Inspection["nodes"][string]> = {}
@@ -728,8 +425,8 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
             inspectedNodes[id] = {
               type: rt.node.type,
               name: rt.node.name,
-              config: encodeWith(rt.node.component.config, yield* SubscriptionRef.get(rt.config)),
-              probe: yield* probeOf(rt)
+              config: internal.encodeWith(rt.node.component.config, yield* SubscriptionRef.get(rt.config)),
+              probe: yield* internal.nodeProbe(rt)
             }
           }
           const inspectedEdges: Record<string, Inspection["edges"][string]> = {}
@@ -740,17 +437,21 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
               to: e.to,
               port: e.port,
               connector: e.connector.type,
-              config: encodeWith(e.schema, yield* SubscriptionRef.get(rt.config)),
-              probe: yield* edgeProbeOf(rt)
+              config: internal.encodeWith(e.schema, yield* SubscriptionRef.get(rt.config)),
+              probe: yield* internal.edgeProbe(rt)
             }
           }
           const inspectedAccounts: Record<string, unknown> = {}
-          for (const [key, account] of design.accounts) {
-            inspectedAccounts[key] = encodeWith(registry.provider(account.placement.provider)!.account(account.placement.region), yield* SubscriptionRef.get(built.accountRefs.get(key)!))
+          for (const key of design.accounts.keys()) {
+            const { schema, ref } = yield* Effect.orDie(accountSettings(key))
+            inspectedAccounts[key] = internal.encodeWith(schema, yield* SubscriptionRef.get(ref))
           }
           const inspectedControllers: Record<string, Inspection["controllers"][string]> = {}
           for (const [id, rt] of controllers) {
-            inspectedControllers[id] = { config: encodeWith(rt.controller.def.config, yield* SubscriptionRef.get(rt.config)), probe: yield* controllerProbeOf(rt) }
+            inspectedControllers[id] = {
+              config: internal.encodeWith(rt.controller.def.config, yield* SubscriptionRef.get(rt.config)),
+              probe: yield* internal.controllerProbe(rt)
+            }
           }
           return {
             t: yield* world.now,
@@ -770,47 +471,12 @@ export const make = (design: Design.Design, options: Options = {}): Effect.Effec
         active: built.faults.active,
         changes: built.faults.changes
       },
-      configureNode: (id, overrides) =>
-        Effect.gen(function*() {
-          const rt = yield* lookup(id)
-          const decoded = yield* decodeOverrides(id, rt.node.component.config, overrides)
-          yield* inWorld(SubscriptionRef.set(rt.config, decoded))
-        }),
-      configureEdge: (id, overrides) =>
-        Effect.gen(function*() {
-          const rt = yield* lookupEdge(id)
-          const decoded = yield* decodeOverrides(id, rt.edge.schema, overrides)
-          yield* inWorld(SubscriptionRef.set(rt.config, decoded))
-        }),
-      configureAccount: (placement, overrides) =>
-        Effect.gen(function*() {
-          const ref = built.accountRefs.get(placement)
-          const account = design.accounts.get(placement)
-          if (ref === undefined || account === undefined) return yield* Effect.fail(new NoSuchAccount({ placement }))
-          const decoded = yield* decodeOverrides(placement, registry.provider(account.placement.provider)!.account(account.placement.region), overrides)
-          yield* inWorld(SubscriptionRef.set(ref, decoded))
-        }),
-      patchNode: (id, settings) =>
-        Effect.gen(function*() {
-          const rt = yield* lookup(id)
-          const decoded = yield* patched(id, rt.node.component.config, SubscriptionRef.getUnsafe(rt.config), settings)
-          yield* inWorld(SubscriptionRef.set(rt.config, decoded))
-        }),
-      patchEdge: (id, settings) =>
-        Effect.gen(function*() {
-          const rt = yield* lookupEdge(id)
-          const decoded = yield* patched(id, rt.edge.schema, SubscriptionRef.getUnsafe(rt.config), settings)
-          yield* inWorld(SubscriptionRef.set(rt.config, decoded))
-        }),
-      patchAccount: (placement, settings) =>
-        Effect.gen(function*() {
-          const ref = built.accountRefs.get(placement)
-          const account = design.accounts.get(placement)
-          if (ref === undefined || account === undefined) return yield* Effect.fail(new NoSuchAccount({ placement }))
-          const schema = registry.provider(account.placement.provider)!.account(account.placement.region)
-          const decoded = yield* patched(placement, schema, SubscriptionRef.getUnsafe(ref), settings)
-          yield* inWorld(SubscriptionRef.set(ref, decoded))
-        }),
+      configureNode: (id, overrides) => configure(nodeSettings(id), overrides),
+      configureEdge: (id, overrides) => configure(edgeSettings(id), overrides),
+      configureAccount: (placement, overrides) => configure(accountSettings(placement), overrides),
+      patchNode: (id, settings) => patch(nodeSettings(id), settings),
+      patchEdge: (id, settings) => patch(edgeSettings(id), settings),
+      patchAccount: (placement, settings) => patch(accountSettings(placement), settings),
       defects: Effect.sync(() => [...defects])
     }
   })

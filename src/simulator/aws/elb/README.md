@@ -15,7 +15,7 @@ never do, but a zone with no instances answers 503); **why a zone's node is stil
 by target group weights**; and **why a sudden surge can find the ALB itself short** (it scales with the traffic, with a lag;
 an LCU reservation pre-warms it).
 
-Each edge out of a load balancer is a target group, carried by a connector of this folder (`targets.ts`) over the core
+Each edge out of a load balancer is a target group, carried by a connector of this folder (`Targets.ts`) over the core
 target group (`../../fleet/TargetGroup.ts`) with AWS's defaults and ranges. The fleets behind it are the EC2, ECS and EKS
 components, or `common.service`, built on `../../fleet/` (its README explains units, zones and the `fleet` protocol).
 
@@ -208,7 +208,7 @@ connection with no target and one idle past its timeout (`elb.resets`).
 - `out` (many): one edge per target group. Into a fleet: the target group connector (health checks, algorithm...). Into
   `aws.lambda` (ALB): `aws.alb.lambda-target`. Into anything else, including an ALB behind an NLB: an IP target. The
   connectors have no timeout or retries of their own: the load balancer doesn't retry.
-- The load balancer and its target groups share a small object in the Region (`listener.ts`): the zone each request arrived
+- The load balancer and its target groups share a small object in the Region (`internal/listener.ts`): the zone each request arrived
   in, the zones the load balancer is in, and each target group's health for DNS. A fleet in another place (a
   `common.service` outside AWS) still works, without zones: the target group then picks a zone among its targets'.
 
@@ -249,7 +249,7 @@ Lambda target edge: `processedBytes` [LambdaTargetProcessedBytes]; its LambdaUse
 edge's own `fail.*` (an `Unavailable` is internal, anything else the function's). IP target edges record nothing beyond
 transport's.
 
-Dashboards (`dashboard.ts`): the ALB's requests and rejected connections, its own errors and its targets', target response
+Dashboards (`internal/dashboard.ts`): the ALB's requests and rejected connections, its own errors and its targets', target response
 time, healthy hosts, LCUs against capacity and reservation, capacity utilization, active connections, processed bytes and
 zones in DNS; the NLB's new and active flows, resets, healthy hosts, bytes, LCUs, zones and connection time; each target
 group's target health (and, for an ALB, RequestCountPerTarget) and requests with no target; a Lambda target's errors and bytes.

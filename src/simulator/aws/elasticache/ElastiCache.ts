@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import * as Aws from "../provider.ts"
+import * as Aws from "../internal/provider.ts"
 import {
   CLUSTER_SPEC_URL,
   Config,
@@ -12,9 +12,9 @@ import {
   SHARDS_URL,
   State,
   TYPES_URL
-} from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { makeRuntime } from "./runtime.ts"
+} from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { makeRuntime } from "./internal/runtime.ts"
 
 /**
  * Amazon ElastiCache: an in-memory cache (Valkey, Redis OSS or Memcached) in front of a database. The component stands

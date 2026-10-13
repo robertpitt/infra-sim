@@ -77,7 +77,7 @@ in a single zone.
 | `failover.failedNodes` | 0 | 0 to 1,002 | | How many data nodes are down (the first ones); set it from a scenario |
 | `failover.detection` | 30 s | 0 to 5 minutes | assumed | From a node failing to its primaries' replicas being promoted |
 
-Account quotas (`quotas.ts`): `opensearchDomains` (500 per region), `opensearchInstancesPerDomain` (200).
+Account quotas (`Quotas.ts`): `opensearchDomains` (500 per region), `opensearchInstancesPerDomain` (200).
 
 ## Limits
 
@@ -195,7 +195,7 @@ largest node's), `indexingPressure` (the fullest node's coordinating and primary
 `statusGreen`, `statusYellow`, `statusRed` (1 while it holds, as CloudWatch's three metrics), `liveNodes`,
 `activeShards`, `unassignedShards`, `waitingWrites`.
 
-The dashboard (`dashboard.ts`) charts these under CloudWatch's names: SearchRate, SearchLatency, IndexingRate,
+The dashboard (`internal/dashboard.ts`) charts these under CloudWatch's names: SearchRate, SearchLatency, IndexingRate,
 IndexingLatency, CPUUtilization (max and average), ThreadpoolSearchQueue and ThreadpoolWriteQueue, the thread pools' and
 indexing pressure's rejections, indexing pressure itself, ClusterStatus.green/yellow/red, Nodes with Shards.active and
 Shards.unassigned, and refresh lag. CloudWatch's rates are per minute; these are per second. There is no heap or disk

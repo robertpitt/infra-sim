@@ -1,14 +1,9 @@
 import { Duration, Effect, Schema, Stream, SubscriptionRef } from "effect"
 import * as Component from "../Component.ts"
-import * as Distribution from "../Distribution.ts"
-import { Fleet, type Job, type Ticket } from "../fleet/Fleet.ts"
-import type { Link } from "../Edge.ts"
-import * as Flow from "../Flow.ts"
-import { type Call, type CallFailure, Failed, type Message, type Reply, Unavailable } from "../Message.ts"
-import type { Unit } from "../Protocol.ts"
+import { Fleet } from "../fleet/Fleet.ts"
 import * as Setting from "../Setting.ts"
-import type { TimerHandle } from "../VirtualTime.ts"
-import * as dashboards from "./dashboards.ts"
+import * as dashboards from "./internal/dashboards.ts"
+import * as Work from "./Work.ts"
 
 export const Config = Schema.Struct({
   replicas: Setting.int({
@@ -61,92 +56,6 @@ export const Config = Schema.Struct({
 })
 
 type Settings = typeof Config.Type
-
-/** What a request needs of its service, made once per node so that a request is one small object. */
-interface RequestHost {
-  readonly id: string
-  readonly fast: Component.Fast<Settings>
-  readonly out: ReadonlyArray<Link>
-  readonly totals: { served: number; errors: number; refused: number; lost: number }
-}
-
-/**
- * One request's work, as a state machine with no closures of its own beyond the one downstream calls answer: a worker
- * starts it (`start`), the service time passes (`worked`), it calls downstream and is answered (`answered`); or its replica
- * is lost (`fail`), or its caller gives up (`abandon`).
- */
-class Request implements Job {
-  ticket: Ticket | undefined = undefined
-  finished = false
-  private timer: TimerHandle | undefined = undefined
-  private downstream: Flow.Cancel | undefined = undefined
-
-  constructor(
-    private readonly host: RequestHost,
-    private readonly message: Message,
-    private readonly resume: (effect: Call) => void
-  ) {}
-
-  start(ticket: Ticket): void {
-    this.ticket = ticket
-    const { fast } = this.host
-    this.timer = fast.after(Distribution.latencyMs(fast.settings().serviceTime, fast.random), worked, this)
-  }
-
-  /** The service time is over. */
-  worked(): void {
-    this.timer = undefined
-    if (this.finished) return
-    const { fast, totals, id } = this.host
-    const c = fast.settings()
-    // The worker's own part is done: it is free for the next request while this one calls downstream.
-    this.ticket!.release()
-    if (c.errorRate > 0 && fast.random.nextDoubleUnsafe() < c.errorRate) {
-      this.finished = true
-      this.ticket!.finish()
-      totals.errors++
-      return this.resume(Effect.fail(Failed({ node: id, reason: "500 internal server error" })))
-    }
-    this.downstream = Flow.fanOut(c.fanOut, this.host.out, fast.random, this.message, this.answered)
-  }
-
-  private readonly answered = (failure: CallFailure | undefined): void => {
-    this.finished = true
-    this.ticket!.finish()
-    if (failure !== undefined) {
-      this.host.totals.errors++
-      return this.resume(Effect.fail(Failed({ node: this.host.id, reason: `downstream: ${failure._tag}` })))
-    }
-    this.host.totals.served++
-    this.resume(Effect.void)
-  }
-
-  /** Its replica was lost with it (or its zone failed it, an injected error). The ticket is already finished. */
-  fail(failure: CallFailure): void {
-    if (this.finished) return
-    this.finished = true
-    this.stop()
-    if (failure._tag === "Failed") this.host.totals.errors++
-    else this.host.totals.lost++
-    this.resume(Effect.fail(failure))
-  }
-
-  /** The caller gave up: give back the worker or the place in line, and stop the work (the callee doesn't keep going). */
-  abandon(): void {
-    if (this.finished) return
-    this.finished = true
-    this.ticket?.finish()
-    this.stop()
-  }
-
-  private stop(): void {
-    this.timer?.cancel()
-    this.timer = undefined
-    this.downstream?.()
-  }
-}
-
-const worked = (request: Request): void => request.worked()
 
 /**
  * A service of identical replicas behind a load balancer: a Kubernetes Deployment, an ECS service, a fleet of VMs, a
@@ -227,30 +136,20 @@ export const Service = Component.make({
         name: (id) => `replica-${id}`
       })
 
-      const host: RequestHost = { id: node.id, fast, out, totals }
+      const host: Work.WorkHost = {
+        id: node.id,
+        fast,
+        out,
+        serviceTime: () => settings().serviceTime,
+        fanOut: () => settings().fanOut,
+        errorRate: () => settings().errorRate,
+        totals
+      }
       /** One request: wait for a worker (on `unit`, if a balancer chose one), work for the service time, then call downstream. */
-      const handle = (message: Message, unit: Unit | undefined): Call =>
-        Effect.callback<Reply, CallFailure>((resume) => {
-          const request = new Request(host, message, resume)
-          const admitted = fleet.admit(request, unit)
-          if (typeof admitted === "string") {
-            totals.refused++
-            resume(Effect.fail(Unavailable({ node: node.id, reason: admitted })))
-            return Effect.void
-          }
-          request.ticket = admitted
-          return Effect.sync(() => request.abandon())
-        })
+      const handle = Work.handler(fleet, host)
 
       // Ready replicas per zone, for each zone it has spread over (registered when it first does).
-      const zoneGauges = new Set<string>()
-      const gaugeZones = (): void => {
-        for (const zone of fleet.zonesList()) {
-          if (zoneGauges.has(zone)) continue
-          zoneGauges.add(zone)
-          node.meter.gaugeUnsafe(`ready.${zone}`, () => fleet.servingIn(zone))
-        }
-      }
+      const gaugeZones = Work.zoneGauges(() => fleet, (zone) => node.meter.gaugeUnsafe(`ready.${zone}`, () => fleet.servingIn(zone)))
 
       // Settings edited while running (by a person, or an autoscaler) apply at once: replicas start or stop, and more
       // workers per replica take waiting requests.

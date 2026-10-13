@@ -1,10 +1,8 @@
 import { type Effect, Schema, type Scope, type SubscriptionRef } from "effect"
-import type { AnyComponent } from "./Component.ts"
+import type { AnyComponent, Fast } from "./Component.ts"
 import * as Describe from "./Describe.ts"
 import type { ActiveFault, Fault } from "./Fault.ts"
-import type { SeededRandom } from "./SeededRandom.ts"
 import type { Meter, Stats } from "./Telemetry.ts"
-import type { TimerHandle } from "./VirtualTime.ts"
 
 /**
  * A controller is a loop that watches part of a running design, decides, and acts, on the virtual clock.
@@ -40,12 +38,8 @@ export interface Context<Config> {
   readonly target: string
   /** Its own live settings. */
   readonly config: SubscriptionRef.SubscriptionRef<Config>
-  readonly fast: {
-    readonly settings: () => Config
-    readonly now: () => number
-    readonly random: SeededRandom
-    readonly after: <A>(ms: number, fire: (arg: A) => void, arg: A) => TimerHandle
-  }
+  /** Synchronous tools, as a component's `node.fast`. */
+  readonly fast: Pick<Fast<Config>, "settings" | "now" | "random" | "after">
   /**
    * Hear the target's metrics each frame as they are flushed (`undefined` while it has recorded nothing). With `of`,
    * another node's instead, asked again each frame: the queue whose backlog the target's workers drain.

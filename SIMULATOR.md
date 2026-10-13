@@ -129,7 +129,7 @@ own: losing us-east-1 takes a distribution's origins there down, not the distrib
 ### Availability zones
 
 Every region lists its **zones** (`Region.zones`): AWS's are named as AWS names them, the region's code and a letter
-(`us-east-1a`...), as many as AWS's Regions page lists for it (`aws/region/catalog.ts`); a place outside any cloud has three by
+(`us-east-1a`...), as many as AWS's Regions page lists for it (`aws/region/Catalog.ts`); a place outside any cloud has three by
 assumption (`eu-west-a`...), so a self-hosted cluster can lose one too. A zone is a placement detail, not an account: quotas and
 shared resources stay regional (`keyOf` ignores the zone).
 
@@ -156,7 +156,7 @@ shared resources stay regional (`keyOf` ignores the zone).
 Published limits are modelled in three ways. Each service's README lists its numbers with their source URLs, and `docs/AWS-LIMITS.md` indexes them:
 
 - **hard**: the service enforces it and nobody can change it (DynamoDB's 1,000 writes/s per partition, Lambda's 6 MB sync payload). It is the min/max of the setting, or a read-only entry in the component's `limits`, and the UI marks it `hard`;
-- **quota**: an adjustable default (Lambda's 1,000 concurrent executions, API Gateway's 10,000 rps). It is an **editable setting** whose default is AWS's published number, and the UI marks it `quota` with a link to the docs. Account-level quotas live in the document's `accounts` map and are edited per placement (each service contributes its own fields: `aws/<service>/quotas.ts`, merged by `aws/account.ts`);
+- **quota**: an adjustable default (Lambda's 1,000 concurrent executions, API Gateway's 10,000 rps). It is an **editable setting** whose default is AWS's published number, and the UI marks it `quota` with a link to the docs. Account-level quotas live in the document's `accounts` map and are edited per placement (each service contributes its own fields: `aws/<service>/Quotas.ts`, merged by `aws/internal/account.ts`);
 - **assumed**: a number AWS doesn't publish (Lambda's idle environment lifetime, S3's first-byte latency) is a setting too, and says so in its help text.
 
 A provider can also `audit` a design against its account's quotas: reservations that add up to more than Lambda allows, provisioned DynamoDB capacity over the account total. Findings are diagnostics.
@@ -168,7 +168,7 @@ A component can be a **container**: it draws a boundary round other nodes instea
 ### The standard components
 
 Each AWS service lives in its own folder, `src/simulator/aws/<service>/`, with its component(s), its slice of the account-level
-quotas (`quotas.ts`), its design checks (`audit.ts`), tests, and a README that says what is simulated (a ✅/🟡/❌ coverage
+quotas (`Quotas.ts`), its design checks (`Audit.ts`), the implementation in `internal/`, tests, and a README that says what is simulated (a ✅/🟡/❌ coverage
 table), what isn't yet, every limit with its source, the settings, the metrics and the assumptions. `src/simulator/aws/README.md`
 is the guide to writing one. The READMEs are the reference; this is the overview.
 

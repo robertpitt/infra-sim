@@ -196,7 +196,7 @@ window of any address at the last check, to compare with the limit), `blockedSha
 last two checks), `wcu` (capacity in use), `rateLimit` (the rate-based rule's limit per window, 0 without the rule, to read
 `busiestAddress` against).
 
-The dashboard (`dashboard.ts`) charts allowed, blocked and counted requests, overall and by rule, the blocked share, the
+The dashboard (`internal/dashboard.ts`) charts allowed, blocked and counted requests, overall and by rule, the blocked share, the
 rate-based rule's busiest address against its limit, the addresses limited, requests past the quota, and latency.
 
 Probe state: `allowed`, `blocked`, `counted`, `blockedByRateRule`, `blockedByRules`, `blockedBodySize`, `blockedOversize`,

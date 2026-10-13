@@ -32,14 +32,20 @@ documented, and it is the brief for anyone (human or agent) working on one.
 <service>/
   README.md        what is simulated, what is not yet, every limit with its source, settings, metrics (template below)
   index.ts         exports the component(s): `export { Foo } from "./Foo.ts"`
-  Foo.ts           the component: settings schema, ports, state schema, behaviour. Split into more files when it grows
-  quotas.ts        the account-level quotas this service contributes (see below)
-  audit.ts         checks of a design against those quotas (see below)
-  Foo.test.ts      behaviour tests
+  Foo.ts           the component: settings schema, ports, state schema, behaviour, reading top to bottom
+  Quotas.ts        the account-level quotas this service contributes (see below)
+  Audit.ts         checks of a design against those quotas (see below)
+  tests/           behaviour tests (`tests/Foo.test.ts`)
+  internal/        the implementation the component is built from: config, state, one module per mechanism,
+                   the dashboard. Lower-case names; nothing outside this folder imports them
 ```
 
+PascalCase modules are the folder's public surface; `internal/` is private to it (`npm run typecheck` checks this). When
+another service needs something from here (ECS reads EC2's instance types), it is a PascalCase module, not an internal
+one. See "Public modules and internal/" in [AGENTS.md](../../../AGENTS.md).
+
 A folder owns everything about its service and touches nothing outside it. The only shared files are the composers, which
-need no editing when a service changes: `account.ts` merges every `quotas.ts`, `provider.ts` runs every `audit.ts`, and
+need no editing when a service changes: `internal/account.ts` merges every `Quotas.ts`, `internal/provider.ts` runs every `Audit.ts`, and
 `index.ts` lists the components. Adding a second component to a service means adding it to `<service>/index.ts` and the
 list in `index.ts` (one line).
 
@@ -85,7 +91,7 @@ Every number AWS publishes is either:
   (`Setting.hard(url, note)`), or a read-only entry in the component's `limits` list. Shown as a `hard` pill in the UI.
 - **quota**: an adjustable default (AWS raises it on request). It is an **editable setting** whose default is AWS's
   published number (`Setting.quota(url, note)`). When it is shared by everything in an account and region it belongs in
-  `quotas.ts` (account-level), otherwise on the component's own settings. Regional defaults must be AWS's regional numbers.
+  `Quotas.ts` (account-level), otherwise on the component's own settings. Regional defaults must be AWS's regional numbers.
 - **assumed**: AWS doesn't publish it (a latency distribution, an idle timeout, a retry cadence). It is still a setting,
   and its `help` says in so many words that it is an assumption.
 
@@ -96,21 +102,22 @@ setting's `limit` or the component's `limits`. If you cannot confirm a number, i
 ## Account-level quotas and audits
 
 Some limits belong to the account in a region and are shared by everything of the service there (Lambda's regional
-concurrency, API Gateway's regional throttle). `quotas.ts` exports `quotas(region)` returning `Setting` fields with
+concurrency, API Gateway's regional throttle). `Quotas.ts` exports `quotas(region)` returning `Setting` fields with
 AWS's published defaults *for that region*; field names must be unique across services (prefix them with the service:
 `sesSendingRate`). They appear in the Account quotas panel of a Region box and can be overridden per design. Components
 read them live with `node.fast.account() as Aws.Account`.
 
-`audit.ts` exports `audit(region, members, quotas)`: a static check of what a design asks of the account, against the
+`Audit.ts` exports `audit(region, members, quotas)`: a static check of what a design asks of the account, against the
 account's quotas (reservations that add up to more than the account has, provisioned capacity over the total). It returns
-`Diagnostic`s (see `../service.ts`). Keep it pure and cheap.
+`Diagnostic`s (see `internal/service.ts`). Keep it pure and cheap.
 
 ## Documentation standard
 
 Code: every exported thing and every non-obvious decision has a comment saying *why* (what AWS behaviour it models, which
 page says so), not what the line does. Name things after the AWS concept. No dead code, no commented-out code, no
-unexplained magic numbers (constants carry a name and a source). Files stay readable: split a component that passes ~400
-lines into modules inside its folder (`config.ts`, `state.ts`, one file per mechanism).
+unexplained magic numbers (constants carry a name and a source). Files stay readable: the component module reads as the component (settings, ports, behaviour), and
+the plain functions and state machines it is built from live in `internal/` (`internal/config.ts`, `internal/state.ts`, one file
+per mechanism).
 
 Each service's `README.md` follows this template (keep the headings; add sections where the service needs them):
 
@@ -156,9 +163,9 @@ The AWS documentation pages used.
 A component (and a connector that records metrics on its edge) declares a `dashboard` (`../Dashboard.ts`): a few key
 figures and the charts an operator would put on a dashboard for the service, mirroring what AWS publishes for it in
 CloudWatch and names the way AWS does (`ConsumedWriteCapacityUnits`, `ApproximateAgeOfOldestMessage`), with the CloudWatch
-names listed on each panel. It is plain data in the service's folder (`dashboard.ts`); the UI draws it when the node or
+names listed on each panel. It is plain data in the service's folder (`internal/dashboard.ts`); the UI draws it when the node or
 edge is selected. Record what a CloudWatch metric needs (requests by operation, bytes, throttles by direction) where it
-happens, in the fast style. `src/simulator/aws/dynamodb/dashboard.ts` is the reference; `npx tsx
+happens, in the fast style. `src/simulator/aws/dynamodb/internal/dashboard.ts` is the reference; `npx tsx
 tools/dashboard-check.ts 60 <type>` lists dashboard metrics that no example records (a typo, or a metric never registered).
 
 A dashboard is the same for every node of a type, so a panel that only some configurations have (a table's stream, an
@@ -169,7 +176,7 @@ review rate) is a `constant`, not a gauge.
 
 ## Tests
 
-Tests live beside the component (`Foo.test.ts`) and use the helpers in `../components/testing.ts` (`frames`, `mean`, `sim`,
+Tests live in the service's `tests/` folder (`tests/Foo.test.ts`) and use the helpers in `src/simulator/testing.ts` (`frames`, `mean`, `sim`,
 `dist`) and `Builder` to compose a small design. Each behaviour listed under Coverage as ✅ or 🟡 has a test that would
 fail if the behaviour broke; tests assert the real quantitative behaviour (rates within tolerance, limits enforced at the
 published number, quotas honoured when changed), not just that something ran. Run one folder with

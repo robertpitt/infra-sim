@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
 import { tallies, totals } from "../../kit/Tally.ts"
-import * as Aws from "../provider.ts"
+import * as Aws from "../internal/provider.ts"
 import {
   Discard,
   EFO_CONSUMERS,
@@ -14,10 +14,10 @@ import {
   SHARD_WRITE_RECORDS,
   SOURCES,
   Stream
-} from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { StreamPull } from "./pull.ts"
-import { StreamModel } from "./stream.ts"
+} from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { StreamPull } from "./internal/pull.ts"
+import { StreamModel } from "./internal/stream.ts"
 
 /** The probe lists the busiest open shards, at most this many. */
 const HOTTEST = 10
@@ -130,29 +130,9 @@ export const Kinesis = Aws.component({
       node.meter.gaugeUnsafe("writeCapacityRecords", () => model.openCount * SHARD_WRITE_RECORDS)
       node.meter.gaugeUnsafe("readCapacityBytes", () => model.openCount * SHARD_READ_BYTES)
       node.meter.gaugeUnsafe("readCapacityCalls", () => model.openCount * SHARD_READ_CALLS)
-      // Hot spots: the busiest open shard's load, and the median shard's, as a share of a shard's write limit (in bytes or
-      // records, whichever is nearer). What CloudWatch's shard-level IncomingBytes and IncomingRecords show. The median,
-      // not the mean, so that one hot shard of a few doesn't make the typical one look busy.
-      let loadAt = -1
-      const load = { hottest: 0, median: 0 }
-      let shares = new Float64Array(0)
-      const shardLoad = () => {
-        const now = fast.now()
-        if (now === loadAt) return load
-        loadAt = now
-        const open = model.openShards()
-        if (shares.length < open.length) shares = new Float64Array(open.length * 2)
-        for (let i = 0; i < open.length; i++) {
-          const s = open[i]!
-          shares[i] = Math.max(s.lastBytes / SHARD_WRITE_BYTES, s.lastRecords / SHARD_WRITE_RECORDS)
-        }
-        const sorted = shares.subarray(0, open.length).sort()
-        load.hottest = sorted.length > 0 ? sorted[sorted.length - 1]! : 0
-        load.median = sorted.length > 0 ? sorted[(sorted.length - 1) >> 1]! : 0
-        return load
-      }
-      node.meter.gaugeUnsafe("hottestShardLoad", () => shardLoad().hottest)
-      node.meter.gaugeUnsafe("medianShardLoad", () => shardLoad().median)
+      // Hot spots: the busiest open shard's load and the median shard's, as a share of a shard's write limit.
+      node.meter.gaugeUnsafe("hottestShardLoad", () => model.shardLoad(fast.now()).hottest)
+      node.meter.gaugeUnsafe("medianShardLoad", () => model.shardLoad(fast.now()).median)
 
       return {
         pull: { consumers: pull },

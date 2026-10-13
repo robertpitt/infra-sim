@@ -3,11 +3,12 @@ import { DedupWindow } from "../../kit/Dedup.ts"
 import { Gate } from "../../kit/Admit.ts"
 import * as Refuse from "../../kit/Refuse.ts"
 import { bodyBytes, records } from "../../kit/Shape.ts"
+import { Tally } from "../../kit/Tally.ts"
 import * as Component from "../../Component.ts"
 import * as Distribution from "../../Distribution.ts"
 import * as Flow from "../../Flow.ts"
 import { keyOf } from "../../Provider.ts"
-import * as Aws from "../provider.ts"
+import * as Aws from "../internal/provider.ts"
 import {
   DEDUPLICATION_CAPACITY,
   DEDUPLICATION_WINDOW_MS,
@@ -18,9 +19,9 @@ import {
   LARGE_MESSAGE_SUBSCRIPTIONS,
   Subscription,
   Topic
-} from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { FanOut } from "./fanout.ts"
+} from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { FanOut } from "./internal/fanout.ts"
 
 const D = Aws.docs.sns
 
@@ -89,11 +90,9 @@ export const Sns = Aws.component({
       const fan = new FanOut(fast, node.meter, node.out("out"), node.out("dlq"))
       const gate = new Gate(node.limiter)
       let dedup: DedupWindow | undefined
-      let published = 0
       let throttled = 0
-      let duplicates = 0
-      const publishedCount = node.meter.counter("published")
-      const duplicateCount = node.meter.counter("duplicates")
+      const published = new Tally(node.meter.counter("published"))
+      const duplicates = new Tally(node.meter.counter("duplicates"))
       const publishSize = node.meter.sampler("publishSize")
       node.meter.gaugeUnsafe("pending", () => fan.pending)
       node.meter.gaugeUnsafe("openGroups", () => fan.openGroups())
@@ -125,15 +124,13 @@ export const Sns = Aws.component({
             return Refuse.throttled(node.id, refused)
           }
           return Flow.delayed(fast, Distribution.latencyMs(c.publishLatency, fast.random), () => {
-            published += count
-            publishedCount.n += count
+            published.add(count)
             publishSize.add(bytes)
             if (fifo && c.deduplication) {
               dedup ??= new DedupWindow(DEDUPLICATION_WINDOW_MS, DEDUPLICATION_CAPACITY)
               // The duplicate is accepted (the publisher sees success) and then dropped.
               if (dedup.isDuplicate(message.id, fast.now())) {
-                duplicates += count
-                duplicateCount.n += count
+                duplicates.add(count)
                 return undefined
               }
             } else dedup = undefined
@@ -142,12 +139,12 @@ export const Sns = Aws.component({
           })
         },
         probe: Effect.sync(() => ({
-          published,
+          published: published.total,
           subscribers: fan.subscribers,
           pending: fan.pending,
           throttled,
           ...fan.totals,
-          duplicates,
+          duplicates: duplicates.total,
           openGroups: fan.openGroups(),
           maxMessageSize: messageLimitKb(fast.settings().maxMessageSize),
           backlog: fan.backlog()

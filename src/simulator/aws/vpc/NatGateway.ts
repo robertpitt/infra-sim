@@ -1,20 +1,18 @@
 import { Effect, Schema } from "effect"
 import * as Component from "../../Component.ts"
-import type { Link } from "../../Edge.ts"
-import * as Flow from "../../Flow.ts"
-import { Throttled } from "../../Message.ts"
 import * as Setting from "../../Setting.ts"
-import * as Aws from "../provider.ts"
-import { natGatewayDashboard } from "./dashboard.ts"
-import { hop } from "./Hop.ts"
-import { source } from "./sources.ts"
+import * as Aws from "../internal/provider.ts"
+import { natGatewayDashboard } from "./internal/dashboard.ts"
+import { hop } from "./internal/hop.ts"
+import { Ports } from "./internal/ports.ts"
+import { source } from "./internal/sources.ts"
+import { BYTES_PER_GBPS } from "../internal/units.ts"
 
 /** Each IPv4 address supports this many simultaneous connections to one destination. Source: nat-gateway-basics. */
 const CONNECTIONS_PER_ADDRESS = 55_000
 /** A NAT gateway starts at 5 Gbps and scales up to 100 Gbps on its own. Source: nat-gateway-basics. */
 const MIN_GBPS = 5
 const MAX_GBPS = 100
-const BYTES_PER_GBPS = 1e9 / 8
 
 /** Availability Zones are named by a letter after the Region: `us-east-1a`. The most any Region has is six. */
 const ZONES = ["a", "b", "c", "d", "e", "f"] as const
@@ -117,76 +115,32 @@ export const NatGateway = Aws.component({
   make: (node) =>
     Effect.sync(() => {
       const { fast } = node
-      /** Connections open per destination (per wired edge). Entries are removed at zero, so it stays as small as the traffic is wide. */
-      const open = new Map<string, number>()
-      let connections = 0
-      let portAllocationErrors = 0
-      const portErrors = node.meter.counter("ErrorPortAllocation")
-      // ConnectionAttemptCount and ConnectionEstablishedCount: every new connection asked for, and those given a port.
-      const connectionAttempts = node.meter.counter("connectionAttempts")
-      const connectionsEstablished = node.meter.counter("connectionsEstablished")
-      node.meter.gaugeUnsafe("connections", () => connections)
-
       const limitOf = (c: Config): number => c.connectionsPerDestination * c.addresses
-      /** Connections open to the busiest destination: the one that runs out of ports first. */
-      const busiest = (): number => {
-        let most = 0
-        for (const n of open.values()) if (n > most) most = n
-        return most
-      }
-      node.meter.gaugeUnsafe("busiestDestination", busiest)
-      node.meter.gaugeUnsafe("portLimit", () => limitOf(fast.settings()))
-
-      /** Take a connection for the call on `link`, or refuse it when the destination's ports are used up. */
-      const gate = (link: Link): Link => ({
-        ...link,
-        send: (message, done) => {
-          connectionAttempts.n++
-          const held = open.get(link.id) ?? 0
-          if (held >= limitOf(fast.settings())) {
-            portErrors.n++
-            portAllocationErrors++
-            done?.(Throttled({ node: node.id, reason: "ErrorPortAllocation: no free port to this destination" }))
-            return Flow.noCancel
-          }
-          open.set(link.id, held + 1)
-          connections++
-          connectionsEstablished.n++
-          let released = false
-          const release = (): void => {
-            if (released) return
-            released = true
-            connections--
-            const now = (open.get(link.id) ?? 1) - 1
-            if (now <= 0) open.delete(link.id)
-            else open.set(link.id, now)
-          }
-          const cancel = link.send(message, (failure) => {
-            release()
-            done?.(failure)
-          })
-          return () => {
-            release()
-            cancel()
-          }
-        }
+      const ports = new Ports(node.id, () => limitOf(fast.settings()), {
+        portErrors: node.meter.counter("ErrorPortAllocation"),
+        // ConnectionAttemptCount and ConnectionEstablishedCount: every new connection asked for, and those given a port.
+        attempts: node.meter.counter("connectionAttempts"),
+        established: node.meter.counter("connectionsEstablished")
       })
+      node.meter.gaugeUnsafe("connections", () => ports.connections)
+      node.meter.gaugeUnsafe("busiestDestination", () => ports.busiest())
+      node.meter.gaugeUnsafe("portLimit", () => limitOf(fast.settings()))
 
       const path = hop<Config>(node, {
         bytesPerSecond: (c) => c.bandwidth * BYTES_PER_GBPS,
         latency: (c) => c.latency,
         mode: (c) => c.routing,
-        gate,
+        gate: ports.gate,
         saturated: "NAT gateway out of bandwidth: packets dropped"
       })
 
       return {
         call: path.call,
         probe: Effect.sync(() => ({
-          connections,
-          busiest: busiest(),
+          connections: ports.connections,
+          busiest: ports.busiest(),
           limit: limitOf(fast.settings()),
-          portAllocationErrors,
+          portAllocationErrors: ports.portAllocationErrors,
           drops: path.totals.drops,
           bytes: path.totals.bytes
         }))

@@ -1,8 +1,8 @@
 import { Effect } from "effect"
-import * as Aws from "../provider.ts"
-import { COMPRESSION_URL, Config, DOCS, EXPIRATION_URL, FAILOVER_URL, ORIGIN_URL, PRICE_CLASS_URL, QUOTAS_URL, ports, State } from "./config.ts"
-import { dashboard } from "./dashboard.ts"
-import { makeRuntime } from "./runtime.ts"
+import * as Aws from "../internal/provider.ts"
+import { COMPRESSION_URL, Config, DOCS, EXPIRATION_URL, FAILOVER_URL, ORIGIN_URL, PRICE_CLASS_URL, QUOTAS_URL, ports, State } from "./internal/config.ts"
+import { dashboard } from "./internal/dashboard.ts"
+import { makeRuntime } from "./internal/runtime.ts"
 
 /**
  * Amazon CloudFront: a content delivery network. One distribution, with its default cache behaviour, its edge

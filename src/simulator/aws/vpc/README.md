@@ -21,7 +21,7 @@ gateway in one zone is a single point of failure for everything routed through i
 | Secondary CIDR blocks, IPv6, route tables, security groups, NACLs, peering, transit gateway | ❌ | Not modelled |
 | Latency between components in a VPC | 🟡 | Same-Region edge latency (1 ms estimate); a VPC adds none |
 | **Account quotas** (editable in the Region box) | | |
-| VPCs per Region, subnets per VPC, NAT gateways per AZ, addresses per NAT gateway, Elastic IPs, gateway endpoints per Region, interface endpoints per VPC | ✅ | `quotas.ts`; checked by `audit.ts` (some per Region, see Behaviour) |
+| VPCs per Region, subnets per VPC, NAT gateways per AZ, addresses per NAT gateway, Elastic IPs, gateway endpoints per Region, interface endpoints per VPC | ✅ | `Quotas.ts`; checked by `Audit.ts` (some per Region, see Behaviour) |
 | **NAT gateway** | | |
 | Connection limit: 55,000 per address per destination | ✅ | Per wired destination; each address adds 55,000; refusals are `ErrorPortAllocation` |
 | Up to 8 IPv4 addresses, quota of 2 by default | ✅ | Setting is hard-capped at 8; the audit warns above the account quota |
@@ -156,7 +156,7 @@ Lambda as traffic and concurrency need. They are created when the function is cr
 **nothing** to a function's cold start for being in a VPC, which matches the current documentation. What a VPC does
 change is the way out: see the backlog.
 
-**Audits** (`audit.ts`) run for each Region over everything in it. Members do not say which VPC a node is in, so a
+**Audits** (`Audit.ts`) run for each Region over everything in it. Members do not say which VPC a node is in, so a
 quota counted per VPC is checked per VPC only where a VPC's own settings decide it (its subnet plan). Interface
 endpoints per VPC use the strongest check that is certain without that knowledge: more than quota times the number
 of VPCs. NAT gateways per zone are counted per Region and zone, which is how AWS counts them for an account.
@@ -185,7 +185,7 @@ They are warnings, not errors: the design still runs, the numbers AWS would refu
   connection limit.
 - **VPC endpoint**: the same, with the output "Service" pointing at the AWS service (S3, DynamoDB, SQS, ...).
 - **Typical wiring**: Lambda -> NAT gateway -> HTTP endpoint (the internet); Lambda -> gateway endpoint -> S3.
-- **CloudFormation import** (`importers/cloudformation/vpc.ts`): `AWS::EC2::VPC` -> `aws.vpc` with `cidrPrefix` from
+- **CloudFormation import** (`importers/internal/cloudformation/vpc.ts`): `AWS::EC2::VPC` -> `aws.vpc` with `cidrPrefix` from
   `CidrBlock` (an IPAM-allocated block, unknown until deploy, keeps the default and is listed under unresolved), inside
   the stack's Region box. `AWS::EC2::Subnet` -> not a node: it joins its VPC's subnet plan and `subnets` is enabled,
   with `availabilityZones` the number of distinct `AvailabilityZone` values, `subnetsPerZone` the most in any zone, and
@@ -215,7 +215,7 @@ They are warnings, not errors: the design still runs, the numbers AWS would refu
 | `bytes` | NAT gateway, endpoint | rate | Bytes carried, requests only (BytesOutToDestination and BytesInFromSource; BytesProcessed) |
 
 The endpoint's `in` and `inflight` (the framework's) stand for an interface endpoint's NewConnections and ActiveConnections.
-AWS publishes no metrics for gateway endpoints. The dashboards (`dashboard.ts`) chart these as CloudWatch does, with the
+AWS publishes no metrics for gateway endpoints. The dashboards (`internal/dashboard.ts`) chart these as CloudWatch does, with the
 NAT gateway's ports used to its busiest destination (`busiestDestination` over `portLimit`) to read them against.
 
 Probe state: **VPC**: `addresses`, `usablePerSubnet`, `subnets`, `usableAddresses`. **NAT gateway**: `connections`,
